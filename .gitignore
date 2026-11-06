@@ -8,3 +8,13 @@ sources/
 web/fx/assets/
 node_modules/
 .fx-render-cache/
+
+# Agent work records are kept in a private archive, not in public repos.
+.claude/plans/
+.claude/handoffs/
+.codex/plans/
+.codex/receipts/
+.gemini/plans/
+.gemini/handoffs/
+.conductor/
+.specstory/
