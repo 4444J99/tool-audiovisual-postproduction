@@ -1,5 +1,0 @@
-# Native Message impact comparison
-
-Implement the approved source/expression comparison in a separate TouchDesigner component. Preserve the existing source and artist-edited network. Import the existing message-impact JSON and existing cue/region evidence; the original paired camera audio is an explicitly recorded substitution for the unavailable exact dialogue reference. Native GPU history and realtime CHOP processing implement routing, echo, displacement and typography. Keep original source time, a proportional unobscured full-frame anchor, finite histories, bypass, wet/dry, reset and scoped transport. Check actual moving frames, audio samples, clears, neutral output and preservation. Performed-language qualification and artistic acceptance remain human review; never mark them passed from technical checks. No source overwrite, project save/reload, media publication or offline rendering.
-
-Own code here in the postproduction repository. Retain this checkout for disk-synced native code. Carry thirteen processors, six patches, sound/color, fields, independent clocks and generation forward; this is the first native slice, not whole-system parity.
