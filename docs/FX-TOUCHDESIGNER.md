@@ -73,8 +73,10 @@ From the rack (TouchDesigner OSC In), sent when the link opens, on `/fx/sync`, a
 so no address segment holds a character OSC reserves. Unknown addresses, wrong argument types and ids that do not exist
 are ignored; they never reach the rack and never close the link.
 
-Echo: sending a value back to the rack that it just reported changes nothing (equal values are skipped, and both sides
-use the same scale), so wiring TouchDesigner's output to its own input settles instead of looping.
+Echo: a value that only repeats what the rack just reported (within 0.0002 of the current position on the normalised
+scale, the 4-decimal and float32 precision of the report) is not an edit, so wiring TouchDesigner's output to its own
+input settles instead of looping, and an off-grid preset or automation value is not snapped onto the step grid by its own
+report. Moves smaller than that are below the resolution of the report and are ignored.
 
 ## TouchDesigner side
 

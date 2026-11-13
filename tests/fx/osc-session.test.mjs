@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {oscSession, freshPatch, CATALOG_BY_TYPE} from './runtime.mjs';
 
-const {OscSession, checkBridgeUrl, DEFAULT_BRIDGE_URL} = oscSession;
+const {OscSession, checkBridgeUrl, DEFAULT_BRIDGE_URL, updateOscPrefs} = oscSession;
 
 class FakeSocket {
   static instances = [];
@@ -175,4 +175,18 @@ test('a constructor that throws is retried rather than crashing the page', () =>
   assert.equal(statuses.at(-1).state, 'retrying');
   assert.match(statuses.at(-1).detail, /blocked by policy/);
   assert.equal(timers.delays().length, 1);
+});
+
+test('saved OSC preferences merge: a feedback change keeps the url and connect choice and other preferences', () => {
+  let saved = {connect: true, osc: {url: 'ws://127.0.0.1:9120/', connect: true, feedback: true}};
+  const storage = {get: () => structuredClone(saved), set: value => {saved = structuredClone(value);}};
+  updateOscPrefs(storage, {feedback: false});
+  assert.deepEqual(saved, {connect: true, osc: {url: 'ws://127.0.0.1:9120/', connect: true, feedback: false}});
+  updateOscPrefs(storage, {connect: false});
+  assert.deepEqual(saved.osc, {url: 'ws://127.0.0.1:9120/', connect: false, feedback: false});
+  saved = {};
+  updateOscPrefs(storage, {url: 'ws://x/', connect: true, feedback: true});
+  assert.deepEqual(saved, {osc: {url: 'ws://x/', connect: true, feedback: true}});
+  assert.doesNotThrow(() => updateOscPrefs(undefined, {feedback: false}));
+  assert.doesNotThrow(() => updateOscPrefs({get() {throw Error('blocked');}, set() {}}, {feedback: false}));
 });

@@ -8,7 +8,7 @@ import {
   ControllerMap, parseMidi, describeControls, findControl, normToValue, valueToNorm, formatValue,
   defaultTemplate, describeSource, GLOBAL_ACTIONS, SELECTED, MAX_BINDINGS,
 } from './controller-map.mjs';
-import {OscSession, DEFAULT_BRIDGE_URL} from './osc-session.mjs';
+import {OscSession, DEFAULT_BRIDGE_URL, updateOscPrefs} from './osc-session.mjs';
 
 const escapeHTML = text => String(text).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
 const GLOBAL_LABELS = {play: 'Play', record: 'Record', loop: 'Loop'};
@@ -188,12 +188,12 @@ export function mountSurface(root, host, {request = globalThis.navigator?.reques
   };
   function toggleOsc() {
     const input = $('.cs-osc-url');
-    if (osc?.wanted) {osc.disconnect(); host.storage?.set({...host.storage.get(), osc: {url: input.value, connect: false, feedback: osc.feedbackOn}}); return;}
+    if (osc?.wanted) {osc.disconnect(); updateOscPrefs(host.storage, {url: input.value, connect: false, feedback: osc.feedbackOn}); return;}
     osc ??= new OscSession(host, {WebSocketImpl, onStatus: oscStatus});
     try {
       osc.setFeedback($('[data-act=osc-feedback]').checked);
       osc.connect(input.value);
-      host.storage?.set({...host.storage.get(), osc: {url: input.value, connect: true, feedback: osc.feedbackOn}});
+      updateOscPrefs(host.storage, {url: input.value, connect: true, feedback: osc.feedbackOn});
     } catch (error) {$('.cs-osc-status').textContent = error.message;}
     update();
   }
@@ -319,7 +319,7 @@ export function mountSurface(root, host, {request = globalThis.navigator?.reques
     }
   }
 
-  root.querySelector('[data-act=osc-feedback]').addEventListener('change', event => {osc?.setFeedback(event.target.checked);});
+  root.querySelector('[data-act=osc-feedback]').addEventListener('change', event => {osc?.setFeedback(event.target.checked); updateOscPrefs(host.storage, {feedback: event.target.checked});});
   root.querySelector('.cs-import').addEventListener('change', async event => {
     const file = event.target.files[0]; event.target.value = '';
     if (!file) return;

@@ -25,6 +25,12 @@ export function checkBridgeUrl(text) {
   return url.href;
 }
 
+/** Merge a change into the saved `osc` preferences without disturbing the other saved preferences. */
+export function updateOscPrefs(storage, change) {
+  if (!storage) return;
+  try {storage.set({...storage.get(), osc: {...storage.get().osc, ...change}});} catch {/* storage is optional */}
+}
+
 function parseFrame(data) {
   if (typeof data !== 'string' || data.length > MAX_FRAME_CHARS) return null;
   let value;

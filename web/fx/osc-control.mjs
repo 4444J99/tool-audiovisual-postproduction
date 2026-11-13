@@ -28,6 +28,8 @@ export const OSC_ROOT = 'fx';
 const SAFE = /[A-Za-z0-9_.-]/;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder('utf-8', {fatal: true});
+/** Reported values carry 4 decimals and travel as float32; anything this close to the current value is an echo. */
+export const ECHO_TOLERANCE = 2e-4;
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 
 /** Encode one address segment so it holds no OSC-reserved character. */
@@ -95,6 +97,9 @@ export function interpretOsc(message, view) {
     } else {
       const norm = normalised(args);
       if (norm === null) return ignore();
+      // A value that merely echoes what the rack reported (4 decimals, float32 on the wire) is not an edit:
+      // off-grid presets and automation values must not be snapped onto the step grid by their own report.
+      if (Math.abs(norm - valueToNorm(control, current)) <= ECHO_TOLERANCE) return result;
       const value = normToValue(control, norm);
       if (value !== current) result.actions.push({nodeId, path: control.path, value, binding: 'osc'});
     }

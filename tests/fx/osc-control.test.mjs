@@ -177,3 +177,29 @@ test('a moved processor parameter is reported on the same normalised scale Touch
   // Feeding the echo back changes nothing, so a wired-up loop settles.
   assert.deepEqual(interpretOsc(osc(message.address, message.args[0]), view).actions, []);
 });
+
+test('echoing a reported value back never edits the rack, even for off-grid values', () => {
+  const {view, node, values} = rig('delay');
+  const feedback = new OscFeedback();
+  feedback.collect(view);
+  const {ranges} = controller.describeControls(node, view);
+  ranges.forEach((control, index) => {
+    // Presets and automation need not lie on the step grid, and float32 transport adds its own error.
+    for (const fraction of [0.37, 0.5, 0.9]) {
+      const offGrid = control.min + (control.max - control.min) * fraction + (control.step || 0) * 0.31;
+      const value = Math.min(control.max, offGrid);
+      values.set(`${node.id}|${control.path}`, value);
+      const [reported] = feedback.collect(view);
+      const wire = Math.fround(reported.args[0]);
+      assert.deepEqual(interpretOsc(osc(`/fx/selected/knob/${index}`, wire), view).actions, [], `${control.path} at ${value}`);
+    }
+  });
+});
+
+test('a real move goes through, while one inside the echo tolerance does not', () => {
+  const {view, node} = rig('delay');
+  const intensity = controller.describeControls(node, view).ranges[0];
+  const norm = controller.valueToNorm(intensity, view.current(node.id, 'intensity'));
+  assert.equal(interpretOsc(osc('/fx/selected/knob/0', norm + oscControl.ECHO_TOLERANCE / 2), view).actions.length, 0);
+  assert.equal(interpretOsc(osc('/fx/selected/knob/0', Math.min(1, norm + 0.02)), view).actions.length, norm + 0.02 <= 1 ? 1 : 0);
+});
