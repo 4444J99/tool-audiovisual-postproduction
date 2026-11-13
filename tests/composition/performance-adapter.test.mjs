@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {PerformancePlayer, RuntimeSupervisor, referenceGeometry, preparePerformanceAudio,audioVariantKey} from '../../web/studies/performance-adapter.mjs';
 
-const fixture = JSON.parse(execFileSync(process.env.PYTHON || '/usr/local/bin/python3', ['-c', `
+const fixture = JSON.parse(execFileSync(process.env.PYTHON || 'python3', ['-c', `
 import json,sys
 sys.path.insert(0,'tests')
 from composition.fixtures import record
