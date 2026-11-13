@@ -8,7 +8,7 @@ import {loadPreparedFiles,verifyRetainedEngine,verifyWavHeader} from '../../web/
 import {encodeWav} from '../../web/fx/audio-engine.mjs';
 import {VisualEngine} from '../../web/fx/visual-engine.mjs';
 
-const base=JSON.parse(execFileSync(process.env.PYTHON||'/usr/local/bin/python3',['-c',"import json;from tests.composition.fixtures import record;print(json.dumps(record().to_dict()))"],{cwd:new URL('../..',import.meta.url),encoding:'utf8'}));
+const base=JSON.parse(execFileSync(process.env.PYTHON||'python3',['-c',"import json;from tests.composition.fixtures import record;print(json.dumps(record().to_dict()))"],{cwd:new URL('../..',import.meta.url),encoding:'utf8'}));
 function context(){return {currentTime:0,destination:{},resume:async()=>{},createBuffer(channels,length,sampleRate){const data=Array.from({length:channels},()=>new Float32Array(length));return {numberOfChannels:channels,length,sampleRate,copyToChannel:(a,c)=>data[c].set(a),getChannelData:c=>data[c]};},createBufferSource(){return {playbackRate:{value:1},connect(){},disconnect(){},start(){},stop(){}};},createGain(){return {gain:{setValueAtTime(){}},connect(){},disconnect(){}};}};}
 async function fixture(){const record=structuredClone(base);Object.assign(record.runtime.profile,{admitted:true,byte_caps:{decoded_audio_bytes:100000000,texture_bytes:100000000,event_history_bytes:1000000}});
   const canvas=createCanvas(120,1),ctx=canvas.getContext('2d');ctx.fillStyle='#ff0000';ctx.fillRect(0,0,120,1);ctx.fillStyle='#0000ff';ctx.fillRect(10,0,1,1);
@@ -45,7 +45,7 @@ test('changed bytes, absent files, duplicate basenames and cancellation fail clo
   const delayed=new AbortController();let closed=0;await assert.rejects(()=>loadPreparedFiles(record,files,context(),{signal:delayed.signal,decodeImage:async()=>{delayed.abort();return {width:120,height:1,close(){closed++;}};}}),/abort/i);assert.ok(closed>0,'late decoded image is released');
 });
 test('retained engine readback agrees with the actual installed CLI identity',async()=>{
-  const record=structuredClone(base);record.runtime.engine_sha256=execFileSync(process.env.PYTHON||'/usr/local/bin/python3',['-c','from amp.composition.performance_cli import retained_engine_identity;print(retained_engine_identity())'],{cwd:new URL('../..',import.meta.url),encoding:'utf8'}).trim();
+  const record=structuredClone(base);record.runtime.engine_sha256=execFileSync(process.env.PYTHON||'python3',['-c','from amp.composition.performance_cli import retained_engine_identity;print(retained_engine_identity())'],{cwd:new URL('../..',import.meta.url),encoding:'utf8'}).trim();
   const fetcher=async url=>({ok:true,arrayBuffer:async()=>{const data=await readFile(url);return data.buffer.slice(data.byteOffset,data.byteOffset+data.byteLength);}});
   assert.equal(await verifyRetainedEngine(record,fetcher),record.runtime.engine_sha256);record.runtime.engine_sha256='0'.repeat(64);await assert.rejects(()=>verifyRetainedEngine(record,fetcher),/different/);
 });
