@@ -18,6 +18,8 @@ export const workbench = await import(new URL('workbench-state.mjs', rootURL));
 export const visual = await import(new URL('visual-engine.mjs', rootURL));
 export const preview = await import(new URL('preview-key.mjs', rootURL));
 export const controller = await import(new URL('controller-map.mjs', rootURL));
+export const oscControl = await import(new URL('osc-control.mjs', rootURL));
+export const oscSession = await import(new URL('osc-session.mjs', rootURL));
 export const {
   CATALOG, CATALOG_BY_TYPE, PATCH_CATALOG, createModule, createPatch, createSingleModulePatch,
   validatePatch, evaluateAutomation, evaluatedNode, topologicalOrder, buildSerialConnections, clonePatch,

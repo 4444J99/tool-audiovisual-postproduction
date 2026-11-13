@@ -322,7 +322,7 @@ const controllerMap=(()=>{try{const saved=JSON.parse(localStorage.getItem(CONTRO
 const gestures=new GestureTracker(600);let surface=null;
 function controllerView(){
   const t=position();
-  return {nodes:state.patch.nodes.filter(isFX),selectedId:state.selected,duration:media.duration,
+  return {nodes:state.patch.nodes.filter(isFX),selectedId:state.selected,duration:media.duration,time:t,
     current(id,path){const n=state.patch.nodes.find(n=>n.id===id);if(!n)return 0;if(path==='bypass'||path==='solo')return !!toggleValue(n,path,t,state.patch);const e=evaluatedNode(n,t,state.patch);return path.startsWith('params.')?e.params[path.slice(7)]:e[path];},
     global:name=>name==='play'?state.playing||state.playPending:name==='record'?state.recording:name==='loop'?state.loop:false};
 }
@@ -350,6 +350,7 @@ const surfaceHost={
   endGesture:key=>gestures.end(key),
   save(){try{localStorage.setItem(CONTROLLER_MAP_KEY,JSON.stringify(controllerMap));}catch{/* Export keeps the map portable. */}},
   select(delta){const fx=state.patch.nodes.filter(isFX);if(!fx.length)return;const i=Math.max(0,fx.findIndex(n=>n.id===state.selected));state.selected=fx[(i+delta+fx.length)%fx.length].id;renderUI();},
+  selectNode(id){if(state.patch.nodes.some(n=>n.id===id&&isFX(n))&&state.selected!==id){state.selected=id;renderUI();}},
   storage:{get(){try{return JSON.parse(localStorage.getItem(CONTROLLER_PREFS_KEY))||{};}catch{return {};}},set(value){try{localStorage.setItem(CONTROLLER_PREFS_KEY,JSON.stringify(value));}catch{/* Optional convenience. */}}},
 };
 

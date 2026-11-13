@@ -3,9 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": {"node": ">=20"},
+  "engines": {"node": ">=22"},
   "scripts": {
     "test": "node --test tests/fx/*.test.mjs tests/room-tone-*.test.mjs && node tests/score.test.mjs",
+    "bridge:td": "node tools/fx-td-bridge.mjs",
     "render:fx": "node tools/render-fx.mjs",
     "render:factory": "node tools/render-factory.mjs"
   },

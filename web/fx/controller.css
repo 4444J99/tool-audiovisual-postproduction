@@ -43,3 +43,8 @@
 .cs-empty{font-size:.75rem;color:var(--muted,#a0a5a8);line-height:1.5}
 @media(max-width:800px){.cs-knob-face{width:72px;height:72px}.cs-fader-track{height:150px}.cs-knobs{grid-template-columns:repeat(auto-fill,minmax(84px,1fr))}.cs-midi-row button,.cs-midi-row .button{min-height:44px}}
 @media(prefers-reduced-motion:no-preference){.cs-arc-value,.cs-fader-fill{transition:none}}
+
+/* TouchDesigner (OSC) bridge link */
+.cs-osc-url { flex: 1 1 14rem; min-width: 0; font: inherit; padding: .4rem .55rem; border: 1px solid var(--line, currentColor); border-radius: 6px; background: transparent; color: inherit; }
+.cs-osc-feedback { display: inline-flex; align-items: center; gap: .35rem; font-size: .85em; }
+.cs-osc-status { margin: .4rem 0 0; font-size: .85em; opacity: .85; overflow-wrap: anywhere; }
