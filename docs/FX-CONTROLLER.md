@@ -29,20 +29,22 @@ binding mode `relative` in an imported map.
 
 **Soft takeover.** An absolute hardware control is ignored until it reaches or crosses the on-screen value, so a physical
 knob that disagrees with the rack never makes the value jump. The control shows "Move hardware to N% to take over".
-Takeover restarts when the selection changes, after a touch edit, or whenever the value is changed from elsewhere (a rack slider, preset, undo or automation) after the knob last wrote it. Relative encoders accumulate fractional ticks, so one-tick turns still move coarse stepped parameters.
+Takeover restarts when the selection or patch changes, after a touch edit, or whenever the value is changed from elsewhere (a rack slider, preset, undo or automation) after the knob last wrote it. Relative encoders accumulate fractional ticks, so one-tick turns still move coarse stepped parameters.
 
 ## Behaviour inside the rack
 
-Every change, from touch or MIDI, goes through the workbench's own parameter setter, so it is recorded when
-**Record controls** is on, remembered as the processor's custom setting, and rendered like a mouse edit. One undo
-entry covers a whole gesture (a stream of messages with pauses under 600 ms), not each message. Hardware play requests
+Every processor change (faders, knobs, Bypass, Solo), from touch or MIDI, goes through the workbench's own parameter
+setter, so it is recorded when **Record controls** is on, remembered as the processor's custom setting, and rendered like
+a mouse edit. One undo entry covers a whole gesture: a touch drag for as long as the pointer is down, or a stream of
+MIDI messages with pauses under 600 ms; never one entry per message. Play, Record and Loop are transport switches: they
+click the workbench's own buttons, are not recorded as processor changes and have no undo entry. Hardware play requests
 may be refused by the browser's audio policy until the page has had a click or key press.
 
 ## Persistence and portability
 
 Mappings are a per-user device convenience: they are kept in the browser's local storage (best effort) and are **not**
 part of a portable patch. **Export map** and **Import map** move them as `fx.controller-map.v1` JSON. Imports are strictly
-validated: version, at most 128 bindings, known source types, channel 0–16 and number 0–127, known parameter paths,
+validated: version, at most 128 bindings, known source types, channel 0–16 and number 0–127, parameter paths of a valid form (a path for a parameter the processor lacks is accepted and simply does nothing),
 modes that match the target type, and a 200 KB size limit. An invalid file changes nothing.
 
 ## Source

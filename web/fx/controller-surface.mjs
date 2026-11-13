@@ -69,7 +69,7 @@ export function mountSurface(root, host, {request = globalThis.navigator?.reques
     <div class="cs-midi">
       <div class="cs-midi-row"><button type="button" class="toggle" data-act="connect">Connect MIDI</button><button type="button" class="toggle" data-act="learn" aria-pressed="false">MIDI learn</button><button type="button" data-act="template">Load template</button></div>
       <p class="cs-status" role="status"></p>
-      <details><summary>Mappings</summary><div class="cs-midi-row"><button type="button" data-act="clear">Clear mappings</button><button type="button" data-act="export">Export map</button><label class="button cs-import">Import map<input type="file" accept="application/json,.json" hidden></label></div><ul class="cs-bindings"></ul></details>
+      <details><summary>Mappings</summary><div class="cs-midi-row"><button type="button" data-act="clear">Clear mappings</button><button type="button" data-act="export">Export map</button><button type="button" data-act="import">Import map</button><input class="cs-import" type="file" accept="application/json,.json" hidden></div><ul class="cs-bindings"></ul></details>
     </div>`;
   const $ = selector => root.querySelector(selector);
   const strip = $('.cs-strip'), transport = $('.cs-transport'), statusLine = $('.cs-status');
@@ -227,7 +227,9 @@ export function mountSurface(root, host, {request = globalThis.navigator?.reques
     const element = event.target.closest('.cs-ctl');
     if (!element) return;
     const view = host.getView(), control = controlFor(view, element);
-    if (!control || control.kind === 'toggle') return;
+    if (!control) return;
+    if (learnMode && (event.key === 'Enter' || event.key === ' ') && control.kind !== 'toggle') {event.preventDefault(); arm(slotTarget(view, control)); return;}
+    if (control.kind === 'toggle') return;
     const stepsPerKey = {ArrowUp: 1, ArrowRight: 1, ArrowDown: -1, ArrowLeft: -1, PageUp: 10, PageDown: -10}[event.key];
     const current = currentOf(view, control);
     let next;
@@ -253,9 +255,10 @@ export function mountSurface(root, host, {request = globalThis.navigator?.reques
       return;
     }
     const button = element && element.querySelector('.cs-switch');
-    if (button && event.target.closest('.cs-switch') && !learnMode) {
+    if (button && event.target.closest('.cs-switch')) {
       const control = controlFor(view, element);
-      if (control) change(control, !currentOf(view, control));
+      if (!control) return;
+      if (learnMode) arm(slotTarget(view, control)); else change(control, !currentOf(view, control));
       return;
     }
     const act = event.target.closest('[data-act]')?.dataset.act;
@@ -280,6 +283,7 @@ export function mountSurface(root, host, {request = globalThis.navigator?.reques
       for (const binding of defaultTemplate()) controller.bind(binding);
       host.save(); setStatus('Template loaded: CC 20–27 on any channel drive the eight controls of the selected processor, notes 36–40 switch Bypass, Solo, Play, Record and Loop.'); update();
     } else if (name === 'clear') {controller.clear(); host.save(); setStatus('All mappings cleared.'); update();}
+    else if (name === 'import') root.querySelector('.cs-import').click();
     else if (name === 'export') {
       const blob = new Blob([JSON.stringify(controller.toJSON(), null, 2)], {type: 'application/json'});
       const url = URL.createObjectURL(blob), a = document.createElement('a');
@@ -287,7 +291,7 @@ export function mountSurface(root, host, {request = globalThis.navigator?.reques
     }
   }
 
-  root.querySelector('.cs-import input').addEventListener('change', async event => {
+  root.querySelector('.cs-import').addEventListener('change', async event => {
     const file = event.target.files[0]; event.target.value = '';
     if (!file) return;
     try {

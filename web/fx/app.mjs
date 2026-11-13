@@ -31,6 +31,7 @@ function validate(patch){const result=validatePatch(patch,{source:sourceBinding,
 function setPatch(patch,{stash=true,seek=true}={}){
   patch=normalizeWorkbenchPatch(patch,{source:sourceBinding,regions:assets.regions.items.map(r=>r.id),duration:media.duration});
   validate(patch);if(stash&&state.patch){snapshot();state.saved[state.patch.id]=clonePatch(state.patch);}
+  controllerMap.resetPickup();
   const wasPlaying=state.playing||state.playPending;pause();state.patch=patch;state.selected=patch.nodes.find(isFX)?.id;state.recording=false;
   if(seek)state.position=0;state.bypass=false;$('bypass').classList.remove('on');$('bypass').setAttribute('aria-pressed','false');
   renderUI();invalidate();status(patch.metadata?.description||'Adjust a processor, or play its extreme demonstration.');
