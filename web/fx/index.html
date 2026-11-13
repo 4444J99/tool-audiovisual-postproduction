@@ -7,6 +7,7 @@
   <title>god-here · Audiovisual FX rack</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%23dbfb65' d='M0 0h32v32H0z'/%3E%3Cpath stroke='%23101113' stroke-width='3' d='M8 7v18m8-18v18m8-18v18M4 13h8m0 6h8m0-8h8'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="workbench.css">
+  <link rel="stylesheet" href="controller.css">
 </head>
 <body>
   <header class="masthead">
@@ -43,7 +44,7 @@
       <p class="source-note">Dialogue candidate and moving masks are workprints. The audio is a shared recording; word cues are machine cross-checked. <button id="source-details" class="text-button">Source details</button></p>
     </section>
     <aside class="rack-column" aria-label="FX rack and routing">
-      <nav class="tabs" aria-label="Workbench panels"><button data-tab="rack" class="active">Rack</button><button data-tab="routing">Connections</button><button data-tab="automation">Automation</button><button data-tab="source">Source</button></nav>
+      <nav class="tabs" aria-label="Workbench panels"><button data-tab="rack" class="active">Rack</button><button data-tab="routing">Connections</button><button data-tab="control">Control</button><button data-tab="automation">Automation</button><button data-tab="source">Source</button></nav>
       <section id="tab-rack" class="tab-panel">
         <div class="rack-toolbar"><span id="rack-count">3 inserts</span><select id="add-module" aria-label="Add an FX module"><option value="">Add processor…</option></select></div>
         <div id="rack"></div>
@@ -56,6 +57,9 @@
         <form id="connection-form" class="connection-form"><label>From<select id="connect-from"></select></label><label>To<select id="connect-to"></select></label><label>Signal<select id="connect-port"><option>audio</option><option>picture</option><option>text</option><option>matte</option><option>control</option></select></label><label>Role<select id="connect-role"><option>insert</option><option>send</option><option>return</option><option>sidechain</option></select></label><label>Gain<input id="connect-gain" type="number" min="0" max="4" step="0.05" value="1"></label><button class="accent" type="submit">Connect</button></form>
         <div class="panel-actions"><button id="add-mix">Add mix bus</button><button id="serial">Make serial chain</button></div>
         <p id="route-error" class="error" role="alert"></p>
+      </section>
+      <section id="tab-control" class="tab-panel" hidden>
+        <div id="control-surface" class="control-surface"></div>
       </section>
       <section id="tab-automation" class="tab-panel" hidden>
         <h2>Replayable changes</h2><p class="panel-copy">Record control changes against the output clock, or edit a curve. Every saved patch contains its seed, routing, curves, and recorded events.</p>
