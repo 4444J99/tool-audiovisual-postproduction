@@ -12,6 +12,9 @@ from amp.studies.surface_atlas import (
 )
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
 class SurfaceAtlasTests(unittest.TestCase):
     def setUp(self):
         self.valid_atlas_spec = {
@@ -32,7 +35,7 @@ class SurfaceAtlasTests(unittest.TestCase):
             },
         }
 
-        transfers_path = Path("/Users/4jp/Workspace/.wt-amp-foundation/compositions/comp-001/studies/w02/transfers.json")
+        transfers_path = REPO_ROOT / "compositions/comp-001/studies/w02/transfers.json"
         self.transfers_data = json.loads(transfers_path.read_text())
 
     def test_validate_canonical_surface_valid(self):

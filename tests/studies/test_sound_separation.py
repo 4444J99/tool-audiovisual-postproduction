@@ -12,6 +12,9 @@ from amp.studies.sound_separation import (
 )
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
 class SoundSeparationTests(unittest.TestCase):
     def setUp(self):
         self.timebase = Timebase(30, 1)
@@ -27,10 +30,10 @@ class SoundSeparationTests(unittest.TestCase):
             composition_id="comp-001",
         )
 
-        prompts_path = Path("/Users/4jp/Workspace/.wt-amp-foundation/compositions/comp-001/studies/w01/prompts.json")
+        prompts_path = REPO_ROOT / "compositions/comp-001/studies/w01/prompts.json"
         self.prompts_bundle = json.loads(prompts_path.read_text())
 
-        palette_path = Path("/Users/4jp/Workspace/.wt-amp-foundation/compositions/comp-001/studies/w01/palette.json")
+        palette_path = REPO_ROOT / "compositions/comp-001/studies/w01/palette.json"
         self.palette_data = json.loads(palette_path.read_text())
 
     def test_run_sound_separation_valid_prompts(self):
