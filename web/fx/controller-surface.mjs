@@ -8,6 +8,7 @@ import {
   ControllerMap, parseMidi, describeControls, findControl, normToValue, valueToNorm, formatValue,
   defaultTemplate, describeSource, GLOBAL_ACTIONS, SELECTED, MAX_BINDINGS,
 } from './controller-map.mjs';
+import {OscSession, DEFAULT_BRIDGE_URL} from './osc-session.mjs';
 
 const escapeHTML = text => String(text).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
 const GLOBAL_LABELS = {play: 'Play', record: 'Record', loop: 'Loop'};
@@ -53,12 +54,13 @@ function knobHTML(control) {
 /**
  * host: {
  *   controller: ControllerMap, getView(): view, apply(action), gesture(key), save(), toast(text), select(delta),
- *   storage?: {get(), set(value)}
+ *   selectNode(id), storage?: {get(), set(value)}
  * }
+ * The TouchDesigner link (OSC through tools/fx-td-bridge.mjs) shares host.apply with touch and MIDI.
  */
-export function mountSurface(root, host, {request = globalThis.navigator?.requestMIDIAccess?.bind(globalThis.navigator)} = {}) {
+export function mountSurface(root, host, {request = globalThis.navigator?.requestMIDIAccess?.bind(globalThis.navigator), WebSocketImpl = globalThis.WebSocket} = {}) {
   const controller = host.controller;
-  let midi = null, learnMode = false, layoutKey = '', lastBindings = '';
+  let midi = null, learnMode = false, layoutKey = '', lastBindings = '', osc = null;
   const dragging = new Set();
   const waiting = new Map();
 
@@ -69,6 +71,10 @@ export function mountSurface(root, host, {request = globalThis.navigator?.reques
     <div class="cs-midi">
       <div class="cs-midi-row"><button type="button" class="toggle" data-act="connect">Connect MIDI</button><button type="button" class="toggle" data-act="learn" aria-pressed="false">MIDI learn</button><button type="button" data-act="template">Load template</button></div>
       <p class="cs-status" role="status"></p>
+      <details class="cs-osc"><summary>TouchDesigner (OSC)</summary>
+        <div class="cs-midi-row"><input class="cs-osc-url" type="text" inputmode="url" spellcheck="false" aria-label="Bridge address" value="${DEFAULT_BRIDGE_URL}"><button type="button" class="toggle" data-act="osc-connect" aria-pressed="false">Connect bridge</button><label class="cs-osc-feedback"><input type="checkbox" data-act="osc-feedback" checked> Send rack state back</label></div>
+        <p class="cs-osc-status" role="status"></p>
+      </details>
       <details><summary>Mappings</summary><div class="cs-midi-row"><button type="button" data-act="clear">Clear mappings</button><button type="button" data-act="export">Export map</button><button type="button" data-act="import">Import map</button><input class="cs-import" type="file" accept="application/json,.json" hidden></div><ul class="cs-bindings"></ul></details>
     </div>`;
   const $ = selector => root.querySelector(selector);
@@ -169,6 +175,27 @@ export function mountSurface(root, host, {request = globalThis.navigator?.reques
     $('[data-act=learn]').setAttribute('aria-pressed', String(learnMode));
     $('[data-act=connect]').setAttribute('aria-pressed', String(Boolean(midi)));
     $('[data-act=connect]').textContent = midi ? 'MIDI connected' : 'Connect MIDI';
+    const linked = Boolean(osc) && osc.wanted;
+    $('[data-act=osc-connect]').setAttribute('aria-pressed', String(linked));
+    $('[data-act=osc-connect]').textContent = linked ? 'Disconnect bridge' : 'Connect bridge';
+  }
+
+  const oscStatus = ({state, detail, received, sent, bridge}) => {
+    const text = {off: 'Not connected.', connecting: `Connecting to ${detail}…`, open: `Connected to ${detail}${bridge ? ` · bridge v${bridge.version}, TouchDesigner at ${bridge.touchdesigner?.host}:${bridge.touchdesigner?.port}` : ''}. Received ${received}, sent ${sent}.`,
+      retrying: detail, unsupported: detail}[state] || '';
+    $('.cs-osc-status').textContent = text;
+    update();
+  };
+  function toggleOsc() {
+    const input = $('.cs-osc-url');
+    if (osc?.wanted) {osc.disconnect(); host.storage?.set({...host.storage.get(), osc: {url: input.value, connect: false, feedback: osc.feedbackOn}}); return;}
+    osc ??= new OscSession(host, {WebSocketImpl, onStatus: oscStatus});
+    try {
+      osc.setFeedback($('[data-act=osc-feedback]').checked);
+      osc.connect(input.value);
+      host.storage?.set({...host.storage.get(), osc: {url: input.value, connect: true, feedback: osc.feedbackOn}});
+    } catch (error) {$('.cs-osc-status').textContent = error.message;}
+    update();
   }
 
   // Touch and pointer interaction ---------------------------------------------------
@@ -278,6 +305,7 @@ export function mountSurface(root, host, {request = globalThis.navigator?.reques
 
   function action(name) {
     if (name === 'connect') {if (!midi) connect(); else setStatus('MIDI is connected.');}
+    else if (name === 'osc-connect') toggleOsc();
     else if (name === 'learn') {learnMode = !learnMode; controller.cancelLearn(); setStatus(learnMode ? 'Tap a control on screen, then move the hardware control to bind it.' : ''); update();}
     else if (name === 'template') {
       for (const binding of defaultTemplate()) controller.bind(binding);
@@ -291,6 +319,7 @@ export function mountSurface(root, host, {request = globalThis.navigator?.reques
     }
   }
 
+  root.querySelector('[data-act=osc-feedback]').addEventListener('change', event => {osc?.setFeedback(event.target.checked);});
   root.querySelector('.cs-import').addEventListener('change', async event => {
     const file = event.target.files[0]; event.target.value = '';
     if (!file) return;
@@ -323,5 +352,12 @@ export function mountSurface(root, host, {request = globalThis.navigator?.reques
 
   update();
   try {if (host.storage?.get().connect && request) connect();} catch {/* storage is optional */}
-  return {update, handle, learning: () => learnMode, destroy() {midi?.close();}};
+  try {
+    const saved = host.storage?.get().osc;
+    if (saved && typeof saved.url === 'string') {
+      $('.cs-osc-url').value = saved.url; $('[data-act=osc-feedback]').checked = saved.feedback !== false;
+      if (saved.connect && WebSocketImpl) toggleOsc();
+    }
+  } catch {/* storage is optional */}
+  return {update, handle, learning: () => learnMode, osc: () => osc, destroy() {midi?.close(); osc?.disconnect();}};
 }

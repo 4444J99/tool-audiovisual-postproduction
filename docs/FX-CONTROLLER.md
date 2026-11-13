@@ -40,6 +40,11 @@ MIDI messages with pauses under 600 ms; never one entry per message. Play, Recor
 click the workbench's own buttons, are not recorded as processor changes and have no undo entry. Hardware play requests
 may be refused by the browser's audio policy until the page has had a click or key press.
 
+## TouchDesigner (OSC)
+
+The same rack can be driven from, and report to, TouchDesigner through a local bridge; see
+[FX-TOUCHDESIGNER.md](FX-TOUCHDESIGNER.md). Those controls meet the same setter and undo grouping as touch and MIDI.
+
 ## Persistence and portability
 
 Mappings are a per-user device convenience: they are kept in the browser's local storage (best effort) and are **not**
