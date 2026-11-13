@@ -7,6 +7,8 @@ import {signalSignature} from './preview-key.mjs';
 import {readAsset} from './asset-loader.mjs';
 import {compatiblePreviewEntries} from './preview-provenance.mjs';
 import {assetPackIdentity} from './asset-pack.mjs';
+import {ControllerMap, GestureTracker} from './controller-map.mjs';
+import {mountSurface} from './controller-surface.mjs';
 
 const $=id=>document.getElementById(id);
 const escape=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -54,7 +56,7 @@ function renderUI(){
   $('add-module').innerHTML='<option value="">Add processor…</option>'+CATALOG.map(c=>`<option value="${c.type}">${c.code} ${escape(c.name)}</option>`).join('');
   $('rack-count').textContent=`${state.patch.nodes.filter(isFX).length} inserts · ${state.patch.nodes.filter(n=>n.type==='mix').length} buses`;
   $('seed').value=state.patch.seed;$('word-mode').value=state.patch.metadata.wordMode||'cues';$('authored-words').value=state.patch.metadata.words||'HOW WHY WHAT';
-  renderRack();renderConnections();renderAutomation();updateTransport();
+  renderRack();renderConnections();renderAutomation();updateTransport();surface?.update();
 }
 function regionOptions(value){return `<option value="all" ${value==='all'?'selected':''}>All addresses</option>`+assets.regions.items.map(r=>`<option value="${r.id}" ${r.id===value?'selected':''}>${escape(human(r.id))}${r.labelValue?'':' · rectangle'}</option>`).join('');}
 function renderRack(){
@@ -309,6 +311,44 @@ $('undo').onclick=()=>{const previous=state.undo.pop();if(previous){const stack=
 $('save').onclick=()=>{const blob=new Blob([JSON.stringify(state.patch,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`god-here-${state.patch.id}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),5000);toast('Patch exported with routing, source identity, seed and automation.');};
 $('import').onchange=async()=>{const file=$('import').files[0];if(!file)return;try{if(file.size>2e6)throw Error('Patch file exceeds 2 MB.');const patch=JSON.parse(await file.text());setPatch(patch);toast('Patch loaded.');}catch(error){toast(`Import rejected: ${error.message}`);}finally{$('import').value='';}};
 
+// Touch and MIDI control surface. Mappings are a per-user device convenience, so they live
+// in browser storage rather than in the portable patch.
+const CONTROLLER_MAP_KEY='god-here-fx-controller-map-v1',CONTROLLER_PREFS_KEY='god-here-fx-controller-prefs-v1';
+const controllerMap=(()=>{try{const saved=JSON.parse(localStorage.getItem(CONTROLLER_MAP_KEY));if(saved)return ControllerMap.fromJSON(saved);}catch{/* A missing or damaged map starts empty. */}return new ControllerMap();})();
+const gestures=new GestureTracker(600);let surface=null;
+function controllerView(){
+  const t=position();
+  return {nodes:state.patch.nodes.filter(isFX),selectedId:state.selected,duration:media.duration,
+    current(id,path){const n=state.patch.nodes.find(n=>n.id===id);if(!n)return 0;if(path==='bypass'||path==='solo')return !!toggleValue(n,path,t,state.patch);const e=evaluatedNode(n,t,state.patch);return path.startsWith('params.')?e.params[path.slice(7)]:e[path];},
+    global:name=>name==='play'?state.playing||state.playPending:name==='record'?state.recording:name==='loop'?state.loop:false};
+}
+function syncRackControl(node,path,value){
+  const card=[...$('rack').querySelectorAll('[data-node]')].find(c=>c.dataset.node===node.id);if(!card)return;
+  const input=[...card.querySelectorAll('[data-parameter]')].find(i=>i.dataset.parameter===path);
+  if(input){input.value=value;const out=input.closest('.slider-row,.param-row')?.querySelector('output');if(out)out.textContent=path.startsWith('params.')?fmt(value):`${Math.round(value*100)}%`;}
+  else if(path==='bypass'||path==='solo')renderRack();
+}
+function applyControl(action){
+  if(action.global){
+    const want=action.value;
+    if(action.global==='play'){if((state.playing||state.playPending)!==want)$('play').click();}
+    else if(action.global==='record'){if(state.recording!==want)$('record').click();}
+    else if(action.global==='loop'){if(state.loop!==want)$('loop').click();}
+    return;
+  }
+  const n=state.patch.nodes.find(n=>n.id===action.nodeId);if(!n)return;
+  setParameter(n,action.path,action.value);syncRackControl(n,action.path,action.value);
+}
+const surfaceHost={
+  controller:controllerMap,getView:controllerView,apply:applyControl,
+  // One undo entry per physical gesture, never one per controller message.
+  gesture(key){if(!key.startsWith('global:')&&gestures.touch(key,performance.now()))snapshot();},
+  endGesture:key=>gestures.end(key),
+  save(){try{localStorage.setItem(CONTROLLER_MAP_KEY,JSON.stringify(controllerMap));}catch{/* Export keeps the map portable. */}},
+  select(delta){const fx=state.patch.nodes.filter(isFX);if(!fx.length)return;const i=Math.max(0,fx.findIndex(n=>n.id===state.selected));state.selected=fx[(i+delta+fx.length)%fx.length].id;renderUI();},
+  storage:{get(){try{return JSON.parse(localStorage.getItem(CONTROLLER_PREFS_KEY))||{};}catch{return {};}},set(value){try{localStorage.setItem(CONTROLLER_PREFS_KEY,JSON.stringify(value));}catch{/* Optional convenience. */}}},
+};
+
 async function initialize(){
   let loading=true;
   try{
@@ -357,9 +397,11 @@ async function initialize(){
     if(demo&&Object.hasOwn(CATALOG_BY_TYPE,demo)){const patch=createSingleModulePatch(demo,{...GOD_HERE_OPTIONS,source:sourceBinding,demonstration:true,module:GOD_HERE_DEMO_MODULES[demo]||{}});setPatch(patch,{stash:false});}
     else if(named&&PATCH_CATALOG.some(p=>p.id===named))loadNamed(named);
     else if(saved)setPatch(saved,{stash:false});else loadNamed('message-impact');
+    surface=mountSurface($('control-surface'),surfaceHost);
     state.position=0;state.revision++;status(state.audioError?'Sound needs to reconnect. Tap Retry sound, or open Play demonstrations.':'Ready. Choose a processor or play the patch.');
     // An inspectable read-only snapshot supports reproducible acceptance checks.
     window.fxWorkbench={getPatch:()=>clonePatch(state.patch),getStatus:()=>({ready:state.ready,playing:state.playing,playPending:state.playPending,time:position(),audioBusy:state.audioBusy,audioError:state.audioError,workerReady:state.workerReady,audioRevision:state.audioRevision,audioDesired:state.audioDesired,preview:!$('rendered-picture').hidden?'rendered':'editable',report:state.audioReport}),renderAt:t=>{pause();state.position=clamp(t,0,media.duration);state.revision++;},selectModule:type=>single(type),selectPatch:id=>loadNamed(id)};
+    window.fxWorkbench.sendMidi=bytes=>surface.handle(bytes);
   }catch(error){loading=false;$('loading-text').textContent=error.message;$('loading').querySelector('.loader').hidden=true;$('stage').setAttribute('aria-busy','false');$('phase').textContent='LOAD FAILED';$('load-retry').hidden=false;status('The media pack could not be prepared. Retry loading, or open Play demonstrations.');}
 }
 requestAnimationFrame(animate);initialize();

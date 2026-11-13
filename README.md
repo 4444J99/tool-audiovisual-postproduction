@@ -36,6 +36,8 @@ The working passage is source **95.000–107.167 seconds**. Voice processing use
 
 Select a processor, then **Demonstrate selected**, to run bypass → extreme → parameter sweep → bypass in full screen. The six patches also have **Demonstrate patch**. Cached picture playback requires a complete manifest and exact matching patch and producing-engine hashes. The repaired runtime renders live when those requirements are not met. Earlier demonstrations retain their original embedded picture and sound in the separate demonstration player. Sound is computed in a worker and runs on the audio clock. Dense custom graphs can render below the 12 fps preview rate.
 
+The workbench's Control tab adds touch faders, knobs and switches with MIDI learn; see [the controller guide](docs/FX-CONTROLLER.md).
+
 See [the workbench guide](docs/FX-WORKBENCH.md), [the processing contract](docs/FX-ENGINE.md), and [the source specification](docs/god-here-fx-workbench-spec.md). Portable JSON fixtures and schema are in `web/fx/fixtures/` and `web/fx/rack.schema.json`. Original film and derived media stay outside the public repository.
 
 ## First implemented project: god-here

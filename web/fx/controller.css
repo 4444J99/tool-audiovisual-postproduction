@@ -1,0 +1,45 @@
+/* Touch and MIDI control surface. Colors come from workbench.css tokens. */
+.control-surface{--cs-accent:var(--acid,#dbfb65);display:flex;flex-direction:column;gap:16px}
+.cs-head{display:grid;grid-template-columns:44px 1fr 44px;align-items:center;gap:8px}
+.cs-step{min-height:44px;font-size:1.4rem;padding:0}
+.cs-title{text-align:center;min-width:0}
+.cs-code{display:block;font:11px ui-monospace,monospace;color:var(--muted,#a0a5a8);letter-spacing:.12em;text-transform:uppercase}
+.cs-name{font-size:1.05rem;font-weight:500;overflow-wrap:anywhere}
+.cs-hint{display:block;font-size:.6875rem;color:var(--muted,#a0a5a8);line-height:1.5;margin-top:4px}
+.cs-strip{display:flex;flex-direction:column;gap:18px;background:#14161a;border:1px solid var(--line,#323539);border-radius:8px;padding:16px 12px}
+.cs-faders{display:flex;justify-content:center;gap:28px}
+.cs-knobs{display:grid;grid-template-columns:repeat(auto-fill,minmax(76px,1fr));gap:14px 8px;justify-items:center}
+.cs-switches,.cs-transport{display:flex;gap:8px;flex-wrap:wrap}
+.cs-switches .cs-ctl,.cs-transport .cs-ctl{flex:1;min-width:84px}
+.cs-ctl{display:flex;flex-direction:column;align-items:center;gap:5px;min-width:0;border-radius:8px;border:1px solid transparent;padding:6px 4px;touch-action:none;user-select:none;-webkit-user-select:none}
+.cs-ctl.armed{border-color:var(--coral,#ff6654);background:#2a1816}
+.cs-ctl.waiting{border-color:#8a7a2e}
+.cs-label{font-size:.6875rem;color:#c1c6c9;text-align:center;line-height:1.25;max-width:100%;overflow-wrap:anywhere}
+.cs-value{font:11px ui-monospace,monospace;color:#edf6d5;min-height:14px}
+.cs-badge{font:10px ui-monospace,monospace;color:#8d979a;min-height:12px;text-align:center}
+.cs-ctl.waiting .cs-badge{color:#e6d27a}.cs-ctl.armed .cs-badge{color:#ffb7a8}
+/* Knob */
+.cs-knob-face{width:64px;height:64px;border-radius:50%;background:#1d2023;border:1px solid #3a3e40;cursor:ns-resize;display:grid;place-items:center;touch-action:none}
+.cs-knob-face:focus-visible,.cs-fader-track:focus-visible{outline:2px solid var(--cs-accent);outline-offset:3px}
+.cs-knob-dial{width:100%;height:100%}
+.cs-arc-track,.cs-arc-value{fill:none;stroke-width:4;stroke-linecap:round}
+.cs-arc-track{stroke:#3a3f43}.cs-arc-value{stroke:var(--cs-accent)}
+.cs-pointer{stroke:#eff1eb;stroke-width:3;stroke-linecap:round}
+/* Fader */
+.cs-fader-track{position:relative;width:44px;height:170px;background:#0c0e10;border:1px solid #3a3e40;border-radius:22px;cursor:ns-resize;touch-action:none;overflow:visible}
+.cs-fader-fill{position:absolute;left:14px;right:14px;bottom:0;background:var(--fx-color,var(--cs-accent));opacity:.55;border-radius:0 0 8px 8px;height:0}
+.cs-fader-cap{position:absolute;left:-4px;right:-4px;height:26px;margin-bottom:-13px;background:#2a2d30;border:2px solid var(--cs-accent);border-radius:6px;bottom:0}
+/* Switch */
+.cs-switch{min-height:48px;width:100%;font-size:.8125rem;touch-action:manipulation}
+.cs-switch[aria-pressed=true]{border-color:var(--cs-accent);color:var(--cs-accent);background:#dbfb6510}
+.cs-global .cs-switch[aria-pressed=true]{background:#dbfb6518}
+.cs-midi{display:flex;flex-direction:column;gap:10px}
+.cs-midi-row{display:flex;flex-wrap:wrap;gap:7px}
+.cs-midi-row button,.cs-midi-row .button{font-size:.75rem;min-height:40px}
+.cs-midi button[aria-pressed=true]{border-color:var(--cs-accent);color:var(--cs-accent)}
+.cs-status{font-size:.75rem;color:#c2c9bf;line-height:1.5;min-height:18px}
+.cs-bindings{list-style:none;margin:10px 0 0;padding:0;font:11px/1.8 ui-monospace,monospace;color:#b6bec0}
+.cs-bindings small{color:#7e888b}
+.cs-empty{font-size:.75rem;color:var(--muted,#a0a5a8);line-height:1.5}
+@media(max-width:800px){.cs-knob-face{width:72px;height:72px}.cs-fader-track{height:150px}.cs-knobs{grid-template-columns:repeat(auto-fill,minmax(84px,1fr))}.cs-midi-row button,.cs-midi-row .button{min-height:44px}}
+@media(prefers-reduced-motion:no-preference){.cs-arc-value,.cs-fader-fill{transition:none}}
