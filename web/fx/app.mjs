@@ -186,7 +186,7 @@ function pumpAudio(){
 function waitForAudio(){if(state.audioError)return Promise.reject(Error(state.audioError));if(state.audioRevision>=state.audioDesired&&expressivePCM)return Promise.resolve();return new Promise((resolve,reject)=>{state.audioWaiters.push({resolve,reject});pumpAudio();});}
 function updateTransport(){
   $('play').textContent=state.playing?'Pause':state.playPending?'Cancel':'Play';$('stage-play').hidden=state.playing||state.playPending||!state.ready;$('loop').classList.toggle('on',state.loop);$('loop').setAttribute('aria-pressed',String(state.loop));
-  $('record').setAttribute('aria-pressed',String(state.recording));
+  $('record').setAttribute('aria-pressed',String(state.recording));surface?.update();
 }
 function renderTimeline(t){
   const canvas=$('timeline'),ctx=canvas.getContext('2d'),W=canvas.width,H=canvas.height;
@@ -216,8 +216,11 @@ function syncPreview(t){
   video.hidden=false;c.hidden=true;$('render-mode').textContent='Rendered preset';return true;
 }
 $('rendered-picture').onerror=()=>{if(previewPath)previewFailed.add(previewPath);state.revision++;};
+let surfaceTick=0;
 function animate(){
   if(state.ready){
+    // Keep the Control tab in step with playback automation and edits made elsewhere in the rack.
+    if(surface&&!$('tab-control').hidden&&performance.now()-surfaceTick>120){surfaceTick=performance.now();surface.update();}
     const t=position(),frame=Math.floor(t*media.fps);refreshCanvasSize();
     const rendered=syncPreview(t);
     if(frame!==state.drawFrame||state.revision!==state.drawRevision){

@@ -28,7 +28,8 @@ export function parseMidi(data) {
   const status = data[0];
   if (!Number.isInteger(status) || status < 0x80 || status >= 0xF0) return null;
   const type = status & 0xF0, channel = (status & 0x0F) + 1;
-  if (type === 0xC0 || type === 0xD0) return null;
+  // Only control change, notes and pitch bend are used; program change and both aftertouch kinds are ignored.
+  if (type !== 0x80 && type !== 0x90 && type !== 0xB0 && type !== 0xE0) return null;
   const first = data[1], second = data[2];
   const seven = value => Number.isInteger(value) && value >= 0 && value <= 127;
   if (!seven(first) || !seven(second)) return null;
@@ -38,7 +39,7 @@ export function parseMidi(data) {
     return {kind: 'pitch-bend', channel, number: 0, value, max: 16383, norm: value / 16383};
   }
   if (type === 0x90 && second > 0) return {kind: 'note-on', channel, number: first, value: second, max: 127, norm: second / 127};
-  return {kind: 'note-off', channel, number: first, value: type === 0x80 ? second : 0, max: 127, norm: 0};
+  return {kind: 'note-off', channel, number: first, value: second, max: 127, norm: 0};
 }
 
 /** The binding-facing identity of a parsed message (note-on and note-off share one source). */
@@ -149,16 +150,21 @@ export class ControllerMap {
     this.bindings = [];
     this.learning = null;
     this.pickup = new Map();
+    this.pending = new Map();
     for (const binding of bindings) this.bind(binding);
   }
 
   bind(raw) {
     const binding = validateBinding(raw);
-    const source = sourceKey(binding.source), target = targetKey(binding.target);
-    this.bindings = this.bindings.filter(item => sourceKey(item.source) !== source && targetKey(item.target) !== target);
+    const target = targetKey(binding.target);
+    // Any-channel (0) sources overlap every channel of the same control, so they replace each other.
+    const overlaps = item => item.source.kind === binding.source.kind && item.source.number === binding.source.number
+      && (item.source.channel === 0 || binding.source.channel === 0 || item.source.channel === binding.source.channel);
+    this.bindings = this.bindings.filter(item => !overlaps(item) && targetKey(item.target) !== target);
     if (this.bindings.length >= MAX_BINDINGS) throw Error(`A controller map holds at most ${MAX_BINDINGS} bindings.`);
     this.bindings.push(binding);
-    this.pickup.delete(source);
+    this.pickup.clear();
+    this.pending.clear();
     return binding;
   }
 
@@ -174,14 +180,14 @@ export class ControllerMap {
     return this.bindings.find(item => targetKey(item.target) === key) || null;
   }
 
-  clear() {this.bindings = []; this.pickup.clear(); this.learning = null;}
+  clear() {this.bindings = []; this.pickup.clear(); this.pending.clear(); this.learning = null;}
 
   /** Arm MIDI learn: the next usable message binds to this target. */
   armLearn(target) {this.learning = validateTarget(target);}
   cancelLearn() {this.learning = null;}
 
   /** Forget takeover state, e.g. when the selected processor or the patch changes. */
-  resetPickup() {this.pickup.clear();}
+  resetPickup() {this.pickup.clear(); this.pending.clear();}
 
   /**
    * Interpret one parsed MIDI message.
@@ -233,12 +239,20 @@ export class ControllerMap {
     if (mode === 'relative') {
       if (message.kind !== 'cc' || message.value === 0 || message.value === 64) return null;
       const delta = message.value < 64 ? message.value : message.value - 128;
-      value = normToValue(control, valueToNorm(control, current) + delta * .01 * binding.rate);
+      // Fractional movement accumulates, so one-tick turns still move coarse stepped parameters.
+      const slot = `${key}>${nodeId}|${control.path}`;
+      let pending = (this.pending.get(slot) ?? 0) + delta * .01 * binding.rate;
+      if (Math.sign(pending) !== Math.sign(delta)) pending = delta * .01 * binding.rate;
+      value = normToValue(control, valueToNorm(control, current) + pending);
+      if (value === current && ((pending > 0 && value < control.max) || (pending < 0 && value > control.min))) this.pending.set(slot, pending);
+      else this.pending.delete(slot);
     } else {
       const slot = `${key}>${nodeId}|${control.path}`;
       const incoming = message.norm, now = valueToNorm(control, current);
       if (binding.pickup) {
-        const state = this.pickup.get(slot) ?? {caught: false, last: null};
+        const state = this.pickup.get(slot) ?? {caught: false, last: null, sent: null};
+        // A value changed from elsewhere (slider, preset, undo, automation) since this knob last wrote it: take over again.
+        if (state.caught && state.sent !== null && current !== state.sent) {state.caught = false; state.last = null;}
         const crossed = state.last !== null && (state.last - now) * (incoming - now) <= 0;
         if (!state.caught && (Math.abs(incoming - now) <= .02 || crossed)) state.caught = true;
         state.last = incoming;
@@ -246,6 +260,7 @@ export class ControllerMap {
         if (!state.caught) {result.waiting.push({nodeId, path: control.path, hardware: incoming, software: now}); return null;}
       }
       value = normToValue(control, incoming);
+      if (binding.pickup) this.pickup.get(slot).sent = value;
     }
     return value === current ? null : {nodeId, path: control.path, value, binding: key};
   }

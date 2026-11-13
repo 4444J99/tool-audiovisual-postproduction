@@ -29,7 +29,7 @@ binding mode `relative` in an imported map.
 
 **Soft takeover.** An absolute hardware control is ignored until it reaches or crosses the on-screen value, so a physical
 knob that disagrees with the rack never makes the value jump. The control shows "Move hardware to N% to take over".
-Takeover restarts when the selection changes or after a touch edit.
+Takeover restarts when the selection changes, after a touch edit, or whenever the value is changed from elsewhere (a rack slider, preset, undo or automation) after the knob last wrote it. Relative encoders accumulate fractional ticks, so one-tick turns still move coarse stepped parameters.
 
 ## Behaviour inside the rack
 

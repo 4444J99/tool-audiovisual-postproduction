@@ -58,7 +58,8 @@ function knobHTML(control) {
  */
 export function mountSurface(root, host, {request = globalThis.navigator?.requestMIDIAccess?.bind(globalThis.navigator)} = {}) {
   const controller = host.controller;
-  let midi = null, learnMode = false, layoutKey = '', dragging = null;
+  let midi = null, learnMode = false, layoutKey = '', lastBindings = '';
+  const dragging = new Set();
   const waiting = new Map();
 
   root.innerHTML = `
@@ -81,10 +82,13 @@ export function mountSurface(root, host, {request = globalThis.navigator?.reques
   };
   const currentOf = (view, control) => view.current(view.selectedId, control.path);
 
-  function change(control, value) {
+  function change(control, value, drag = null) {
     const view = host.getView();
     if (value === currentOf(view, control)) return;
-    host.gesture(`surface:${view.selectedId}:${control.path}`);
+    const key = `surface:${view.selectedId}:${control.path}`;
+    // A drag is one gesture for as long as the pointer is down, however long it pauses; other edits use the idle gap.
+    if (!drag) host.gesture(key);
+    else if (!drag.snapped) {drag.snapped = true; host.endGesture?.(key); host.gesture(key);}
     host.apply({nodeId: view.selectedId, path: control.path, value, binding: 'surface'});
     update();
   }
@@ -128,7 +132,7 @@ export function mountSurface(root, host, {request = globalThis.navigator?.reques
       const control = controlFor(view, element);
       if (!control) continue;
       const value = currentOf(view, control);
-      const isDragging = dragging === element;
+      const isDragging = dragging.has(element);
       if (control.kind === 'toggle') {
         const button = element.querySelector('button');
         button.setAttribute('aria-pressed', String(Boolean(value)));
@@ -160,7 +164,8 @@ export function mountSurface(root, host, {request = globalThis.navigator?.reques
       element.classList.toggle('armed', Boolean(controller.learning) && controller.learning.global === name);
     }
     const list = $('.cs-bindings');
-    list.innerHTML = controller.bindings.map(b => `<li>${escapeHTML(describeSource(b.source))} → ${escapeHTML(b.target.global ? GLOBAL_LABELS[b.target.global] : `${b.target.nodeId === SELECTED ? 'selected' : b.target.nodeId} · ${b.target.slot ?? b.target.path}`)} <small>${escapeHTML(b.mode)}${b.pickup ? ' · pickup' : ''}</small></li>`).join('') || '<li class="cs-empty">No hardware mapped yet. Connect a controller and choose Load template, or use MIDI learn.</li>';
+    const markup = controller.bindings.map(b => `<li>${escapeHTML(describeSource(b.source))} → ${escapeHTML(b.target.global ? GLOBAL_LABELS[b.target.global] : `${b.target.nodeId === SELECTED ? 'selected' : b.target.nodeId} · ${b.target.slot ?? b.target.path}`)} <small>${escapeHTML(b.mode)}${b.pickup ? ' · pickup' : ''}</small></li>`).join('') || '<li class="cs-empty">No hardware mapped yet. Connect a controller and choose Load template, or use MIDI learn.</li>';
+    if (markup !== lastBindings) {lastBindings = markup; list.innerHTML = markup;}
     $('[data-act=learn]').setAttribute('aria-pressed', String(learnMode));
     $('[data-act=connect]').setAttribute('aria-pressed', String(Boolean(midi)));
     $('[data-act=connect]').textContent = midi ? 'MIDI connected' : 'Connect MIDI';
@@ -183,15 +188,17 @@ export function mountSurface(root, host, {request = globalThis.navigator?.reques
     const face = element.querySelector('[role=slider]');
     event.preventDefault(); face.focus({preventScroll: true});
     const rect = element.querySelector('.cs-fader-track')?.getBoundingClientRect();
-    dragging = element;
+    dragging.add(element);
+    const drag = {snapped: false};
     const start = {y: event.clientY, norm: valueToNorm(control, currentOf(view, control))};
     const move = ev => {
+      if (ev.pointerId !== event.pointerId) return;
       const fine = ev.shiftKey ? 4 : 1;
       const norm = rect ? 1 - (ev.clientY - rect.top) / Math.max(1, rect.height) : start.norm + (start.y - ev.clientY) / (170 * fine);
       const value = normToValue(control, norm);
       element.querySelector('.cs-value').textContent = formatValue(control, value);
       element.style.setProperty('--n', valueToNorm(control, value));
-      change(control, value);
+      change(control, value, drag);
       // Keep the dragged control showing its own position while the rack renders.
       const n = valueToNorm(control, value), arc = element.querySelector('.cs-arc-value');
       if (arc) {arc.setAttribute('stroke-dasharray', `${(75 * n).toFixed(2)} 100`); element.querySelector('.cs-pointer').setAttribute('transform', `rotate(${(-135 + 270 * n).toFixed(1)} 28 28)`);}
@@ -199,9 +206,10 @@ export function mountSurface(root, host, {request = globalThis.navigator?.reques
       if (fill) fill.style.height = `${(n * 100).toFixed(1)}%`;
       if (cap) cap.style.bottom = `${(n * 100).toFixed(1)}%`;
     };
-    const finish = () => {
+    const finish = ev => {
+      if (ev.pointerId !== event.pointerId) return;
       removeEventListener('pointermove', move); removeEventListener('pointerup', finish); removeEventListener('pointercancel', finish);
-      dragging = null; host.endGesture?.(`surface:${host.getView().selectedId}:${control.path}`);
+      dragging.delete(element); host.endGesture?.(`surface:${host.getView().selectedId}:${control.path}`);
       controller.resetPickup(); update();
     };
     addEventListener('pointermove', move); addEventListener('pointerup', finish); addEventListener('pointercancel', finish);

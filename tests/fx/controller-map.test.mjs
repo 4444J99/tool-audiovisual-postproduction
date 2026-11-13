@@ -261,3 +261,56 @@ test('values are formatted for display', () => {
   assert.equal(formatValue({kind: 'range', unit: '', options: ['a', 'b']}, 1), 'b');
   assert.equal(formatValue({kind: 'toggle'}, true), 'On');
 });
+
+test('polyphonic aftertouch is ignored and never reads as a note release', () => {
+  assert.equal(parseMidi([0xA0, 36, 100]), null);
+  const {node, view} = rig('delay');
+  const map = new ControllerMap([{source: {kind: 'note', channel: 1, number: 36}, target: {nodeId: node.id, path: 'bypass'}, mode: 'momentary'}]);
+  assert.deepEqual(map.process(parseMidi([0xA0, 36, 100]), view).actions, []);
+  assert.equal(map.process(note(36, 100), view).actions[0].value, true);
+});
+
+test('one-tick relative turns accumulate until they move a stepped parameter', () => {
+  const {node, view, apply, values} = rig('delay');
+  const taps = CATALOG_BY_TYPE.delay.params.find(p => p.key === 'taps');
+  const path = 'params.taps';
+  values.set(`${node.id}|${path}`, 3);
+  const map = new ControllerMap([{source: {kind: 'cc', channel: 1, number: 11}, target: {nodeId: node.id, path}, mode: 'relative'}]);
+  const moves = [];
+  for (let i = 0; i < 40; i++) {const r = map.process(cc(11, 1), view); apply(r.actions); if (r.actions.length) moves.push(i);}
+  assert.ok(moves.length >= 2, 'the encoder eventually moves the parameter');
+  assert.ok(values.get(`${node.id}|${path}`) > 3 && values.get(`${node.id}|${path}`) <= taps.max);
+  const up = values.get(`${node.id}|${path}`);
+  for (let i = 0; i < 40; i++) apply(map.process(cc(11, 127), view).actions);
+  assert.ok(values.get(`${node.id}|${path}`) < up, 'turning back moves it down');
+  for (let i = 0; i < 400; i++) apply(map.process(cc(11, 127), view).actions);
+  assert.equal(values.get(`${node.id}|${path}`), taps.min);
+  assert.equal(map.pending.size, 0, 'no leftover movement at the end of the range');
+});
+
+test('soft takeover re-arms when the value is changed from elsewhere after the knob caught it', () => {
+  const {node, view, apply, values} = rig('delay');
+  const map = new ControllerMap([{source: {kind: 'cc', channel: 1, number: 21}, target: {nodeId: node.id, path: 'wet'}}]);
+  values.set(`${node.id}|wet`, .5);
+  map.process(cc(21, 60), view); apply(map.process(cc(21, 64), view).actions);
+  const caughtAt = values.get(`${node.id}|wet`);
+  assert.ok(caughtAt !== undefined);
+  apply(map.process(cc(21, 80), view).actions);
+  values.set(`${node.id}|wet`, .9);                         // a slider, preset, undo or automation moves it
+  assert.deepEqual(map.process(cc(21, 82), view).actions, [], 'the knob no longer overwrites the restored value');
+  assert.equal(map.process(cc(21, 114), view).actions.length, 0, 'reaching the new value catches it again');
+  assert.equal(map.process(cc(21, 100), view).actions.length, 1);
+});
+
+test('learning a source replaces overlapping any-channel bindings', () => {
+  const {node, view} = rig('delay');
+  const map = new ControllerMap(defaultTemplate());
+  map.armLearn({nodeId: node.id, path: 'wet'});
+  map.process(cc(20, 50, 1), view);
+  assert.equal(map.bindings.filter(b => b.source.kind === 'cc' && b.source.number === 20).length, 1);
+  assert.equal(map.bindings.find(b => b.source.number === 20).target.path, 'wet');
+  assert.equal(map.bindings.some(b => b.target.slot === 'knob:0'), false, 'the template binding for that CC is gone');
+  const wildcard = new ControllerMap([{source: {kind: 'cc', channel: 3, number: 5}, target: {nodeId: node.id, path: 'wet'}}]);
+  wildcard.bind({source: {kind: 'cc', channel: 0, number: 5}, target: {nodeId: node.id, path: 'intensity'}});
+  assert.equal(wildcard.bindings.length, 1);
+});
