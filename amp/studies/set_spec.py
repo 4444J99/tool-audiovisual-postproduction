@@ -125,8 +125,8 @@ def validate_spec(spec: Mapping[str, Any]) -> dict[str, list[str]]:
             errors.append(f"material {name!r}: names starting with {GENERATED_PREFIX!r}, ending with {SOFFIT_SUFFIX!r} or equal to "
                           f"{FLOOR_DEFAULT!r} are reserved for generated materials")
             continue
-        if len(name) + len(SOFFIT_SUFFIX) > BLENDER_NAME_LIMIT:
-            errors.append(f"material {name!r}: name plus its {SOFFIT_SUFFIX!r} derivative must fit {BLENDER_NAME_LIMIT} characters")
+        if _name_bytes(name + SOFFIT_SUFFIX) > BLENDER_NAME_LIMIT:
+            errors.append(f"material {name!r}: name plus its {SOFFIT_SUFFIX!r} derivative must fit {BLENDER_NAME_LIMIT} bytes (UTF-8)")
             continue
         if not isinstance(material, dict) or not isinstance(material.get("color"), str) or not HEX.match(material["color"]):
             errors.append(f"material {name!r}: color must be a six-digit hex string")
@@ -271,6 +271,11 @@ def validate_spec(spec: Mapping[str, Any]) -> dict[str, list[str]]:
     return {"errors": errors, "warnings": warnings}
 
 
+def _name_bytes(name: str) -> int:
+    """Blender limits names by their UTF-8 byte length, not by character count."""
+    return len(name.encode("utf-8"))
+
+
 def band_object_name(element_id: str, band_name: str) -> str:
     return f"{element_id}.{band_name.replace(' ', '_')}"
 
@@ -299,8 +304,8 @@ def _arch_errors(element: Mapping[str, Any], label: str, materials, errors: list
         if not isinstance(name, str) or not name or key in names:
             errors.append(f"{label}: band {index} needs a unique name")
             continue
-        if len(key) > BLENDER_NAME_LIMIT:
-            errors.append(f"{label}: band {name!r} makes an object name longer than {BLENDER_NAME_LIMIT} characters")
+        if _name_bytes(key) > BLENDER_NAME_LIMIT:
+            errors.append(f"{label}: band {name!r} makes an object name longer than {BLENDER_NAME_LIMIT} bytes (UTF-8)")
             continue
         names.add(key)
         if not _positive(band.get("width")):

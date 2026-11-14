@@ -284,6 +284,16 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertEqual(errors(s), [])
         ss.scene_graph(s)
 
+    def test_name_limits_count_utf8_bytes(self):
+        s = spec()
+        s["materials"]["é" * 30] = {"color": "123456"}        # 30 characters but 60 bytes, 67 with the soffit suffix
+        self.assertTrue(any("must fit 63 bytes" in e for e in errors(s)))
+        s = spec()
+        s["elements"][1]["bands"][0]["name"] = "é" * 25        # "arch." + 50 bytes + nothing = 55 ok
+        self.assertEqual(errors(s), [])
+        s["elements"][1]["bands"][0]["name"] = "é" * 30        # 5 + 60 = 65 bytes
+        self.assertTrue(any("longer than 63 bytes" in e for e in errors(s)))
+
     def test_light_size_must_be_a_finite_positive_number(self):
         for bad in (None, "bad", 0, -1.0, float("inf"), True, [2]):
             s = spec()
