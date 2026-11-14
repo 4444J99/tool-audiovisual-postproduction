@@ -265,6 +265,63 @@ class ReviewRegressionTests(unittest.TestCase):
         step = np.abs(np.diff(filled[15500:20000]))
         self.assertLess(step.max(), 8 * np.std(np.diff(track[:8000])))
 
+class ReviewRegressionRoundTwoTests(unittest.TestCase):
+    def test_opposite_polarity_speech_is_never_classified_as_tone(self):
+        audio, meta = dialogue()
+        stereo = np.stack([audio, -audio], axis=1)
+        mono_regions = rt.find_tone_regions(audio, SR)
+        self.assertEqual(rt.find_tone_regions(stereo, SR), mono_regions)
+        for start, end in rt.find_tone_regions(stereo, SR):
+            for a, b in meta["bursts_s"]:
+                core = (a + 0.15) * SR, (b - 0.15) * SR
+                self.assertTrue(end <= core[0] or start >= core[1])
+
+    def test_opposite_polarity_speech_beside_a_hole_is_not_crossfaded(self):
+        audio, _ = dialogue()
+        stereo = np.stack([audio, -audio], axis=1)
+        start = int(1.2 * SR)
+        stereo[start:start + int(0.3 * SR)] = 0.0
+        filled, report = rt.fill_holes(stereo, SR, seed=1)
+        hole = next(h for h in report["holes"] if h["start_sample"] == start)
+        self.assertEqual(hole["pre_samples"], 0)
+        self.assertFalse(hole["neighbour_before_is_tone"])
+        self.assertTrue(np.array_equal(stereo[start - 640:start], filled[start - 640:start]))
+
+    def test_band_levels_do_not_depend_on_the_analysis_length(self):
+        rng = np.random.default_rng(11)
+        noise = rng.standard_normal(SR * 6) * 0.01
+        short = rt.band_levels(noise[:SR // 5], SR)
+        long = rt.band_levels(noise, SR)
+        self.assertEqual(len(short), len(long))
+        for a, b in zip(short, long):
+            self.assertLess(abs(a - b), 3.0)
+        total = 10 * np.log10(sum(10 ** (v / 10) for v in long))
+        self.assertAlmostEqual(total, 20 * np.log10(0.01), delta=1.0)   # mean-square level, band sum ~ total power
+
+    def test_low_sample_rate_drops_bands_it_cannot_resolve_and_still_passes(self):
+        sr = 8000
+        rng = np.random.default_rng(12)
+        track = rng.standard_normal(sr * 6) * 0.01
+        track[sr * 2:sr * 2 + 800] = 0.0                              # 0.1 s hole, 5.9 s of tone as reference
+        self.assertEqual(len(rt.band_levels(track[:sr], sr)), 6)      # the 4-8 kHz band sits above Nyquist
+        filled, report = rt.fill_holes(track, sr, seed=1)
+        full = rt.fill_report(track, filled, sr, report)
+        self.assertLess(full["checks"][0]["band_shape_deviation_db"], 6.0)
+
+    def test_zero_sample_crossfade_butt_joins_instead_of_raising(self):
+        audio, _ = dialogue()
+        regions = rt.find_tone_regions(audio, SR)
+        for crossfade in (0.0, 1e-6):                                 # 1e-6 s rounds to zero samples
+            bed, info = rt.build_bed(audio, regions, 3 * SR, SR, seed=1, crossfade_s=crossfade)
+            self.assertEqual(len(bed), 3 * SR)
+            self.assertGreater(len(info["pieces"]), 1)
+
+    def test_fill_holes_accepts_a_zero_crossfade(self):
+        audio, _ = dialogue()
+        filled, report = rt.fill_holes(audio, SR, seed=1, crossfade_s=0.0)
+        self.assertEqual(rt.find_holes(filled, SR), [])
+        self.assertEqual({h["pre_samples"] for h in report["holes"]} | {h["post_samples"] for h in report["holes"]}, {0})
+
 
 if __name__ == "__main__":
     unittest.main()

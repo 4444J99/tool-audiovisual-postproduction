@@ -54,10 +54,6 @@ def _rms(block: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.square(block)))) if block.size else 0.0
 
 
-def _mono(audio2d: np.ndarray) -> np.ndarray:
-    return audio2d.mean(axis=1)
-
-
 def audio_sha256(audio: np.ndarray) -> str:
     return hashlib.sha256(np.ascontiguousarray(np.asarray(audio, dtype="<f8")).tobytes()).hexdigest()
 
@@ -85,13 +81,13 @@ def find_tone_regions(audio: np.ndarray, sr: int, frame_s: float = 0.02, margin_
     trimmed by ``guard_s`` at each end so speech tails and hole edges stay out.
     """
     a = _as_2d(audio)
-    mono = _mono(a)
     frame = max(1, int(round(frame_s * sr)))
-    count = len(mono) // frame
+    count = len(a) // frame
     if count == 0:
         return []
-    frames = mono[:count * frame].reshape(count, frame)
-    levels = np.sqrt(np.mean(np.square(frames), axis=1))
+    # energy over every channel: opposite-polarity channels must not cancel speech into "tone"
+    frames = a[:count * frame].reshape(count, frame, -1)
+    levels = np.sqrt(np.mean(np.square(frames), axis=(1, 2)))
     silent = np.all(np.abs(a[:count * frame]).reshape(count, frame, -1) <= eps, axis=(1, 2))
     live = ~silent
     if not live.any():
@@ -165,7 +161,7 @@ def build_bed(audio: np.ndarray, regions: list[tuple[int, int]], length: int, sr
     usable = [r for r in regions if r[1] - r[0] >= 2 * xf + 1]
     if not usable:
         raise ToneError(f"every tone region is shorter than two crossfades ({2 * crossfade_s:g} s)")
-    mono = _mono(a)
+    lead = a[:, 0]                                  # splice matching needs one waveform; every channel is blended
     bed = np.zeros((0, a.shape[1]))
     pieces = []
     use_count: dict[int, int] = {}
@@ -178,9 +174,11 @@ def build_bed(audio: np.ndarray, regions: list[tuple[int, int]], length: int, sr
         take = int(min(span, max(2 * xf + 1, rng.integers(span // 2 + 1, span + 1))))
         offset = int(rng.integers(0, span - take + 1))
         piece = a[start + offset:start + offset + take]
-        if len(bed):
-            tail = _mono(bed[-xf:])
-            head = mono[start + offset:start + offset + take]
+        if len(bed) and xf == 0:
+            bed = np.concatenate([bed, piece])               # zero-sample crossfade: butt-join
+        elif len(bed):
+            tail = bed[-xf:, 0]
+            head = lead[start + offset:start + offset + take]
             shift = best_splice_offset(tail, head, min(search, take - xf - 1))
             piece = piece[shift:]
             fade_out, fade_in = _equal_power(xf)
@@ -196,18 +194,18 @@ def build_bed(audio: np.ndarray, regions: list[tuple[int, int]], length: int, sr
     return bed[:length], info
 
 
-def _quiet_extent(mono: np.ndarray, start: int, direction: int, limit: int, sr: int, ceiling: float) -> int:
+def _quiet_extent(audio2d: np.ndarray, start: int, direction: int, limit: int, sr: int, ceiling: float) -> int:
     """How many samples from ``start`` going ``direction`` (+1 or -1) stay as quiet as tone, up to ``limit``."""
     window = max(1, int(round(0.005 * sr)))
     extent = 0
     while extent < limit:
         if direction > 0:
-            lo, hi = start + extent, min(len(mono), start + extent + window)
+            lo, hi = start + extent, min(len(audio2d), start + extent + window)
         else:
             lo, hi = max(0, start - extent - window), start - extent
         if hi <= lo or hi - lo < window // 2:
             break
-        if _rms(mono[lo:hi]) > ceiling:
+        if _rms(audio2d[lo:hi]) > ceiling:
             break
         extent += hi - lo                      # the samples actually examined, so a partial window counts as itself
     return min(extent, limit)
@@ -222,10 +220,10 @@ def fill_holes(audio: np.ndarray, sr: int, *, seed: int = 0, min_hole_s: float =
     holes = find_holes(a, sr, min_hole_s)
     regions = find_tone_regions(a, sr, margin_db=margin_db, min_region_s=min_region_s)
     out = a.copy()
-    mono = _mono(a)
     report: dict[str, Any] = {"schema": SCHEMA, "sample_rate": sr, "samples": len(a), "channels": a.shape[1],
                               "seed": seed, "input_sha256": audio_sha256(a), "holes": [], "tone_regions": [
-                                  {"start_s": round(s / sr, 4), "end_s": round(e / sr, 4)} for s, e in regions],
+                                  {"start_s": round(s / sr, 4), "end_s": round(e / sr, 4), "start_sample": int(s), "end_sample": int(e)}
+                                  for s, e in regions],
                               "warnings": []}
     if not holes:
         report.update(output_sha256=audio_sha256(out), holes_filled=0)
@@ -244,11 +242,11 @@ def fill_holes(audio: np.ndarray, sr: int, *, seed: int = 0, min_hole_s: float =
         centre = (start + end) // 2
         nearest = sorted(region_rms, key=lambda r: abs((r[0] + r[1]) // 2 - centre))[:2]
         target = math.sqrt(sum(r[2] ** 2 for r in nearest) / len(nearest))
-        pre = _quiet_extent(mono, start, -1, pre_limit, sr, ceiling_all)
-        post = _quiet_extent(mono, end, +1, post_limit, sr, ceiling_all)
+        pre = _quiet_extent(a, start, -1, pre_limit, sr, ceiling_all)
+        post = _quiet_extent(a, end, +1, post_limit, sr, ceiling_all)
         window = max(1, int(round(0.02 * sr)))
-        before = _rms(mono[max(0, start - window):start])
-        after = _rms(mono[end:end + window])
+        before = _rms(a[max(0, start - window):start])
+        after = _rms(a[end:end + window])
         tone_before = bool(start - window >= 0 and before <= ceiling_all)
         tone_after = bool(end + window <= len(a) and after <= ceiling_all)
         left, right = start - pre, end + post
@@ -282,17 +280,29 @@ def fill_holes(audio: np.ndarray, sr: int, *, seed: int = 0, min_hole_s: float =
 
 
 def band_levels(block: np.ndarray, sr: int) -> list[float]:
-    """Octave-band RMS levels in dB (62.5 Hz to 8 kHz upper edge), from one window's spectrum."""
-    mono = _mono(_as_2d(block))
-    if len(mono) < 64:
-        return [-120.0] * (len(OCTAVE_EDGES) - 1)
-    window = np.hanning(len(mono))
-    spectrum = np.abs(np.fft.rfft(mono * window)) ** 2 / np.sum(window ** 2)
-    freqs = np.fft.rfftfreq(len(mono), 1.0 / sr)
+    """Octave-band mean-square levels in dB for the bands that lie fully below Nyquist.
+
+    Each channel is analysed on its own and the band powers are averaged, so opposite-polarity channels
+    cannot cancel.  Power is normalised to mean square (Parseval), so the level does not depend on how
+    long the analysed window is.
+    """
+    a = _as_2d(block)
+    edges = [(low, high) for low, high in zip(OCTAVE_EDGES[:-1], OCTAVE_EDGES[1:]) if high <= sr / 2.0]
+    if len(a) < 64:
+        return [-120.0] * len(edges)
+    window = np.hanning(len(a))
+    freqs = np.fft.rfftfreq(len(a), 1.0 / sr)
+    power = np.zeros(len(freqs))
+    for channel in range(a.shape[1]):
+        spectrum = np.abs(np.fft.rfft(a[:, channel] * window)) ** 2 / (len(a) * np.sum(window ** 2))
+        spectrum[1:] *= 2.0                                   # one-sided: fold negative frequencies in
+        if len(a) % 2 == 0:
+            spectrum[-1] /= 2.0                               # the Nyquist bin has no mirror
+        power += spectrum / a.shape[1]
     levels = []
-    for low, high in zip(OCTAVE_EDGES[:-1], OCTAVE_EDGES[1:]):
+    for low, high in edges:
         mask = (freqs >= low) & (freqs < high)
-        levels.append(round(10.0 * math.log10(max(float(spectrum[mask].sum()) * 2.0, 1e-20)), 2) if mask.any() else -120.0)
+        levels.append(round(10.0 * math.log10(max(float(power[mask].sum()), 1e-20)), 2) if mask.any() else -120.0)
     return levels
 
 
@@ -302,24 +312,22 @@ def fill_report(original: np.ndarray, filled: np.ndarray, sr: int, report: dict[
     a, b = _as_2d(original), _as_2d(filled)
     result = dict(report)
     remaining = find_holes(b, sr, min_hole_s)
-    mono_in = _mono(a)
-    regions = [(int(r["start_s"] * sr), int(r["end_s"] * sr)) for r in report["tone_regions"]]
-    reference = np.concatenate([mono_in[s:e] for s, e in regions]) if regions else np.zeros(0)
+    regions = [(r["start_sample"], r["end_sample"]) for r in report["tone_regions"]]
+    reference = np.concatenate([a[s:e] for s, e in regions]) if regions else np.zeros((0, a.shape[1]))
     zones = []
     checks = []
     for hole in report["holes"]:
         s, e = hole["start_sample"], hole["end_sample"]              # exact sample indices, never rounded seconds
         zones.append((s - hole["pre_samples"], e + hole["post_samples"]))
         inside = b[s:e]
-        inside_mono = _mono(inside)
         window = max(1, int(round(0.02 * sr)))
         deviations = []
         if hole["neighbour_before_is_tone"]:
-            deviations.append(abs(_db(_rms(inside_mono[:window])) - _db(_rms(mono_in[max(0, s - window):s]))))
+            deviations.append(abs(_db(_rms(inside[:window])) - _db(_rms(a[max(0, s - window):s]))))
         if hole["neighbour_after_is_tone"]:
-            deviations.append(abs(_db(_rms(inside_mono[-window:])) - _db(_rms(mono_in[e:e + window]))))
+            deviations.append(abs(_db(_rms(inside[-window:])) - _db(_rms(a[e:e + window]))))
         tone_rms = _rms(inside)
-        bands_in = band_levels(inside_mono, sr) if len(inside) >= int(0.1 * sr) else None
+        bands_in = band_levels(inside, sr) if len(inside) >= int(0.1 * sr) else None
         bands_ref = band_levels(reference, sr) if len(reference) >= int(0.1 * sr) else None
         spread = None
         if bands_in and bands_ref:
