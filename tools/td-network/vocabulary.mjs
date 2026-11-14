@@ -29,7 +29,7 @@ export const VOCABULARY = Object.freeze({
   constantTOP: {family: 'TOP', pars: ['colorr', 'colorg', 'colorb', 'alpha']},
   moviefileinTOP: {family: 'TOP', pars: ['file']},
   expressionCHOP: {family: 'CHOP', pars: ['expr0expr']},
-  lagCHOP: {family: 'CHOP', pars: ['lag']},
+  lagCHOP: {family: 'CHOP', pars: ['lag1', 'lag2']},
   delayCHOP: {family: 'CHOP', pars: ['delay']},
   mathCHOP: {family: 'CHOP', pars: ['gain', 'chopop']},
   switchCHOP: {family: 'CHOP', pars: ['index']},

@@ -52,7 +52,7 @@ function damage(add) {
   const audio = () => {
     add('dmg_drive', 'mathCHOP', {inputs: ['in_audio'], pars: {gain: expr('{drive}')}});
     add('dmg_bits', 'expressionCHOP', {inputs: ['dmg_drive'], pars: {expr0expr: expr('max(-1, min(1, round(me.inputVal * (2 ** ({bits} - 1))) / (2 ** ({bits} - 1))))')}});
-    add('dmg_band', 'lagCHOP', {inputs: ['dmg_bits'], pars: {lag: expr('1 / (6.283185307 * max(1, {band}))')}});
+    add('dmg_band', 'lagCHOP', {inputs: ['dmg_bits'], pars: {lag1: expr('1 / (6.283185307 * max(1, {band}))'), lag2: expr('1 / (6.283185307 * max(1, {band}))')}});
     add('dmg_out', 'mathCHOP', {inputs: ['dmg_band'], pars: {gain: expr('{output}')}});
     return 'dmg_out';
   };
@@ -89,7 +89,7 @@ function gate(add) {
   const open = '(1 if (({rack.Time} / max(0.1, {period}) + {phase}) % 1) < {duty} else 0) if {detector} < 0.5 else (1 if float({op:in_control}[0].eval()) > {threshold} else 0)';
   const shared = () => {
     add('gate_raw', 'constantCHOP', {pars: {const0name: 'open', const0value: expr(`{retain} + (1 - {retain}) * (${open})`)}});
-    add('gate_ctrl', 'lagCHOP', {inputs: ['gate_raw'], pars: {lag: expr('max(0.002, {edge})')}});
+    add('gate_ctrl', 'lagCHOP', {inputs: ['gate_raw'], pars: {lag1: expr('max(0.002, {edge})'), lag2: expr('max(0.002, {edge})')}});
   };
   const audio = () => { add('gate_audio', 'mathCHOP', {inputs: ['in_audio'], pars: {gain: expr('float({op:gate_ctrl}[0].eval())')}}); return 'gate_audio'; };
   const picture = () => { add('gate_picture', 'levelTOP', {inputs: ['in_picture'], pars: {opacity: expr('float({op:gate_ctrl}[0].eval())')}}); return 'gate_picture'; };

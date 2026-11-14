@@ -160,7 +160,17 @@ The resolver (`tools/td-network/python/fx_td_resolve.py`) is pure Python and is 
 `evaluatedNode`: `tests/test_td_resolve.py` compares every fixture patch at sampled times (every automation keyframe, event
 and clip edge, plus or minus 10 ms) with sidechain levels 0, 0.37 and 1, and the same patches rewritten to use every macro
 curve, step and linear lanes, add and multiply modulation, a clip scope and a Solo event (`--stress`). A change in the
-resolver that moves any value fails there. Editing a base parameter in TouchDesigner never sends the resolved value back
+resolver that moves any value fails there. The sidechain level is produced inside the network: the source component derives the same envelope as the workbench's
+`amplitudeEnvelope` (peak level of the source audio, 6 ms attack, 75 ms release, times 5, limited to 1) from its audio
+and sends it down the control wires; the Lag CHOP's two values are attack and release as that operator defines them, and
+its default unit is assumed to be seconds. Only the first channel is read.
+
+The rules in the contract (automation, events, macros) are a snapshot of the patch the network was generated from. Editing
+a control by hand in TouchDesigner removes that control's rules in the network exactly as the workbench's `setParameter`
+removes them, because the edit is sent to the rack, which does it there. The reverse is not mirrored: editing an automated
+control in the workbench, or recording events while the network runs, does not change the network's rules, so regenerate
+the network after changing a patch's rules (the rack reports evaluated values at the playhead, which cannot tell a hand edit
+from playing automation). Editing a base parameter in TouchDesigner never sends the resolved value back
 over OSC: only edits made to the custom parameters are exchanged.
 
 **Effects (five of thirteen).** Between `in_<port>` and `proc_<port>` a processor now holds the effect chain

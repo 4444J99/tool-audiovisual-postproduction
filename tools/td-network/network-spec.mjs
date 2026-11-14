@@ -183,7 +183,11 @@ export function buildNetworkSpec(patch, options = {}) {
       add(comp, 'out_matte', 'nullTOP', {inputs: ['matte']});
       add(comp, 'text', 'textDAT', {text: ''});
       add(comp, 'out_text', 'nullDAT', {inputs: ['text']});
-      add(comp, 'control', 'constantCHOP', {pars: {const0name: 'control', const0value: 0}});
+      // The sidechain envelope the workbench derives from the source (audio-engine.mjs amplitudeEnvelope): peak level,
+      // 6 ms attack, 75 ms release, times 5, limited to 1. It is the only producer of the control signal.
+      add(comp, 'env_peak', 'expressionCHOP', {inputs: ['audio'], pars: {expr0expr: expr('abs(me.inputVal)')}});
+      add(comp, 'env_follow', 'lagCHOP', {inputs: ['env_peak'], pars: {lag1: 0.006, lag2: 0.075}});
+      add(comp, 'control', 'expressionCHOP', {inputs: ['env_follow'], pars: {expr0expr: expr('min(1, me.inputVal * 5)')}});
       add(comp, 'out_control', 'nullCHOP', {inputs: ['control']});
     } else if (!isFx) {
       add(comp, 'gain_picture', 'levelTOP', {inputs: ['in_picture'], pars: {opacity: gainExpr()}});

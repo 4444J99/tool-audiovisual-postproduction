@@ -178,13 +178,48 @@ def base_values(node, read):
     return base
 
 
+def release_rules(spec, path):
+    """Drop the rules that govern one control, as the workbench does when that control is edited by hand: its
+    events, its automation lane and (for a processor parameter) its macro mapping. Returns True when anything went."""
+    before = (len(spec['events']), len(spec['automation']), len(spec['macro']))
+    spec['events'] = [e for e in spec['events'] if e['parameter'] != path]
+    spec['automation'] = [lane for lane in spec['automation'] if lane['parameter'] != path]
+    if path.startswith('params.'):
+        spec['macro'] = [m for m in spec['macro'] if m['parameter'] != path[7:]]
+    return before != (len(spec['events']), len(spec['automation']), len(spec['macro']))
+
+
 # --- TouchDesigner glue ----------------------------------------------------------------------------
 _LAST = {}
+_RULES = {}   # rack path -> {processor id: the node's resolve block, edited live}
+
+
+def _contract_rules(rack):
+    contract = json.loads(rack.op('td_contract').text)
+    rules = _RULES.setdefault(rack.path, {})
+    for node in contract['nodes']:
+        if node['id'] not in rules:
+            rules[node['id']] = json.loads(json.dumps(node['resolve']))
+        node['resolve'] = rules[node['id']]
+    return contract
+
+
+def release(rack, comp, path):
+    """A person edited a control by hand in this network: the workbench drops that control's automation, events and
+    macro mapping (web/fx/app.mjs setParameter), so the resolver drops them too. Returns True when a rule went."""
+    contract = _contract_rules(rack)
+    for node in contract['nodes']:
+        if node['comp'] == comp:
+            changed = release_rules(node['resolve'], path)
+            if changed:
+                _LAST.pop((rack.path, comp), None)
+            return changed
+    return False
 
 
 def tick(rack):
     """Resolve the rack at its playhead and refresh every processor's `resolved` table that changed."""
-    contract = json.loads(rack.op('td_contract').text)
+    contract = _contract_rules(rack)
     time = float(rack.par.Time.eval())
     bases, controls = {}, {}
     for node in contract['nodes']:
@@ -208,3 +243,4 @@ def tick(rack):
 
 def reset():
     _LAST.clear()
+    _RULES.clear()

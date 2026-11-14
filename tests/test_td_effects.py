@@ -204,5 +204,20 @@ class EffectTests(unittest.TestCase):
         self.assertEqual(by_name["fb_state"]["pars"]["top"], {"ref": "fx_fx_1/fb_sum"})
 
 
+class EnvelopeTests(unittest.TestCase):
+    def test_the_source_produces_the_sidechain_envelope_the_workbench_derives(self):
+        spec = spec_for(FIXTURES / "message-impact.json")
+        source = {o["name"]: o for o in spec["operators"] if o["parent"] == "fx_source"}
+        self.assertEqual(source["out_control"]["inputs"], ["control"])
+        self.assertEqual(source["control"]["inputs"], ["env_follow"])
+        self.assertEqual(source["env_follow"]["inputs"], ["env_peak"])
+        self.assertEqual(source["env_peak"]["inputs"], ["audio"])
+        self.assertEqual(source["env_follow"]["pars"], {"lag1": 0.006, "lag2": 0.075})   # attack and release of amplitudeEnvelope
+        peak, limit = (source[n]["pars"]["expr0expr"]["expr"] for n in ("env_peak", "control"))
+        self.assertEqual([evaluate(peak, {}, sample=x) for x in (-0.5, 0.25)], [0.5, 0.25])
+        self.assertEqual([evaluate(limit, {}, sample=x) for x in (0.1, 0.5, 0.9)], [0.5, 1, 1])   # times 5, limited to 1
+        self.assertFalse([o for o in spec["operators"] if o["type"] == "constantCHOP" and o["name"] == "control"])
+
+
 if __name__ == "__main__":
     unittest.main()

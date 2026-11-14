@@ -14,7 +14,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "web" / "fx" / "fixtures"
-NAMES = sorted(p.name for p in FIXTURES.glob("*.json") if p.name != "index.json")
+def is_patch(path):
+    data = json.loads(path.read_text())
+    return isinstance(data, dict) and isinstance(data.get("nodes"), list) and isinstance(data.get("connections"), list)
+
+
+NAMES = sorted(p.name for p in FIXTURES.glob("*.json") if is_patch(p))
 
 
 def load(name, path):
@@ -51,10 +56,7 @@ class ParityTests(unittest.TestCase):
     def compare_all(self, *flags):
         compared = 0
         for name in NAMES:
-            try:
-                data = oracle(name, *flags)
-            except AssertionError:
-                continue   # a fixture that is not a patch (the node run fails validation)
+            data = oracle(name, *flags)   # a patch the oracle rejects fails the test; it is never skipped
             bases = bases_of(data["contract"])
             for case in data["cases"]:
                 got = resolve.resolve_rack(data["contract"], bases, case["time"], case["controls"])
@@ -70,13 +72,15 @@ class ParityTests(unittest.TestCase):
                     compared += 1
         return compared
 
+    def test_every_patch_fixture_is_compared(self):
+        self.assertGreaterEqual(len(NAMES), 20)
+        self.assertIn("closed-inbox.json", NAMES)
+        self.assertNotIn("index.json", NAMES)
+
     def test_the_fixtures_exercise_automation_events_modulation_and_macros(self):
         seen = {"automation": False, "events": False, "modulation": False, "macro": False, "solo": False}
         for name in NAMES:
-            try:
-                data = oracle(name)
-            except AssertionError:
-                continue
+            data = oracle(name)
             for node in data["contract"]["nodes"]:
                 block = node["resolve"]
                 seen["automation"] |= bool(block["automation"])
@@ -126,6 +130,20 @@ class RackScopeTests(unittest.TestCase):
         for bad in (math.nan, math.inf, "1"):
             with self.assertRaises(ValueError):
                 resolve.resolve_rack(contract_of(("one", block())), {"one": base()}, bad)
+
+
+class ReleaseTests(unittest.TestCase):
+    def test_release_drops_the_events_lane_and_macro_of_one_control_only(self):
+        spec = block(automation=[{"parameter": "params.a", "interpolation": "linear", "keyframes": [{"time": 0, "value": 1}, {"time": 1, "value": 5}]},
+                                 {"parameter": "wet", "interpolation": "step", "keyframes": [{"time": 0, "value": 0.2}]}],
+                     events=[{"time": 0.5, "parameter": "params.a", "value": 3}, {"time": 0.5, "parameter": "wet", "value": 0.4}],
+                     macro=[{"parameter": "a", "min": 0, "max": 8, "curve": "linear"}])
+        self.assertEqual(resolve.resolve_node(spec, base(), 1.0)["params"]["a"], 3)
+        self.assertTrue(resolve.release_rules(spec, "params.a"))
+        self.assertEqual((spec["events"], spec["macro"], [lane["parameter"] for lane in spec["automation"]]), ([{"time": 0.5, "parameter": "wet", "value": 0.4}], [], ["wet"]))
+        self.assertEqual(resolve.resolve_node(spec, base(a=7.0), 1.0)["params"]["a"], 7.0)   # the hand-set base now stands
+        self.assertFalse(resolve.release_rules(spec, "params.a"))
+        self.assertEqual(resolve.resolve_node(spec, base(wet=0.9), 1.0)["wet"], 0.4)           # the wet rules are untouched
 
 
 class Table:
@@ -209,6 +227,21 @@ class TickTests(unittest.TestCase):
         comp.control.value = 0.0
         resolve.tick(rack)
         self.assertEqual((comp.table.clears, dict(map(tuple, comp.table.rows))["param.a"]), (2, 8.0))
+
+    def test_a_hand_edit_releases_the_rules_for_that_control_and_the_next_tick_follows_the_base(self):
+        resolve.reset()
+        node = {"id": "a", "comp": "fx_a", "resolve": block(events=[{"time": 0, "parameter": "params.a", "value": 6}]),
+                "controls": [{"par": "Intensity", "path": "intensity", "kind": "range", "value": 1}, {"par": "Wet", "path": "wet", "kind": "range", "value": 1},
+                             {"par": "A", "path": "params.a", "kind": "range", "value": 1}, {"par": "Bypass", "path": "bypass", "kind": "toggle", "value": False},
+                             {"par": "Solo", "path": "solo", "kind": "toggle", "value": False}]}
+        comp = Comp({"Intensity": 1.0, "Wet": 1.0, "A": 2.0, "Bypass": 0, "Solo": 0})
+        rack = Rack({"nodes": [node]}, 1.0, {"fx_a": comp})
+        self.assertEqual(resolve.tick(rack)["a"]["params"]["a"], 6)
+        self.assertTrue(resolve.release(rack, "fx_a", "params.a"))
+        self.assertEqual(resolve.tick(rack)["a"]["params"]["a"], 2.0)
+        self.assertEqual(dict(map(tuple, comp.table.rows))["param.a"], 2.0)
+        self.assertFalse(resolve.release(rack, "fx_a", "params.a"))
+        self.assertFalse(resolve.release(rack, "fx_missing", "params.a"))
 
 
 if __name__ == "__main__":
