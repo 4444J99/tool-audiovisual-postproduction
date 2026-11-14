@@ -9,6 +9,7 @@ JSON, exits 2 and creates no output directory.
 """
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -41,7 +42,7 @@ def main(argv=None):
         return 0
     try:
         summary = shot_animatic.write_animatic(plan, Path(args.demo or args.output), video=args.video)
-    except (RuntimeError, OSError) as error:
+    except (RuntimeError, OSError, subprocess.CalledProcessError) as error:
         print(json.dumps({"error": str(error)}))
         return 2
     summary["warnings"] = report["warnings"]

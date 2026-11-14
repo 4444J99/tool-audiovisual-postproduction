@@ -162,6 +162,38 @@ class ShotPlanValidationTests(unittest.TestCase):
         self.assertIn("003  S03", edl)
         self.assertIn("00:00:16:06 00:00:22:12", edl)
 
+    def test_pair_order_does_not_hide_an_axis_crossing(self):
+        p = plan()
+        p["shots"][2]["camera"]["position"] = [0.5, 1.3, 3.0]
+        p["shots"][2]["axis"]["pair"] = ["B", "A"]
+        self.assertTrue(any("crosses the axis of action" in e for e in errors(p)))
+
+    def test_malformed_collections_give_errors_not_exceptions(self):
+        for path, value in ((("shots", 0, "performers"), 5), (("shots", 0, "uses"), "x"), (("performers",), {}),
+                            (("set", "elements"), "x"), (("shots", 0, "action"), 42)):
+            p = plan()
+            target = p
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            self.assertTrue(errors(p), path)
+        self.assertTrue(sp.validate_plan([])["errors"])
+        p = plan()
+        p["shots"][2]["frames"]["handle_out"] = 3
+        p["shots"][2]["cache_strategy"] = {"flame": "loop"}
+        self.assertTrue(any("must be an object" in e for e in errors(p)))
+
+    def test_element_and_cache_ids_must_differ(self):
+        p = plan()
+        p["set"]["elements"].append({"id": "flame", "center": [1.0, 0.3]})
+        self.assertTrue(any("both an element and a cache" in e for e in errors(p)))
+
+    def test_fps_must_be_a_positive_integer(self):
+        for fps in (0.5, 0, True, "24"):
+            p = plan()
+            p["fps"] = fps
+            self.assertTrue(any("fps must be" in e for e in errors(p)), fps)
+
 
 if __name__ == "__main__":
     unittest.main()

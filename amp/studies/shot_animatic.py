@@ -112,7 +112,7 @@ def _png_bytes(image: Image.Image) -> bytes:
 
 def write_animatic(plan: Mapping[str, Any], output: Path, video: bool = False) -> dict[str, Any]:
     ledger = sp.build_ledger(plan)
-    output = Path(output)
+    output = Path(output).resolve()
     cards = output / "cards"
     cards.mkdir(parents=True, exist_ok=True)
     images, hashes = [], {}

@@ -70,6 +70,14 @@ class ShotPlanCliTests(unittest.TestCase):
                                    capture_output=True, text=True, check=True)
             self.assertEqual(int(probe.stdout.strip()), 540)
 
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg not installed")
+    def test_video_with_relative_output_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run([sys.executable, str(TOOL), "--demo", "rel/out", "--video"], capture_output=True,
+                                    text=True, cwd=tmp, env={**__import__("os").environ, "PYTHONPATH": str(ROOT)})
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertTrue((Path(tmp) / "rel/out/animatic.mp4").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

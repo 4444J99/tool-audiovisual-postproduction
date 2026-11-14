@@ -98,16 +98,27 @@ def shot_frames(shot: Mapping[str, Any]) -> dict[str, int]:
             "render_start": start - hin, "render_end": end + hout, "render_count": end - start + 1 + hin + hout}
 
 
+def _list(value, name: str, errors: list[str]) -> list:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        errors.append(f"{name}: must be a list")
+        return []
+    return value
+
+
 def validate_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
     """Return a report ``{"errors": [...], "warnings": [...]}``; never raises on content problems."""
     errors: list[str] = []
     warnings: list[str] = []
+    if not isinstance(plan, Mapping):
+        return {"errors": ["plan: top level must be a JSON object"], "warnings": warnings}
     if plan.get("schema") != SCHEMA:
         errors.append(f"plan: schema must be {SCHEMA}")
         return {"errors": errors, "warnings": warnings}
     fps = plan.get("fps")
-    if not (_is_num(fps) and fps > 0):
-        errors.append("plan: fps must be a positive number")
+    if not (isinstance(fps, int) and not isinstance(fps, bool) and fps >= 1):
+        errors.append("plan: fps must be a positive integer")
         fps = 24
     scene = plan.get("set")
     if not isinstance(scene, dict) or not isinstance(scene.get("bounds"), dict):
@@ -118,21 +129,23 @@ def validate_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
         errors.append("plan: set.bounds.x and set.bounds.z must each be [min, max] with min < max")
         return {"errors": errors, "warnings": warnings}
     elements = {}
-    for element in scene.get("elements", []):
+    for element in _list(scene.get("elements"), "set.elements", errors):
         eid = element.get("id") if isinstance(element, dict) else None
         if not isinstance(eid, str) or not eid or eid in elements or not _vec(element.get("center"), 2):
             errors.append(f"set: element {eid!r} needs a unique id and a [x, z] center")
             continue
         elements[eid] = element
     caches = {}
-    for cache in scene.get("caches", []):
+    for cache in _list(scene.get("caches"), "set.caches", errors):
         cid = cache.get("id") if isinstance(cache, dict) else None
         if not isinstance(cid, str) or cid in caches or not _int_range(cache.get("frames")):
             errors.append(f"set: cache {cid!r} needs a unique id and integer frames [first, last]")
             continue
         caches[cid] = cache
+    for shared in sorted(set(elements) & set(caches)):
+        errors.append(f"set: id {shared!r} is used by both an element and a cache")
     performers = {}
-    for performer in plan.get("performers", []):
+    for performer in _list(plan.get("performers"), "performers", errors):
         pid = performer.get("id") if isinstance(performer, dict) else None
         if not isinstance(pid, str) or not pid or pid in performers or not _vec(performer.get("position"), 2):
             errors.append(f"performers: {pid!r} needs a unique id and an [x, z] position")
@@ -187,7 +200,7 @@ def validate_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
             errors.append(f"{label}: lens_mm {camera['lens_mm']} outside 8 to 400")
             continue
         half = hfov_deg(camera["lens_mm"], camera.get("sensor_width_mm", 36.0)) / 2.0
-        listed = shot.get("performers", [])
+        listed = _list(shot.get("performers"), f"{label}: performers", errors)
         for pid in listed:
             if pid not in performers:
                 errors.append(f"{label}: performer {pid!r} is not defined")
@@ -197,22 +210,25 @@ def validate_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
                 errors.append(f"{label}: performer {pid} is {offset:.1f} deg off axis, outside the {half:.1f} deg half field of view")
             elif offset >= half * (1.0 - EDGE_FRACTION):
                 warnings.append(f"{label}: performer {pid} sits in the outer {int(EDGE_FRACTION * 100)} percent of the frame")
+        if "action" in shot and not isinstance(shot["action"], str):
+            errors.append(f"{label}: action must be a string")
         axis = shot.get("axis")
         if axis is not None:
             pair = axis.get("pair") if isinstance(axis, dict) else None
             if not (isinstance(pair, list) and len(pair) == 2 and all(p in performers for p in pair)):
                 errors.append(f"{label}: axis.pair needs two defined performer ids")
             else:
-                side = _side(performers[pair[0]]["position"], performers[pair[1]]["position"], (px, pz))
+                first, second = sorted(pair)
+                side = _side(performers[first]["position"], performers[second]["position"], (px, pz))
                 if abs(side) < 1e-6:
                     errors.append(f"{label}: camera stands on the axis of action {pair[0]}-{pair[1]}")
                 else:
-                    key = (pair[0], pair[1])
+                    key = (first, second)
                     if key in previous_side and previous_side[key][1] * side < 0 and not axis.get("crossing"):
                         errors.append(f"{label}: camera crosses the axis of action {pair[0]}-{pair[1]} "
                                       f"relative to {previous_side[key][0]} with no declared crossing reason")
                     previous_side[key] = (sid, side)
-        for use in shot.get("uses", []):
+        for use in _list(shot.get("uses"), f"{label}: uses", errors):
             if not isinstance(use, dict) or "id" not in use:
                 errors.append(f"{label}: each uses entry needs an id")
                 continue
@@ -231,7 +247,11 @@ def validate_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
                 if span:
                     first, last = cache["frames"]
                     inside = first <= span["render_start"] and span["render_end"] <= last
-                    strategy = shot.get("cache_strategy", {}).get(uid) if isinstance(shot.get("cache_strategy"), dict) else None
+                    raw = shot.get("cache_strategy")
+                    strategy = raw.get(uid) if isinstance(raw, dict) else None
+                    if strategy is not None and not isinstance(strategy, dict):
+                        errors.append(f"{label}: cache_strategy for {uid} must be an object")
+                        strategy = {}
                     if not inside:
                         if strategy is None:
                             errors.append(f"{label}: cache {uid} covers frames {first}-{last} but the shot needs "
