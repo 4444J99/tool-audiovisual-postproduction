@@ -3,13 +3,14 @@
  * surface the generated network depends on: the spec carries a copy, the validator rejects anything
  * outside it, and the builder refuses it before creating a single operator.
  *
- * The names come from the TouchDesigner operator reference. They have not been run in TouchDesigner yet
+ * The names are checked against TouchDesigner's own parameter reference (`Config/TDParameterHelp.json` in the
+ * application bundle) by `check-vocabulary.mjs`. The network has not been built in TouchDesigner yet
  * (see docs/FX-TOUCHDESIGNER.md); when a name is wrong in a given build, it is corrected here, once.
  */
 export const VOCABULARY = Object.freeze({
   baseCOMP: {family: 'COMP', pars: []},
   selectTOP: {family: 'TOP', pars: ['top']},
-  selectCHOP: {family: 'CHOP', pars: ['chops']},
+  selectCHOP: {family: 'CHOP', pars: ['chop']},
   selectDAT: {family: 'DAT', pars: ['dat']},
   nullTOP: {family: 'TOP', pars: []},
   nullCHOP: {family: 'CHOP', pars: []},
@@ -22,7 +23,7 @@ export const VOCABULARY = Object.freeze({
   moviefileinTOP: {family: 'TOP', pars: ['file']},
   mathCHOP: {family: 'CHOP', pars: ['gain', 'chopop']},
   switchCHOP: {family: 'CHOP', pars: ['index']},
-  constantCHOP: {family: 'CHOP', pars: ['name0', 'value0']},
+  constantCHOP: {family: 'CHOP', pars: ['const0name', 'const0value']},
   audiofileinCHOP: {family: 'CHOP', pars: ['file']},
   textDAT: {family: 'DAT', pars: []},
   tableDAT: {family: 'DAT', pars: []},
@@ -33,7 +34,7 @@ export const VOCABULARY = Object.freeze({
 
 /** The signal port families: picture and matte are image streams, audio and control are channels, text is a table. */
 export const PORT_FAMILY = Object.freeze({picture: 'TOP', matte: 'TOP', audio: 'CHOP', control: 'CHOP', text: 'DAT'});
-export const SELECT = Object.freeze({TOP: ['selectTOP', 'top'], CHOP: ['selectCHOP', 'chops'], DAT: ['selectDAT', 'dat']});
+export const SELECT = Object.freeze({TOP: ['selectTOP', 'top'], CHOP: ['selectCHOP', 'chop'], DAT: ['selectDAT', 'dat']});
 export const NULL = Object.freeze({TOP: 'nullTOP', CHOP: 'nullCHOP', DAT: 'nullDAT'});
 
 export const CUSTOM_PAR_NAME = /^[A-Z][a-z0-9]*$/;

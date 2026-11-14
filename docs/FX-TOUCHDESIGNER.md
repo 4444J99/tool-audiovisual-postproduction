@@ -148,7 +148,9 @@ mapping is recorded in the contract), Solo (mirrored as state only), the source 
 and audio device output. Text wires carry no gain, and several text wires at one mix read only the first.
 
 Parameter and operator names the network relies on are listed in one table, `tools/td-network/vocabulary.mjs`. The
-spec carries a copy and the builder refuses a spec with a name outside it before creating anything.
+spec carries a copy and the builder refuses a spec with a name outside it before creating anything. On a machine with
+TouchDesigner installed, `node tools/td-network/check-vocabulary.mjs` checks every name in that table against the
+parameter reference inside the application (read-only; it found and corrected `chop`, `const0name` and `const0value`).
 
 ### Try the contract without TouchDesigner
 
@@ -182,8 +184,9 @@ the workbench applies; the builder runs against a fake operator tree that only o
 lists; and one test runs a workbench session, the real bridge and the generated module over real UDP and WebSocket
 connections.
 
-**Not verified:** a real TouchDesigner session (the generated network has never been built in TouchDesigner: operator
-and parameter names, the `.module` access pattern and the Parameter Execute behaviour are from its documentation); the Control tab's new section in a browser against the private media
+**Not verified:** a real TouchDesigner session (the generated network has never been built in TouchDesigner: the
+operator and parameter names are checked against TouchDesigner's own parameter reference, but the network, the `.module`
+access pattern and the Parameter Execute behaviour have not been run); the Control tab's new section in a browser against the private media
 pack (the surface was checked with a stand-in rack only); a physical controller. The bridge's WebSocket server is a
 small in-repo implementation of the RFC 6455 text subset (no extensions, no binary frames); it is tested against Node's
 own WebSocket client but not against TouchDesigner's.

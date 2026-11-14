@@ -49,7 +49,7 @@ class FakePage:
             par = FakePar(self.owner, name)
             par.style, par.label, par.page = style, label, self.name
             self.owner.custom[name] = par
-            return (par,)
+            return (par,)   # like TouchDesigner's ParGroup: indexable, first member is the parameter
         return make
 
     def __getattr__(self, attribute):
@@ -414,6 +414,28 @@ class OscModuleTests(unittest.TestCase):
         import ast
         for path in sorted(PYTHON_DIR.glob("*.py")):
             ast.parse(path.read_text(), filename=str(path), feature_version=(3, 11))
+
+
+class TouchDesignerBackendTests(unittest.TestCase):
+    def test_osc_values_are_sent_as_positional_arguments_not_as_one_list(self):
+        """OSC Out DAT's sendOSC(address, *values, ...) takes the values positionally."""
+        sent = []
+
+        class Out:
+            def sendOSC(self, address, *values, **options):
+                sent.append((address, values))
+
+        class Rack:
+            path = "/project1/fx_rack"
+
+            def op(self, name):
+                return Out() if name == "osc_out" else None
+
+        backend = osc_lib.TDBackend(Rack())
+        backend.send("/fx/node/a/intensity", [0.25])
+        backend.send("/fx/sync", [])
+        backend.send("/fx/selected", ["a"])
+        self.assertEqual(sent, [("/fx/node/a/intensity", (0.25,)), ("/fx/sync", ()), ("/fx/selected", ("a",))])
 
 
 class GoldenAddressTests(unittest.TestCase):

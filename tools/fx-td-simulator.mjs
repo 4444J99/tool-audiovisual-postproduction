@@ -58,7 +58,7 @@ if (linked && spec) {
   const loop = spec.contract.rack.transport.find(t => t.name === 'loop'), next = last(loop.address) ? 0 : 1;
   let mark = log.length; await send(loop.address, [next]); await wait(700);
   note(`transport loop becomes ${next}`, reportedSince(mark, loop.address, a => a[0] === next));
-  await send('/fx/bogus/address', [0.5]); await send(nodes[0].controls[0].address, ['wrong-type']); await send('/fx/node/no-such-node/intensity', [0.5]); await wait(800);
+  await send('/fx/bogus/address', [0.5]); if (nodes.length) await send(nodes[0].controls[0].address, ['wrong-type']); await send('/fx/node/no-such-node/intensity', [0.5]); await wait(800);
   mark = log.length; await send(spec.contract.rack.sync.address, []); await wait(1200);
   note('link survives unknown address, wrong type and unknown id (rack still answers sync)', reportedSince(mark, spec.contract.rack.count.address));
 } else if (linked) {

@@ -8,6 +8,8 @@ import {spawnSync} from 'node:child_process';
 import {oscControl, controller, createPatch, PATCH_CATALOG, CATALOG, freshPatch, validatePatch} from './runtime.mjs';
 import {buildNetworkSpec, validateNetworkSpec, operatorName, customParName} from '../../tools/td-network/network-spec.mjs';
 import {serialise, buildScript} from '../../tools/td-network/emit.mjs';
+import {checkVocabulary} from '../../tools/td-network/check-vocabulary.mjs';
+import {VOCABULARY} from '../../tools/td-network/vocabulary.mjs';
 
 const {interpretOsc, OscFeedback, encodeSegment} = oscControl;
 const here = dirname(fileURLToPath(import.meta.url));
@@ -392,8 +394,8 @@ test('the headless OSC codec agrees with the Node codec in both directions', asy
   } finally { await td.close(); await new Promise(r => socket.close(r)); }
 });
 
-test('the simulator, driven by the generated spec, passes against a rack that follows the contract', async () => {
-  const patch = createPatch('closed-inbox'), spec = buildNetworkSpec(patch);
+async function runSimulatorAgainst(patch) {
+  const spec = buildNetworkSpec(patch);
   const dir = mkdtempSync(join(tmpdir(), 'td-sim-'));
   const specPath = join(dir, 'network.json'), resultPath = join(dir, 'result.json');
   writeFileSync(specPath, serialise(spec));
@@ -410,12 +412,41 @@ test('the simulator, driven by the generated spec, passes against a rack that fo
     let output = '';
     run.stdout.on('data', chunk => { output += chunk; }); run.stderr.on('data', chunk => { output += chunk; });
     const code = await new Promise(resolve => run.once('close', resolve));
-    const result = JSON.parse(readFileSync(resultPath, 'utf8'));
-    assert.equal(code, 0, output);
-    assert.equal(result.passed, true);
-    assert.ok(result.checks.length >= 3 * spec.contract.nodes.length, `checks: ${result.checks.length}`);
-    for (const node of spec.contract.nodes) assert.ok(result.checks.some(c => c.name.startsWith(`${node.id}: ${node.controls.find(x => x.path === 'intensity').address}`)), node.id);
+    return {spec, code, output, result: JSON.parse(readFileSync(resultPath, 'utf8'))};
   } finally { session.disconnect(); await bridge.close(); }
+}
+
+test('the simulator, driven by the generated spec, passes against a rack that follows the contract', async () => {
+  const {spec, code, output, result} = await runSimulatorAgainst(createPatch('closed-inbox'));
+  assert.equal(code, 0, output);
+  assert.equal(result.passed, true);
+  assert.ok(result.checks.length >= 3 * spec.contract.nodes.length, `checks: ${result.checks.length}`);
+  for (const node of spec.contract.nodes) assert.ok(result.checks.some(c => c.name.startsWith(`${node.id}: ${node.controls.find(x => x.path === 'intensity').address}`)), node.id);
+});
+
+test('the simulator copes with a generated spec that has no processors', async () => {
+  const patch = chainPatch([]);
+  assert.equal(validatePatch(patch).valid, true, validatePatch(patch).errors.join(' '));
+  const {spec, code, output, result} = await runSimulatorAgainst(patch);
+  assert.equal(spec.contract.nodes.length, 0);
+  assert.equal(code, 0, output);
+  assert.equal(result.passed, true);
+  assert.ok(result.checks.some(c => /transport loop/.test(c.name)));
+});
+
+test('the vocabulary checker flags names the TouchDesigner reference does not know, and accepts colour tuplets', () => {
+  const help = {product: 'TouchDesigner', help: {CHOPs: {selectCHOP: {parameters: {chop: {parType: 'CHOP'}}}, constantCHOP: {parameters: {const0name: {}, const0value: {}}}}, TOPs: {constantTOP: {parameters: {color: {parType: 'RGB'}, alpha: {}}}}}};
+  const vocabulary = {
+    selectCHOP: {family: 'CHOP', pars: ['chop']}, constantCHOP: {family: 'CHOP', pars: ['const0name', 'const0value']},
+    constantTOP: {family: 'TOP', pars: ['colorr', 'colorg', 'colorb', 'alpha']},
+  };
+  assert.deepEqual(checkVocabulary(help, vocabulary), []);
+  assert.deepEqual(checkVocabulary(help, {...vocabulary, selectCHOP: {family: 'CHOP', pars: ['chops']}}), ['selectCHOP.chops: not a parameter in the reference']);
+  assert.deepEqual(checkVocabulary(help, {...vocabulary, constantCHOP: {family: 'CHOP', pars: ['name0']}}), ['constantCHOP.name0: not a parameter in the reference']);
+  assert.deepEqual(checkVocabulary(help, {noiseTOP: {family: 'TOP', pars: []}}), ['noiseTOP: not an operator type in the reference']);
+  // the vocabulary the generator uses never names the parameters the review found wrong
+  assert.deepEqual(VOCABULARY.selectCHOP.pars, ['chop']);
+  assert.deepEqual(VOCABULARY.constantCHOP.pars, ['const0name', 'const0value']);
 });
 
 test('an off-grid value on the rack (a preset, or an automation sample) is not snapped by the echo of its own report', () => {

@@ -158,7 +158,7 @@ export function buildNetworkSpec(patch, options = {}) {
       add(comp, 'out_matte', 'nullTOP', {inputs: ['matte']});
       add(comp, 'text', 'textDAT', {text: ''});
       add(comp, 'out_text', 'nullDAT', {inputs: ['text']});
-      add(comp, 'control', 'constantCHOP', {pars: {name0: 'control', value0: 0}});
+      add(comp, 'control', 'constantCHOP', {pars: {const0name: 'control', const0value: 0}});
       add(comp, 'out_control', 'nullCHOP', {inputs: ['control']});
     } else if (!isFx) {
       add(comp, 'gain_picture', 'levelTOP', {inputs: ['in_picture'], pars: {opacity: gainExpr()}});
@@ -221,7 +221,7 @@ export function buildNetworkSpec(patch, options = {}) {
     ['par_exec_nodes', 'parameterexecuteDAT', {pars: {op: 'fx_*', pars: '*', custom: 1, builtin: 0, valuechange: 1, onpulse: 1}, text: pythonText('fx_td_par_exec_nodes.py')}],
     ['par_exec_rack', 'parameterexecuteDAT', {pars: {op: {expr: 'parent().path', par: null}, pars: '*', custom: 1, builtin: 0, valuechange: 1, onpulse: 1}, text: pythonText('fx_td_par_exec_rack.py')}],
     ['video_out', 'selectTOP', {pars: {top: {ref: `${names.get(output.id)}/out_picture`}}}],
-    ['audio_out', 'selectCHOP', {pars: {chops: {ref: `${names.get(output.id)}/out_audio`}}}],
+    ['audio_out', 'selectCHOP', {pars: {chop: {ref: `${names.get(output.id)}/out_audio`}}}],
   ];
   for (const [name, type, extra] of rackOps) add('', name, type, extra);
   // Components first is not required by the builder, but a stable, readable order is: plumbing after the nodes.

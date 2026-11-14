@@ -214,7 +214,7 @@ class TDBackend:
             target.val = value
 
     def send(self, address, args):
-        self.rack.op('osc_out').sendOSC(address, list(args))
+        self.rack.op('osc_out').sendOSC(address, *args)   # values are positional arguments, not a list
 
 
 _LINKS = {}

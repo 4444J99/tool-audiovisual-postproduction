@@ -62,7 +62,7 @@ def _custom_pars(target, definitions):
         page = _page(target, item['page'], pages)
         method = getattr(page, _APPEND[item['style']])
         created = method(item['name'], label=item['label'])
-        par = created[0] if isinstance(created, (tuple, list)) else created
+        par = created[0]   # the call returns a ParGroup; the first (only) member is the parameter
         for key in ('min', 'max', 'clampMin', 'clampMax', 'normMin', 'normMax', 'default'):
             if key in item:
                 setattr(par, key, item[key])
