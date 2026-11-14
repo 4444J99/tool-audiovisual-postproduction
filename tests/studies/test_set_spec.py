@@ -284,6 +284,15 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertEqual(errors(s), [])
         ss.scene_graph(s)
 
+    def test_light_size_must_be_a_finite_positive_number(self):
+        for bad in (None, "bad", 0, -1.0, float("inf"), True, [2]):
+            s = spec()
+            s["lights"][0]["size"] = bad
+            self.assertTrue(any("size must be" in e for e in errors(s)), bad)
+        s = spec()
+        s["lights"][0]["size"] = 0.5
+        self.assertEqual(errors(s), [])
+
     def test_generated_material_names_fit_blender(self):
         s = spec()
         long_name = "m" * 57                          # 57 + len("-soffit") = 64 > 63

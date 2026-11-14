@@ -229,6 +229,8 @@ def validate_spec(spec: Mapping[str, Any]) -> dict[str, list[str]]:
             errors.append(f"{label}: energy must be positive")
         if "color" in light and not (isinstance(light["color"], str) and HEX.match(light["color"])):
             errors.append(f"{label}: color must be a six-digit hex string")
+        if "size" in light and not _positive(light["size"]):
+            errors.append(f"{label}: size must be a finite positive number")
         if "aim" in light and not _vec(light["aim"], 3):
             errors.append(f"{label}: aim must be [x, y, z]")
         if light.get("kind") in ("sun", "area") and "aim" not in light:
