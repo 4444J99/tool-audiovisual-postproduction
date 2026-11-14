@@ -177,6 +177,94 @@ class FillTests(unittest.TestCase):
         self.assertEqual(hole["crossfade_before_s"], 0.0)   # the neighbour is speech, so no crossfade over it
         self.assertTrue(np.array_equal(audio[start - 800:start], filled[start - 800:start]))
 
+def noise_track(sr, seconds, seed, level=0.01, channels=1):
+    rng = np.random.default_rng(seed)
+    shape = (int(sr * seconds), channels) if channels > 1 else int(sr * seconds)
+    return rng.standard_normal(shape) * level
+
+
+class ReviewRegressionTests(unittest.TestCase):
+    def test_uncorrelated_stereo_tone_is_not_attenuated(self):
+        track = noise_track(SR, 4.0, 1, channels=2)
+        track[SR:SR + 4000] = 0.0
+        filled, report = fill(track, seed=1)
+        check = report["checks"][0]
+        self.assertLess(check["level_error_db"], 1.0)
+        self.assertLess(abs(check["gain_db"] if "gain_db" in check else report["holes"][0]["gain_db"]), 1.0)
+        self.assertAlmostEqual(np.std(filled[SR:SR + 4000]), 0.01, delta=0.0015)
+
+    def test_opposite_polarity_channels_keep_their_level(self):
+        track = noise_track(SR, 4.0, 2)
+        stereo = np.stack([track, -track], axis=1)
+        stereo[SR:SR + 4000] = 0.0
+        filled, report = fill(stereo, seed=1)
+        self.assertLess(report["checks"][0]["level_error_db"], 1.0)
+        self.assertAlmostEqual(np.std(filled[SR:SR + 4000, 0]), 0.01, delta=0.0015)
+        self.assertTrue(np.allclose(filled[SR:SR + 4000, 0], -filled[SR:SR + 4000, 1]))
+
+    def test_speech_neighbours_are_excluded_from_the_edge_check(self):
+        audio, _ = dialogue()
+        start = int(1.2 * SR)
+        audio[start:start + int(0.3 * SR)] = 0.0                   # hole starting inside the first burst
+        _, report = fill(audio, seed=1)
+        hole = next(h for h in report["holes"] if abs(h["start_s"] - 1.2) < 1e-3)
+        self.assertFalse(hole["neighbour_before_is_tone"])
+        check = next(c for c in report["checks"] if abs(c["start_s"] - 1.2) < 1e-3)
+        # only the tone side may contribute; the intentional speech-to-pause step is not a failure
+        self.assertTrue(check["edge_level_deviation_db"] is None or check["edge_level_deviation_db"] < 6.0)
+
+    def test_hole_near_the_start_with_a_partial_window_fills_without_error(self):
+        track = noise_track(SR, 3.0, 3)
+        track[60:1660] = 0.0                                        # only 60 quiet samples before the hole
+        filled, report = fill(track, seed=1)
+        self.assertEqual(report["remaining_digital_silence"], [])
+        self.assertTrue(report["untouched_identical"])
+        self.assertLessEqual(report["holes"][0]["pre_samples"], 60)
+        self.assertEqual(len(filled), len(track))
+
+    def test_hole_near_the_end_with_a_partial_window_fills_without_error(self):
+        track = noise_track(SR, 3.0, 4)
+        n = len(track)
+        track[n - 1660:n - 60] = 0.0
+        filled, report = fill(track, seed=1)
+        self.assertEqual(report["remaining_digital_silence"], [])
+        self.assertTrue(report["untouched_identical"])
+        self.assertLessEqual(report["holes"][0]["post_samples"], 60)
+
+    def test_hole_flush_with_the_recording_edges_fills(self):
+        track = noise_track(SR, 3.0, 5)
+        track[:1600] = 0.0
+        track[-1600:] = 0.0
+        filled, report = fill(track, seed=1)
+        self.assertEqual(report["remaining_digital_silence"], [])
+        self.assertEqual((report["holes"][0]["pre_samples"], report["holes"][1]["post_samples"]), (0, 0))
+
+    def test_high_sample_rate_report_keeps_exact_sample_positions(self):
+        sr = 192000
+        track = noise_track(sr, 1.5, 6)
+        track[192001:192001 + 19200] = 0.0                          # 1.00001 s rounds to sample 192002 at five decimals
+        filled, report = rt.fill_holes(track, sr, seed=1)
+        full = rt.fill_report(track, filled, sr, report)
+        self.assertEqual(full["holes"][0]["start_sample"], 192001)
+        self.assertTrue(full["untouched_identical"])
+        self.assertEqual(full["untouched_samples"] + full["patched_samples"], len(track))
+
+    def test_holes_closer_than_a_crossfade_do_not_overwrite_each_other(self):
+        track = noise_track(SR, 3.0, 7)
+        track[16000:17600] = 0.0
+        track[17920:19520] = 0.0                                    # 20 ms of tone between the holes
+        filled, report = fill(track, seed=1)
+        self.assertEqual(report["remaining_digital_silence"], [])
+        self.assertTrue(report["untouched_identical"])
+        first, second = report["holes"]
+        gap = second["start_sample"] - first["end_sample"]
+        self.assertLessEqual(first["post_samples"] + second["pre_samples"], gap)
+        for hole in report["holes"]:
+            interior = filled[hole["start_sample"]:hole["end_sample"]]
+            self.assertAlmostEqual(np.std(interior), 0.01, delta=0.002)   # full-level tone, no faded-in remnant of silence
+        step = np.abs(np.diff(filled[15500:20000]))
+        self.assertLess(step.max(), 8 * np.std(np.diff(track[:8000])))
+
 
 if __name__ == "__main__":
     unittest.main()

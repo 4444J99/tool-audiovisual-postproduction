@@ -209,7 +209,7 @@ def _quiet_extent(mono: np.ndarray, start: int, direction: int, limit: int, sr: 
             break
         if _rms(mono[lo:hi]) > ceiling:
             break
-        extent += window
+        extent += hi - lo                      # the samples actually examined, so a partial window counts as itself
     return min(extent, limit)
 
 
@@ -232,16 +232,25 @@ def fill_holes(audio: np.ndarray, sr: int, *, seed: int = 0, min_hole_s: float =
         return (out[:, 0] if np.asarray(audio).ndim == 1 else out), report
     if not regions:
         raise ToneError("holes found but no steady room tone to borrow; the recording has no usable pause")
-    region_rms = [(s, e, _rms(mono[s:e])) for s, e in regions]
+    region_rms = [(s, e, _rms(a[s:e])) for s, e in regions]          # energy over every channel, same metric as the bed
     ceiling_all = float(np.median([r[2] for r in region_rms])) * 10 ** (margin_db / 20.0)
     xf = int(round(crossfade_s * sr))
-    zones: list[tuple[int, int]] = []
     for number, (start, end) in enumerate(holes):
+        previous_end = holes[number - 1][1] if number else 0
+        next_start = holes[number + 1][0] if number + 1 < len(holes) else len(a)
+        # each hole may use at most half of the tone between it and its neighbour, so patches never overlap
+        pre_limit = min(xf, (start - previous_end) // 2)
+        post_limit = min(xf, (next_start - end) // 2)
         centre = (start + end) // 2
         nearest = sorted(region_rms, key=lambda r: abs((r[0] + r[1]) // 2 - centre))[:2]
         target = math.sqrt(sum(r[2] ** 2 for r in nearest) / len(nearest))
-        pre = _quiet_extent(mono, start, -1, xf, sr, ceiling_all)
-        post = _quiet_extent(mono, end, +1, xf, sr, ceiling_all)
+        pre = _quiet_extent(mono, start, -1, pre_limit, sr, ceiling_all)
+        post = _quiet_extent(mono, end, +1, post_limit, sr, ceiling_all)
+        window = max(1, int(round(0.02 * sr)))
+        before = _rms(mono[max(0, start - window):start])
+        after = _rms(mono[end:end + window])
+        tone_before = bool(start - window >= 0 and before <= ceiling_all)
+        tone_after = bool(end + window <= len(a) and after <= ceiling_all)
         left, right = start - pre, end + post
         bed, info = build_bed(a, regions, right - left, sr, seed=seed + number)
         gain = target / max(_rms(bed), 1e-12)
@@ -260,8 +269,9 @@ def fill_holes(audio: np.ndarray, sr: int, *, seed: int = 0, min_hole_s: float =
         if post:
             weight_keep[-post:] = _equal_power(post)[1]
         out[left:right] = a[left:right] * weight_keep[:, None] + patch * weight_patch[:, None]
-        zones.append((left, right))
         report["holes"].append({
+            "start_sample": int(start), "end_sample": int(end), "pre_samples": int(pre), "post_samples": int(post),
+            "neighbour_before_is_tone": tone_before, "neighbour_after_is_tone": tone_after,
             "start_s": round(start / sr, 5), "end_s": round(end / sr, 5), "duration_s": round((end - start) / sr, 5),
             "crossfade_before_s": round(pre / sr, 5), "crossfade_after_s": round(post / sr, 5),
             "target_dbfs": round(_db(target), 2), "gain_db": round(_db(clamped), 2),
@@ -298,15 +308,18 @@ def fill_report(original: np.ndarray, filled: np.ndarray, sr: int, report: dict[
     zones = []
     checks = []
     for hole in report["holes"]:
-        s, e = int(round(hole["start_s"] * sr)), int(round(hole["end_s"] * sr))
-        zones.append((s - int(round(hole["crossfade_before_s"] * sr)), e + int(round(hole["crossfade_after_s"] * sr))))
-        inside = _mono(b[s:e])
+        s, e = hole["start_sample"], hole["end_sample"]              # exact sample indices, never rounded seconds
+        zones.append((s - hole["pre_samples"], e + hole["post_samples"]))
+        inside = b[s:e]
+        inside_mono = _mono(inside)
         window = max(1, int(round(0.02 * sr)))
-        edge_in = _rms(inside[:window]), _rms(inside[-window:])
-        edge_out = _rms(mono_in[max(0, s - window):s]), _rms(mono_in[e:e + window])
-        deviations = [abs(_db(i) - _db(o)) for i, o in zip(edge_in, edge_out) if o > EPS * 10]
+        deviations = []
+        if hole["neighbour_before_is_tone"]:
+            deviations.append(abs(_db(_rms(inside_mono[:window])) - _db(_rms(mono_in[max(0, s - window):s]))))
+        if hole["neighbour_after_is_tone"]:
+            deviations.append(abs(_db(_rms(inside_mono[-window:])) - _db(_rms(mono_in[e:e + window]))))
         tone_rms = _rms(inside)
-        bands_in = band_levels(inside, sr) if len(inside) >= int(0.1 * sr) else None
+        bands_in = band_levels(inside_mono, sr) if len(inside) >= int(0.1 * sr) else None
         bands_ref = band_levels(reference, sr) if len(reference) >= int(0.1 * sr) else None
         spread = None
         if bands_in and bands_ref:
@@ -315,7 +328,7 @@ def fill_report(original: np.ndarray, filled: np.ndarray, sr: int, report: dict[
             spread = round(float(np.max(np.abs(np.array(bands_in) - np.array(bands_ref) - offset))), 2)
         checks.append({"start_s": hole["start_s"], "filled_dbfs": round(_db(tone_rms), 2), "target_dbfs": hole["target_dbfs"],
                        "level_error_db": round(abs(_db(tone_rms) - hole["target_dbfs"]), 2),
-                       "edge_level_deviation_db": round(max(deviations), 2) if deviations else None,
+                       "edge_level_deviation_db": round(max(deviations), 2) if deviations else None,   # tone neighbours only
                        "band_shape_deviation_db": spread})
     keep = np.ones(len(a), dtype=bool)
     for left, right in zones:

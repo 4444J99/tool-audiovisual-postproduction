@@ -84,6 +84,16 @@ class RoomToneFillCliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("unsupported", result.stdout)
 
+    def test_speech_adjacent_fill_is_not_rejected_by_the_cli(self):
+        from amp.studies import room_tone_fill as rt
+        sys.path.insert(0, str(ROOT / "tools"))
+        import room_tone_fill as cli
+        audio, meta = rt.synthetic_dialogue()
+        start = int(1.2 * meta["sample_rate"])
+        audio[start:start + int(0.3 * meta["sample_rate"])] = 0.0
+        filled, report = cli.run_fill(meta["sample_rate"], audio, 1)
+        self.assertEqual(cli.verdict(report), [])
+
     def test_verdict_names_every_failed_check(self):
         sys.path.insert(0, str(ROOT / "tools"))
         import room_tone_fill as cli
