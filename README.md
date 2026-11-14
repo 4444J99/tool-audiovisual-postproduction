@@ -52,6 +52,10 @@ The eight-layout comparison's placement rules are a pure module (`web/fx/layout-
 
 `tools/reverse_angle.py` plans a same-side reverse camera and reports which reverse-view pixels the source recording genuinely shows ([guide](docs/REVERSE-ANGLE.md)).
 
+## Room-tone fill
+
+`tools/room_tone_fill.py` finds digital-silence holes in edited dialogue, borrows steady room tone from the same recording, builds it into a loop-matched bed with equal-power crossfades, and fills each hole level-matched to the nearest real tone, leaving every other sample bit-identical ([guide](docs/ROOM-TONE-FILL.md)).
+
 ## Shot plan and animatic
 
 `tools/shot_plan.py` validates a one-set shot plan (camera coverage, axis of action, handles, finite physical caches, render receipts), then writes a shot ledger, an EDL, plan-view cards and an optional animatic video ([guide](docs/SHOT-PLAN.md)).
