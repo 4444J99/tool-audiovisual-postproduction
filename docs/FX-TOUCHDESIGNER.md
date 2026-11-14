@@ -95,18 +95,76 @@ scale, the 4-decimal and float32 precision of the report) is not an edit, so wir
 input settles instead of looping, and an off-grid preset or automation value is not snapped onto the step grid by its own
 report. Moves smaller than that are below the resolution of the report and are ignored.
 
-## TouchDesigner side
+## The TouchDesigner network (generated)
 
-Nothing here needs a custom component. **Not yet exercised against a running TouchDesigner** (see Verification); the
-operator settings below are the standard ones and should be confirmed when first wired.
+The rack has a TouchDesigner version that is generated from a patch, not drawn: the patch's processors, wiring and
+parameter ranges become a network, and the OSC address contract above becomes a Python module inside it. No `.toe`
+is needed to produce or review it; it is data and text.
 
-- **Receive the rack's state:** an *OSC In DAT* (it carries strings as well as numbers) on port 7000, or an *OSC In CHOP*
-  for the numeric addresses only. Match the port to `--td-port`.
-- **Control the rack:** an *OSC Out CHOP* (or *OSC Out DAT*) to `127.0.0.1` port 7001, matching `--osc-port`. With the CHOP,
-  name each channel after its address, for example `fx/selected/knob/0`.
-- **One client per role.** The bridge relays between WebSocket clients and UDP only; it never passes a message from one
-  WebSocket client to another. A WebSocket DAT connected to the bridge is treated as another workbench: whatever it sends
-  leaves as OSC to TouchDesigner's own OSC In port. Use OSC In/Out for TouchDesigner.
+```
+node tools/fx-td-network.mjs web/fx/fixtures/closed-inbox.json --out outputs/td     # or: npm run td:network -- <patch> --out <dir>
+```
+
+This writes `<id>.network.json` (the spec: operators, parameters, wiring, contract), `<id>.build.py` (self-contained,
+with the spec embedded) and `modules/` (the Python that ends up in Text DATs, for reading). Options: `--source-file`,
+`--osc-in-port` (7000), `--osc-out-port` (7001), `--host`, `--root-name` (`fx_rack`). Output is deterministic: the
+same patch gives the same bytes.
+
+In TouchDesigner's Textport:
+
+```
+exec(open("/path/to/closed-inbox.build.py", encoding="utf-8").read(), {})
+exec(open("/path/to/closed-inbox.build.py", encoding="utf-8").read(), {"FX_PARENT": "/project1", "FX_SAVE_TOX": "/path/fx_rack.tox"})
+```
+
+The second form also saves the component as a `.tox`. Building again replaces the component of that name.
+
+**What it builds.** One component, `fx_rack` (under `/project1` unless told otherwise):
+
+| Part | What it is |
+|---|---|
+| `fx_<id>` for every patch node | A Base COMP per node. Processors carry the workbench's own controls as custom parameters, named from the catalog (`Intensity`, `Wet`, `Bypass`, `Solo`, then each processor parameter, for example `Taps`) with the catalog's range, step and default; integer parameters are Int. The original id is kept in the read-only `Nodeid`. Operator names are made legal (`prior-returns` becomes `fx_prior_returns`; collisions get `_2`), the id in OSC addresses is never changed. |
+| inside a processor | Per port: a Select (`sel_<port>_<n>`, pointing at the upstream `out_<port>`), a gain operator where the wire has a gain, `in_<port>`, and `out_<port>`. Picture and audio also get a real wet/dry blend (`blend_*`, Cross TOP and Math CHOPs driven by `Wet`) and a bypass switch (`bypass_*`, driven by `Bypass`). The effect itself belongs in the empty `proc_picture` / `proc_audio` Null between `in_*` and the blend. |
+| source, mix, output | The same ports; picture and audio take the node's `Gain`. The source reads `Sourcefile` (Movie File In, Audio File In); matte is full, text empty, control 0. Several wires meeting at a mix are combined (Add TOP, Math CHOP). |
+| `osc_in`, `osc_out` | OSC In DAT on the bridge's `--td-port`, OSC Out DAT to the bridge's `--osc-port`. |
+| `td_osc`, `td_contract` | The Python module and the contract JSON. `par_exec_nodes` and `par_exec_rack` (Parameter Execute DATs) turn edits into control messages; `osc_in_callbacks` hands received messages to the module. |
+| `video_out`, `audio_out` | Stable taps on the output node. |
+
+The rack component's own parameters: `Selected`, `Time`, `Count` and `Status` (linked / mismatch), transport
+`Play`, `Record`, `Loop`, and pulses `Next`, `Prev`, `Sync`.
+
+**How it speaks OSC.** The rack reports its state on the same addresses TouchDesigner uses to control it, so one
+table serves both ways. A report sets the matching parameter (a normalised value is scaled onto the parameter's own
+range without snapping it to the step, so an off-grid preset or automation value comes back unchanged; integer parameters
+get the nearest integer); a parameter edit in TouchDesigner sends the normalised
+value on that address. A value that only repeats what was last exchanged on that address (within 0.0002) is an echo
+and is not sent. `Status` reads `linked: N processors` once the rack's report matches the network, and names any
+type or count mismatch. The module has no address parsing at all: the contract lists every address, and an address
+that is not in it is ignored.
+
+**Not applied by this network:** the effects themselves (a freshly built rack passes signal through unchanged), the
+patch's automation events and macro mappings, sidechain modulation (the control wire is routed to `in_control` and the
+mapping is recorded in the contract), Solo (mirrored as state only), the source excerpt offset (`Offset`, read-only),
+and audio device output. Text wires carry no gain, and several text wires at one mix read only the first.
+
+Parameter and operator names the network relies on are listed in one table, `tools/td-network/vocabulary.mjs`. The
+spec carries a copy and the builder refuses a spec with a name outside it before creating anything. On a machine with
+TouchDesigner installed, `node tools/td-network/check-vocabulary.mjs` checks every name in that table against the
+parameter reference inside the application (read-only; it found and corrected `chop`, `const0name` and `const0value`).
+
+### Try the contract without TouchDesigner
+
+```
+node tools/fx-td-network.mjs web/fx/fixtures/closed-inbox.json --out outputs/td
+node tools/fx-td-bridge.mjs
+python3 tools/td-network/headless_td.py outputs/td/closed-inbox.network.json      # the generated module behind a UDP socket
+node tools/fx-td-simulator.mjs outputs/bridge-e2e.json --spec outputs/td/closed-inbox.network.json
+```
+
+`headless_td.py` runs the generated `td_osc` module for real (with its own small OSC codec, independent of the
+bridge's) and answers JSON commands on stdin. The simulator accepts `--spec`: with it, its checks come from the
+network's contract (every processor's Intensity and Bypass address, the transport, the rack's count and types)
+instead of the fixed sequence. Without the flag it behaves as before. Nothing here replaces the original simulator.
 
 ## Verification status
 
@@ -116,7 +174,19 @@ WebSocket (reconnect back-off, malformed frames, feedback on and off); and the b
 socket standing in for TouchDesigner. One test runs the page-side session and the real bridge together and checks the
 whole loop: state out on connect, a knob moved over OSC, the rack's new value reported back, and `/fx/sync`.
 
-**Not verified:** a real TouchDesigner session; the Control tab's new section in a browser against the private media
+The generated network is covered by `tests/fx/td-network.test.mjs` and `tests/test_td_network.py`: every factory, demo and
+single-processor patch yields a spec that passes the structural validator (legal names, sibling wiring by family,
+selects that point at the right upstream port, expressions that use defined parameters, the contract's ranges against the
+catalog, unique addresses) and is byte-identical across runs; every address the workbench reports has a receive entry
+and every address the network can send is accepted by the workbench's own interpreter, including the selected-slot
+aliases; a report from the rack sets the Python module's parameters to the rack's values and an edit becomes the message
+the workbench applies; the builder runs against a fake operator tree that only offers the parameters the vocabulary
+lists; and one test runs a workbench session, the real bridge and the generated module over real UDP and WebSocket
+connections.
+
+**Not verified:** a real TouchDesigner session (the generated network has never been built in TouchDesigner: the
+operator and parameter names are checked against TouchDesigner's own parameter reference, but the network, the `.module`
+access pattern and the Parameter Execute behaviour have not been run); the Control tab's new section in a browser against the private media
 pack (the surface was checked with a stand-in rack only); a physical controller. The bridge's WebSocket server is a
 small in-repo implementation of the RFC 6455 text subset (no extensions, no binary frames); it is tested against Node's
 own WebSocket client but not against TouchDesigner's.
