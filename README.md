@@ -52,6 +52,10 @@ The eight-layout comparison's placement rules are a pure module (`web/fx/layout-
 
 `tools/reverse_angle.py` plans a same-side reverse camera and reports which reverse-view pixels the source recording genuinely shows ([guide](docs/REVERSE-ANGLE.md)).
 
+## Actor-coverage matrix
+
+`tools/coverage_matrix.py` derives, from a shot plan's geometry, what size and angle each shot gives each actor, checks required cells, dialogue lines and recorded room tone, and proposes validated shots for the gaps ([guide](docs/COVERAGE-MATRIX.md)).
+
 ## Shot plan and animatic
 
 `tools/shot_plan.py` validates a one-set shot plan (camera coverage, axis of action, handles, finite physical caches, render receipts), then writes a shot ledger, an EDL, plan-view cards and an optional animatic video ([guide](docs/SHOT-PLAN.md)).
