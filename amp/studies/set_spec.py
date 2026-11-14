@@ -125,6 +125,9 @@ def validate_spec(spec: Mapping[str, Any]) -> dict[str, list[str]]:
             errors.append(f"material {name!r}: names starting with {GENERATED_PREFIX!r}, ending with {SOFFIT_SUFFIX!r} or equal to "
                           f"{FLOOR_DEFAULT!r} are reserved for generated materials")
             continue
+        if len(name) + len(SOFFIT_SUFFIX) > BLENDER_NAME_LIMIT:
+            errors.append(f"material {name!r}: name plus its {SOFFIT_SUFFIX!r} derivative must fit {BLENDER_NAME_LIMIT} characters")
+            continue
         if not isinstance(material, dict) or not isinstance(material.get("color"), str) or not HEX.match(material["color"]):
             errors.append(f"material {name!r}: color must be a six-digit hex string")
             continue
@@ -224,9 +227,11 @@ def validate_spec(spec: Mapping[str, Any]) -> dict[str, list[str]]:
             errors.append(f"{label}: position must be [x, y, z]")
         if not _positive(light.get("energy")):
             errors.append(f"{label}: energy must be positive")
-        if light.get("color") is not None and not (isinstance(light["color"], str) and HEX.match(light["color"])):
+        if "color" in light and not (isinstance(light["color"], str) and HEX.match(light["color"])):
             errors.append(f"{label}: color must be a six-digit hex string")
-        if light.get("kind") in ("sun", "area") and not _vec(light.get("aim"), 3):
+        if "aim" in light and not _vec(light["aim"], 3):
+            errors.append(f"{label}: aim must be [x, y, z]")
+        if light.get("kind") in ("sun", "area") and "aim" not in light:
             errors.append(f"{label}: a {light.get('kind')} light needs an aim [x, y, z]")
     if not isinstance(spec.get("lights", []), list):
         errors.append("lights: must be a list")

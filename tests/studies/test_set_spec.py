@@ -270,6 +270,33 @@ class ReviewRegressionTests(unittest.TestCase):
         graph = ss.scene_graph(s)
         self.assertEqual(next(o for o in graph["objects"] if o["name"] == "cam-wide")["sensor_width_mm"], 24.0)
 
+    def test_optional_light_values_are_validated_before_expansion(self):
+        for key, bad in (("color", None), ("color", 5), ("aim", None), ("aim", [1, 2]), ("aim", "x")):
+            for index in (0, 1):                     # area light with an aim, point light without one
+                s = spec()
+                s["lights"][index][key] = bad
+                found = errors(s)
+                self.assertTrue(any(key in e for e in found), (index, key, bad, found))
+                with self.assertRaises(ss.SpecError):
+                    ss.scene_graph(s)
+        s = spec()
+        s["lights"][1]["aim"] = [0.0, 0.0, 0.0]      # a point light may carry an aim
+        self.assertEqual(errors(s), [])
+        ss.scene_graph(s)
+
+    def test_generated_material_names_fit_blender(self):
+        s = spec()
+        long_name = "m" * 57                          # 57 + len("-soffit") = 64 > 63
+        s["materials"][long_name] = {"color": "123456"}
+        s["elements"][1]["bands"][0]["color"] = long_name
+        self.assertTrue(any("must fit 63" in e for e in errors(s)))
+        s["materials"].pop(long_name)
+        s["materials"]["m" * 56] = {"color": "123456"}
+        s["elements"][1]["bands"][0]["color"] = "m" * 56
+        self.assertEqual(errors(s), [])
+        graph = ss.scene_graph(s)
+        self.assertTrue(all(len(name) <= 63 for name in graph["materials"]))
+
     def test_camera_override_changes_the_graph_hash(self):
         a = ss.scene_graph(spec())
         s = spec()
