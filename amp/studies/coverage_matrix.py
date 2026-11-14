@@ -110,12 +110,16 @@ def validate_spec(spec: Mapping[str, Any], plan: Mapping[str, Any]) -> list[str]
     if not isinstance(spec, Mapping) or spec.get("schema") != SCHEMA:
         return [f"coverage: schema must be {SCHEMA}"]
     actors = {p["id"] for p in plan.get("performers", [])}
+
+    def known(actor) -> bool:
+        return isinstance(actor, str) and actor in actors
+
     required = spec.get("required", [])
     if not isinstance(required, list):
         errors.append("coverage: required must be a list")
         required = []
     for i, cell in enumerate(required):
-        if not isinstance(cell, dict) or cell.get("actor") not in actors:
+        if not isinstance(cell, dict) or not known(cell.get("actor")):
             errors.append(f"coverage: required[{i}] needs an actor defined in the plan")
             continue
         if "size" in cell and cell["size"] not in SIZES:
@@ -138,8 +142,10 @@ def validate_spec(spec: Mapping[str, Any], plan: Mapping[str, Any]) -> list[str]
             errors.append(f"coverage: lines[{i}] needs a unique id")
             continue
         seen.add(lid)
-        if line.get("actor") not in actors:
+        if not isinstance(line.get("actor"), str) or line["actor"] not in actors:
             errors.append(f"coverage: line {lid} actor must be defined in the plan")
+        if "offscreen_ok" in line and not isinstance(line["offscreen_ok"], bool):
+            errors.append(f"coverage: line {lid} offscreen_ok must be true or false")
         if not sp._int_range(line.get("frames")):
             errors.append(f"coverage: line {lid} frames must be integer [first, last]")
     tone = spec.get("room_tone", [])
@@ -152,9 +158,9 @@ def validate_spec(spec: Mapping[str, Any], plan: Mapping[str, Any]) -> list[str]
     minimum = spec.get("room_tone_min_s", DEFAULT_ROOM_TONE_MIN_S)
     if not (sp._is_num(minimum) and minimum >= 0):
         errors.append("coverage: room_tone_min_s must be a number >= 0")
-    needs_facing = {c["actor"] for c in required if isinstance(c, dict) and "angle" in c and c.get("actor") in actors}
+    needs_facing = {c["actor"] for c in required if isinstance(c, dict) and "angle" in c and known(c.get("actor"))}
     for p in plan.get("performers", []):
-        if p["id"] in needs_facing and facing_vector(p, {q["id"]: q for q in plan["performers"]}) is None:
+        if p["id"] in needs_facing and facing_vector(p, {q["id"]: q for q in plan.get("performers", [])}) is None:
             errors.append(f"coverage: performer {p['id']} needs facing_deg or facing_toward to judge angles")
     return errors
 
@@ -183,7 +189,7 @@ def validate_coverage(plan: Mapping[str, Any], spec: Mapping[str, Any]) -> dict[
         return {"errors": errors, "warnings": warnings, "matrix": {}, "lines": [], "gaps": [], "room_tone": []}
     rows = shot_cells(plan)
     matrix: dict[str, dict[str, Any]] = {}
-    for p in plan["performers"]:
+    for p in plan.get("performers", []):
         cells: dict[str, list[str]] = {}
         for row in rows:
             if row["actor"] != p["id"]:
@@ -235,7 +241,7 @@ def suggest_shots(plan: Mapping[str, Any], spec: Mapping[str, Any], default_fram
     if report["matrix"] == {} and report["errors"]:
         return {"shots": [], "unplaced": [{"reason": e} for e in report["errors"]], "plan": copy.deepcopy(plan)}
     working = copy.deepcopy(plan)
-    performers = {p["id"]: p for p in working["performers"]}
+    performers = {p["id"]: p for p in working.get("performers", [])}
     cursor = max(s["frames"]["end"] for s in working["shots"]) + 1
     template = working["shots"][0]
     added, unplaced = [], []
@@ -260,7 +266,7 @@ def suggest_shots(plan: Mapping[str, Any], spec: Mapping[str, Any], default_fram
                     while f"CV{counter:02d}" in taken:
                         counter += 1
                     sid = f"CV{counter:02d}"
-                    others = [p["id"] for p in working["performers"] if p["id"] != gap["actor"]]
+                    others = [p["id"] for p in working.get("performers", []) if p["id"] != gap["actor"]]
                     candidate = {
                         "id": sid, "camera": {"name": f"cov-{gap['actor']}-{size}-{angle}", "lens_mm": lens,
                                               "position": [round(cx, 3), 1.5, round(cz, 3)],
@@ -270,8 +276,9 @@ def suggest_shots(plan: Mapping[str, Any], spec: Mapping[str, Any], default_fram
                         "uses": [], "render": copy.deepcopy(template["render"]),
                     }
                     candidate["render"]["output"] = f"renders/{sid}/frame_####.exr"
-                    if gap.get("ots") and others:
-                        candidate["axis"] = {"pair": sorted([gap["actor"], others[0]])}
+                    pair = _axis_pair(working, gap["actor"], others)
+                    if pair:
+                        candidate["axis"] = {"pair": pair}          # lets the validator reject a camera that crosses the axis
                     ax, az = actor["position"]
                     if any(math.hypot(cx - e["center"][0], cz - e["center"][1]) < e.get("radius", 0.0)
                            and math.hypot(ax - e["center"][0], az - e["center"][1]) >= e.get("radius", 0.0)
@@ -300,6 +307,15 @@ def suggest_shots(plan: Mapping[str, Any], spec: Mapping[str, Any], default_fram
     return {"shots": added, "unplaced": unplaced, "plan": working}
 
 
+def _axis_pair(plan: Mapping[str, Any], actor: str, others: list[str]) -> list[str] | None:
+    """The performer pair whose axis of action the plan already respects for this actor, else actor plus one other."""
+    for shot in plan["shots"]:
+        pair = shot.get("axis", {}).get("pair") if isinstance(shot.get("axis"), dict) else None
+        if isinstance(pair, list) and actor in pair:
+            return sorted(pair)
+    return sorted([actor, others[0]]) if others else None
+
+
 def render_table(report: Mapping[str, Any]) -> str:
     """Markdown table of the matrix: one row per actor, one column per size, cells list angle and shots."""
     lines = ["| actor | " + " | ".join(SIZES) + " |", "|---|" + "---|" * len(SIZES)]
@@ -315,7 +331,7 @@ def render_table(report: Mapping[str, Any]) -> str:
 def synthetic_inputs() -> tuple[dict[str, Any], dict[str, Any]]:
     """Plan and requirement for the synthetic round-table pilot, with actor facings and dialogue."""
     plan = sp.synthetic_plan()
-    for performer, toward in zip(plan["performers"], ("B", "A")):
+    for performer, toward in zip(plan.get("performers", []), ("B", "A")):
         performer["facing_toward"] = toward
     spec = {
         "schema": SCHEMA,

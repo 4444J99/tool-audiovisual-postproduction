@@ -189,6 +189,68 @@ class SuggestionTests(unittest.TestCase):
         self.assertEqual(result["shots"], [])
         self.assertTrue(result["unplaced"])
 
+class ReviewRegressionTests(unittest.TestCase):
+    def test_non_string_actor_ids_are_reported_not_raised(self):
+        for bad in ([], {}, 3, None):
+            plan, spec = inputs()
+            spec["required"] = [{"actor": bad}]
+            spec["lines"] = [{"id": "L", "actor": bad, "frames": [1, 5]}]
+            found = errs(plan, spec)
+            self.assertTrue(any("required[0]" in e for e in found), (bad, found))
+            self.assertTrue(any("line L actor" in e for e in found), (bad, found))
+        plan, spec = inputs()
+        spec["required"] = [{"actor": ["A"], "angle": "front"}]
+        self.assertTrue(errs(plan, spec))                          # the needs_facing comprehension must not raise either
+
+    def test_offscreen_ok_must_be_a_boolean(self):
+        plan, spec = inputs()
+        spec["required"] = []
+        spec["lines"] = [{"id": "L", "actor": "A", "frames": [300, 340], "offscreen_ok": "false"}]
+        found = errs(plan, spec)
+        self.assertTrue(any("offscreen_ok must be true or false" in e for e in found), found)
+        spec["lines"][0]["offscreen_ok"] = True
+        self.assertEqual(errs(plan, spec), [])
+
+    def test_suggested_shots_carry_the_axis_pair_and_never_cross_it(self):
+        plan, spec = inputs()
+        result = cm.suggest_shots(plan, spec)
+        self.assertEqual(result["unplaced"], [])
+        for shot in result["shots"]:
+            self.assertEqual(shot["axis"], {"pair": ["A", "B"]})
+        self.assertEqual(sp.validate_plan(result["plan"])["errors"], [])
+        # every shot of the pair stays on one side of the A-B axis
+        a, b = plan["performers"][0]["position"], plan["performers"][1]["position"]
+        sides = {(b[0] - a[0]) * (s["camera"]["position"][2] - a[1]) - (b[1] - a[1]) * (s["camera"]["position"][0] - a[0]) > 0
+                 for s in result["plan"]["shots"]}
+        self.assertEqual(len(sides), 1, "a suggested camera crosses the axis of action")
+
+    def test_a_candidate_that_would_cross_the_axis_is_rejected_and_the_other_side_tried(self):
+        plan, spec = inputs()
+        spec["required"] = [{"actor": "A", "size": "medium", "angle": "front"}]
+        result = cm.suggest_shots(plan, spec)
+        self.assertEqual(len(result["shots"]), 1)
+        a, b = plan["performers"][0]["position"], plan["performers"][1]["position"]
+        cam = result["shots"][0]["camera"]["position"]
+        s_new = (b[0] - a[0]) * (cam[2] - a[1]) - (b[1] - a[1]) * (cam[0] - a[0])
+        ref = plan["shots"][-1]["camera"]["position"]
+        s_old = (b[0] - a[0]) * (ref[2] - a[1]) - (b[1] - a[1]) * (ref[0] - a[0])
+        self.assertGreater(s_new * s_old, 0)
+
+    def test_plan_without_performers_still_reports_room_tone(self):
+        plan, spec = inputs()
+        plan.pop("performers")
+        for shot in plan["shots"]:
+            shot["performers"] = []
+            shot.pop("axis", None)
+        spec["required"], spec["lines"] = [], []
+        report = cm.validate_coverage(plan, spec)
+        self.assertEqual(report["errors"], [])
+        self.assertEqual(report["matrix"], {})
+        spec["room_tone"] = []
+        self.assertTrue(any("room tone" in e for e in cm.validate_coverage(plan, spec)["errors"]))
+        self.assertEqual(cm.suggest_shots(plan, spec)["shots"], [])
+        self.assertEqual(cm.shot_cells(plan), [])
+
 
 if __name__ == "__main__":
     unittest.main()
