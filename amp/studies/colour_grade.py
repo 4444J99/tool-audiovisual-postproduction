@@ -94,7 +94,10 @@ def parse_cube(text: str) -> np.ndarray:
             continue
         head = line.split()[0]
         if head == "LUT_3D_SIZE":
-            size = int(line.split()[1])
+            tokens = line.split()
+            if len(tokens) != 2:
+                raise ValueError("LUT_3D_SIZE needs exactly one integer")
+            size = int(tokens[1])
         elif head in ("TITLE", "DOMAIN_MIN", "DOMAIN_MAX"):
             if head != "TITLE" and [float(v) for v in line.split()[1:]] != ([0.0] * 3 if head == "DOMAIN_MIN" else [1.0] * 3):
                 raise ValueError(f"unsupported {head}; only the 0..1 domain is handled")
@@ -110,6 +113,8 @@ def parse_cube(text: str) -> np.ndarray:
     if len(rows) != size ** 3:
         raise ValueError(f"expected {size ** 3} rows, found {len(rows)}")
     flat = np.array(rows, dtype=np.float64)
+    if not np.isfinite(flat).all():
+        raise ValueError("LUT contains non-finite values")
     return flat.reshape(size, size, size, 3).transpose(2, 1, 0, 3)  # file order is b, g, r -> [r, g, b]
 
 

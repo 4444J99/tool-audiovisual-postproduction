@@ -134,7 +134,14 @@ def main(argv=None):
     p = sub.add_parser("identity-lut"); p.add_argument("size", type=int); p.add_argument("--output", required=True)
     p.set_defaults(fn=cmd_identity_lut)
     args = parser.parse_args(argv)
-    return args.fn(args)
+    try:
+        return args.fn(args)
+    except OSError as error:
+        return _fail({"error": f"I/O failure: {error}"})
+    except Exception as error:  # unreadable or non-image input from Pillow
+        if type(error).__module__.startswith("PIL."):
+            return _fail({"error": f"cannot process image: {error}"})
+        raise
 
 
 if __name__ == "__main__":

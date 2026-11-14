@@ -55,6 +55,11 @@ def _is_relative(path: Any) -> bool:
             and "://" not in path)
 
 
+def _triple(value: Any) -> bool:
+    return (isinstance(value, list) and len(value) == 3
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool) and np.isfinite(v) for v in value))
+
+
 def opacity_at(layer: Mapping[str, Any], frame: int) -> float:
     value = layer.get("opacity", 1.0)
     if isinstance(value, list):
@@ -82,11 +87,13 @@ def validate_plan(plan: Any) -> dict[str, list[str]]:
     if not isinstance(sources, Mapping) or not isinstance(chains, Mapping) or not isinstance(layers, list) or not layers:
         return {"errors": ["plan: sources and chains must be objects and layers a non-empty list"], "warnings": []}
 
+    valid_sources: set[str] = set()
     for sid, src in sources.items():
         where = f"source {sid}"
         if not isinstance(src, Mapping) or src.get("kind") not in SOURCE_KINDS:
             errors.append(f"{where}: kind must be one of {', '.join(SOURCE_KINDS)}")
             continue
+        valid_sources.add(sid)
         if src.get("colourspace", "srgb") not in COLOURSPACES:
             errors.append(f"{where}: colourspace must be srgb or linear")
         if src["kind"] != "audio" and src.get("colourspace", "srgb") != working:
@@ -102,6 +109,9 @@ def validate_plan(plan: Any) -> dict[str, list[str]]:
     index: dict[str, int] = {}
     for i, layer in enumerate(layers):
         lid = layer.get("id") if isinstance(layer, Mapping) else None
+        if not isinstance(layer, Mapping):
+            errors.append(f"layer[{i}]: must be an object")
+            continue
         if not isinstance(lid, str) or not LAYER_ID.match(lid):
             errors.append(f"layer[{i}]: id must match {LAYER_ID.pattern}")
         elif lid in index:
@@ -113,7 +123,7 @@ def validate_plan(plan: Any) -> dict[str, list[str]]:
     matted_ids = {l["matte"]["layer"] for l in layers if isinstance(l, Mapping) and isinstance(l.get("matte"), Mapping)
                   and isinstance(l["matte"].get("layer"), str)}
     for i, layer in enumerate(layers):
-        if not isinstance(layer, Mapping) or layer.get("id") not in index:
+        if not isinstance(layer, Mapping) or not isinstance(layer.get("id"), str) or layer["id"] not in index:
             continue
         lid, where = layer["id"], f"layer {layer['id']}"
         kind = layer.get("kind")
@@ -122,38 +132,47 @@ def validate_plan(plan: Any) -> dict[str, list[str]]:
             continue
         if layer.get("blend", "normal") not in BLENDS:
             errors.append(f"{where}: blend must be one of {', '.join(BLENDS)}")
-        fr = layer.get("frames", {})
+        fr = layer.get("frames")
+        fr = fr if isinstance(fr, Mapping) else {}
         start, end = fr.get("start"), fr.get("end")
         in_range = (isinstance(start, int) and isinstance(end, int) and not isinstance(start, bool)
                     and 0 <= start < end <= frames)
         if not in_range:
             errors.append(f"{where}: frames need integers with 0 <= start < end <= {frames}")
         op = layer.get("opacity", 1.0)
+        op_valid = True
         if isinstance(op, list):
             ok = (len(op) >= 2 and all(isinstance(k, list) and len(k) == 2 and all(isinstance(v, (int, float)) for v in k) for k in op)
                   and all(b[0] > a[0] for a, b in zip(op, op[1:])) and all(0 <= k[1] <= 1 for k in op))
+            op_valid = bool(ok)
             if not ok:
                 errors.append(f"{where}: opacity keyframes must be [frame, value] pairs, frames increasing, values 0..1")
             elif in_range and (op[0][0] > start or op[-1][0] < end - 1):
                 warnings.append(f"{where}: opacity keyframes do not span the layer; end values are held")
         elif not isinstance(op, (int, float)) or isinstance(op, bool) or not 0 <= op <= 1:
+            op_valid = False
             errors.append(f"{where}: opacity must be 0..1")
         src = layer.get("source")
         if kind in ("plate", "fx", "text"):
-            if src not in sources:
+            if not isinstance(src, str) or src not in sources:
                 errors.append(f"{where}: source {src!r} is not defined")
-            elif sources[src].get("kind") == "audio":
+            elif src in valid_sources and sources[src].get("kind") == "audio":
                 errors.append(f"{where}: audio source {src} cannot be a picture layer")
         elif kind == "matte":
-            if src not in sources and "solid" not in layer:
+            if "solid" in layer:
+                if not _triple(layer["solid"]):
+                    errors.append(f"{where}: solid needs a colour of three finite numbers in linear light")
+            elif not isinstance(src, str) or src not in sources:
                 errors.append(f"{where}: matte needs a defined source or a solid")
+            elif src in valid_sources and sources[src].get("kind") == "audio":
+                errors.append(f"{where}: audio source {src} cannot be a picture layer")
             if layer.get("matte"):
                 errors.append(f"{where}: a matte layer cannot itself be matted")
             if lid not in matted_ids:
                 warnings.append(f"{where}: matte layer is not used by any layer")
         elif kind == "solid":
-            if not (isinstance(layer.get("solid"), list) and len(layer["solid"]) == 3):
-                errors.append(f"{where}: solid needs a colour [r, g, b] in linear light")
+            if not _triple(layer.get("solid")):
+                errors.append(f"{where}: solid needs a colour of three finite numbers in linear light")
         elif kind == "adjustment":
             if src is not None:
                 errors.append(f"{where}: an adjustment layer has no source")
@@ -162,12 +181,16 @@ def validate_plan(plan: Any) -> dict[str, list[str]]:
             if i == 0:
                 errors.append(f"{where}: an adjustment layer has nothing below it to adjust")
         chain = layer.get("chain")
-        if chain is not None and chain not in chains:
+        if chain is not None and (not isinstance(chain, str) or chain not in chains):
             errors.append(f"{where}: chain {chain!r} is not defined")
         matte = layer.get("matte")
+        if matte is not None and not isinstance(matte, Mapping):
+            errors.append(f"{where}: matte must be an object with a layer and optional mode")
+            matte = None
+            layer = {**layer, "matte": None}
         if matte is not None:
-            target = matte.get("layer") if isinstance(matte, Mapping) else None
-            if target not in index:
+            target = matte.get("layer")
+            if not isinstance(target, str) or target not in index:
                 errors.append(f"{where}: matte layer {target!r} does not exist")
             else:
                 if target == lid:
@@ -177,15 +200,17 @@ def validate_plan(plan: Any) -> dict[str, list[str]]:
                 elif index[target] >= i:
                     errors.append(f"{where}: matte {target} must lie below the layer it mattes")
                 else:
-                    mf = layers[index[target]].get("frames", {})
+                    mf = layers[index[target]].get("frames")
+                    mf = mf if isinstance(mf, Mapping) else {}
                     if in_range and not (isinstance(mf.get("start"), int) and isinstance(mf.get("end"), int)
                                          and mf["start"] <= start and mf["end"] >= end):
                         errors.append(f"{where}: matte {target} does not cover frames {start}-{end}")
             if matte.get("mode", "alpha") not in MATTE_MODES:
                 errors.append(f"{where}: matte mode must be one of {', '.join(MATTE_MODES)}")
-        if in_range and kind in ("plate", "fx", "text", "solid") and not matte \
-                and layer.get("blend", "normal") == "normal" and opacity_at(layer, start) >= 1.0 and not isinstance(op, list):
-            covered[start:end] = True
+        if (in_range and kind in ("plate", "fx", "text", "solid") and not matte
+                and layer.get("blend", "normal") == "normal"
+                and op_valid):
+            covered[start:end] |= np.array([opacity_at(layer, f) >= 1.0 for f in range(start, end)])
     if not plan.get("allow_gaps") and not covered.all():
         gaps = np.flatnonzero(~covered)
         errors.append(f"comp: frames {int(gaps[0])}-{int(gaps[-1])} have no opaque base layer (set allow_gaps to permit)")
@@ -201,9 +226,9 @@ def active_layers(plan: Mapping[str, Any], frame: int) -> list[str]:
 def layer_ledger(plan: Mapping[str, Any]) -> dict[str, Any]:
     rows = [{"id": l["id"], "kind": l["kind"], "start": l["frames"]["start"], "end": l["frames"]["end"],
              "blend": l.get("blend", "normal"), "chain": l.get("chain"),
-             "chain_sha256": cg.chain_hash(plan["chains"][l["chain"]]) if l.get("chain") else None,
+             "chain_sha256": cg.chain_hash(plan.get("chains", {})[l["chain"]]) if l.get("chain") else None,
              "matte": (l.get("matte") or {}).get("layer"), "source": l.get("source"),
-             "source_sha256": plan["sources"][l["source"]]["sha256"] if l.get("source") in plan["sources"] else None}
+             "source_sha256": plan.get("sources", {})[l["source"]]["sha256"] if l.get("source") in plan.get("sources", {}) else None}
             for l in plan["layers"]]
     return {"schema": "amps.layer_ledger.v1", "plan_sha256": plan_hash(plan), "layers": rows}
 
@@ -246,29 +271,34 @@ def flatten(plan: Mapping[str, Any], frame: int, load: Loader) -> np.ndarray:
     """Composite one frame.  ``load(source_id, frame)`` returns float RGBA (H, W, 4), straight alpha, in the
     source's declared colour space; sRGB sources are decoded to linear here.
 
-    Returns linear RGB (H, W, 3).  The plan must validate; ``allow_gaps`` areas are black.
+    Returns linear RGB (H, W, 3) composited over black, using the W3C compositing formula (blend modes act
+    only where the backdrop has alpha).  The plan must validate; ``allow_gaps`` areas are black.
     """
     report = validate_plan(plan)
     if report["errors"]:
         raise ValueError("\n".join(report["errors"]))
     h, w = int(plan["comp"]["height"]), int(plan["comp"]["width"])
     layers = {l["id"]: l for l in plan["layers"]}
-    out = np.zeros((h, w, 3), dtype=np.float64)
+    out = np.zeros((h, w, 3), dtype=np.float64)      # straight (unpremultiplied) backdrop colour
     out_a = np.zeros((h, w), dtype=np.float64)
     for lid in active_layers(plan, frame):
         layer = layers[lid]
         graded_chain = plan["chains"][layer["chain"]] if layer.get("chain") else None
-        opacity = opacity_at(layer, frame)
+        weight = np.full((h, w), opacity_at(layer, frame), dtype=np.float64)
         matte = layer.get("matte")
-        weight = np.full((h, w), opacity, dtype=np.float64)
         if matte:
             mlayer = layers[matte["layer"]]
-            mrgba = np.broadcast_to(np.asarray(mlayer["solid"] + [1.0], dtype=np.float64), (h, w, 4)) \
-                if "solid" in mlayer and mlayer.get("source") not in plan["sources"] else _load_linear(plan, load, mlayer["source"], frame)
-            weight = weight * np.clip(_matte_value(mrgba, matte.get("mode", "alpha")), 0.0, 1.0)
+            if "solid" in mlayer:
+                mrgba = np.broadcast_to(np.asarray(list(mlayer["solid"]) + [1.0], dtype=np.float64), (h, w, 4)).copy()
+            else:
+                mrgba = _load_linear(plan, load, mlayer["source"], frame)
+            if mlayer.get("chain"):
+                mrgba[..., :3] = cg.apply_linear(mrgba[..., :3], plan["chains"][mlayer["chain"]])
+            value = np.clip(_matte_value(mrgba, matte.get("mode", "alpha")), 0.0, 1.0)
+            weight = weight * value * opacity_at(mlayer, frame)
         if layer["kind"] == "adjustment":
             adjusted = cg.apply_linear(out, graded_chain)
-            out = out + weight[..., None] * (adjusted - out)
+            out = out + (weight * (out_a > 0))[..., None] * (adjusted - out)
             continue
         if layer["kind"] == "solid":
             rgb, alpha = np.broadcast_to(np.asarray(layer["solid"], dtype=np.float64), (h, w, 3)), np.ones((h, w))
@@ -277,11 +307,13 @@ def flatten(plan: Mapping[str, Any], frame: int, load: Loader) -> np.ndarray:
             rgb, alpha = rgba[..., :3], rgba[..., 3]
         if graded_chain:
             rgb = cg.apply_linear(rgb, graded_chain)
-        a = alpha * weight
-        blended = _blend(out, rgb, layer.get("blend", "normal"))
-        out = out + a[..., None] * (blended - out)
-        out_a = a + out_a * (1.0 - a)
-    return out
+        a_s = np.clip(alpha, 0.0, 1.0) * weight
+        a_r = a_s + out_a * (1.0 - a_s)
+        mixed = (1.0 - out_a)[..., None] * rgb + out_a[..., None] * _blend(out, rgb, layer.get("blend", "normal"))
+        share = np.divide(a_s, a_r, out=np.zeros_like(a_s), where=a_r > 0)[..., None]
+        out = (1.0 - share) * out + share * mixed
+        out_a = a_r
+    return out * out_a[..., None]
 
 
 # ---------------------------------------------------------------------------------- synthetic plan

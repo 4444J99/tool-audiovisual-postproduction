@@ -23,7 +23,7 @@ Layers are listed bottom to top: `plate`, `matte`, `fx`, `text`, `solid` or `adj
 
 Checked before any render: unique IDs; ranges inside the composition; every source defined, content-addressed by SHA-256 and referenced by a relative path only (no absolute paths, URLs or `..`, so a plan can be published without revealing where private media lives); audio never used as a picture layer; chains defined and valid; mattes exist, are of kind `matte`, sit below the layer they matte, cover its frames and are not themselves matted; adjustment layers carry a chain and no source; every composition frame has an opaque base layer unless `allow_gaps`. A source whose colour space differs from the composition's linear working space is a warning, because it is converted.
 
-`flatten(plan, frame, load)` is the reference compositor (straight alpha, linear float; `load(source, frame)` returns RGBA in the source's declared colour space). A faster renderer must match it. `layer_ledger` lists each layer with its chain hash, source hash and matte, bound to the plan hash.
+`flatten(plan, frame, load)` is the reference compositor (straight alpha, linear float; `load(source, frame)` returns RGBA in the source's declared colour space). A faster renderer must match it. A matte's own chain grades it and its own opacity (keyframed or fixed) scales its value before it gates the layer. Blend modes act only where the backdrop has alpha (W3C compositing). `layer_ledger` lists each layer with its chain hash, source hash and matte, bound to the plan hash.
 
 ```bash
 python tools/colour_layers.py demo outputs/colour-demo              # synthetic chart, grade report, composite frames, ledger

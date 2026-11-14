@@ -313,6 +313,100 @@ class FlattenTests(unittest.TestCase):
             lp.flatten(plan, 4, solid_loader({"room": [0] * 3, "glow": [0] * 3}))
 
 
+class ReviewRegressionTests(unittest.TestCase):
+    def test_nonfinite_and_headless_luts_are_validation_errors(self):
+        nan_cube = "LUT_3D_SIZE 2\n" + "nan nan nan\n" * 8
+        for bad in (nan_cube, "LUT_3D_SIZE\n", "LUT_3D_SIZE 2 3\n"):
+            with self.assertRaises(ValueError):
+                cg.parse_cube(bad)
+            self.assertEqual(len(cg.validate_chain(chain({"op": "lut", "cube": bad}))), 1)
+
+    def test_malformed_plan_fields_return_errors_instead_of_raising(self):
+        def mutated(fn):
+            plan = copy.deepcopy(lp.synthetic_plan())
+            fn(plan)
+            return lp.validate_plan(plan)["errors"]
+        self.assertTrue(any("matte must be an object" in e for e in mutated(lambda p: p["layers"][2].update(matte="vig"))))
+        self.assertTrue(any("id must match" in e for e in mutated(lambda p: p["layers"][1].update(id=[]))))
+        self.assertTrue(any("frames need integers" in e for e in mutated(lambda p: p["layers"][0].update(frames=None))))
+        self.assertTrue(any("source room" in e for e in mutated(lambda p: p["sources"].update(room=None))))
+        self.assertTrue(any("must be an object" in e for e in mutated(lambda p: p["layers"].append(7))))
+        self.assertTrue(any("solid needs a colour" in e for e in mutated(
+            lambda p: p["layers"].insert(1, {"id": "s", "kind": "solid", "solid": ["red", 0, 0], "frames": {"start": 0, "end": 4}}))))
+        def audio_matte(p):
+            p["sources"]["snd"] = {"kind": "audio", "path": "a.wav", "sha256": "0" * 64}
+            p["layers"][1]["source"] = "snd"
+        self.assertTrue(any("audio source snd" in e for e in mutated(audio_matte)))
+
+    def test_opaque_keyframed_base_counts_as_coverage_and_fading_base_does_not(self):
+        plan = copy.deepcopy(lp.synthetic_plan())
+        plan["layers"][0]["opacity"] = [[0, 1.0], [47, 1.0]]
+        self.assertEqual(lp.validate_plan(plan)["errors"], [])
+        plan["layers"][0]["opacity"] = [[0, 1.0], [24, 0.5], [47, 1.0]]
+        errors = lp.validate_plan(plan)["errors"]
+        self.assertTrue(any("no opaque base layer" in e for e in errors))
+
+    def test_matte_opacity_and_chain_apply_to_the_gate(self):
+        def build(matte_opacity, matte_chain=None, mode="alpha"):
+            plan = small_plan()
+            plan["sources"]["glow"]["colourspace"] = "linear"
+            plan["sources"]["vignette"]["colourspace"] = "linear"
+            plan["chains"] = {"half": chain({"op": "exposure", "stops": -1})}
+            m = {"id": "m", "kind": "matte", "source": "vignette", "frames": {"start": 0, "end": 10}, "opacity": matte_opacity}
+            if matte_chain:
+                m["chain"] = matte_chain
+            plan["layers"] = [plan["layers"][0], m,
+                              {"id": "top", "kind": "fx", "source": "glow", "frames": {"start": 0, "end": 10}, "matte": {"layer": "m", "mode": mode}}]
+            return plan
+        load = solid_loader({"room": [0.2] * 3, "glow": [1.0] * 3, "vignette": [1.0] * 3})
+        self.assertAlmostEqual(lp.flatten(build(1.0), 4, load)[0, 0, 0], 1.0)
+        self.assertAlmostEqual(lp.flatten(build(0.0), 4, load)[0, 0, 0], 0.2)
+        self.assertAlmostEqual(lp.flatten(build([[0, 0.0], [9, 1.0]]), 0, load)[0, 0, 0], 0.2)
+        self.assertAlmostEqual(lp.flatten(build(1.0, "half", "luma"), 4, load)[0, 0, 0], 0.2 + 0.5 * 0.8)
+
+    def test_blend_modes_keep_source_colour_where_the_backdrop_is_empty(self):
+        plan = small_plan(allow_gaps=True)
+        plan["sources"]["glow"]["colourspace"] = "linear"
+        plan["layers"] = [{"id": "only", "kind": "fx", "source": "glow", "frames": {"start": 0, "end": 10}, "blend": "multiply"}]
+        out = lp.flatten(plan, 4, solid_loader({"room": [0] * 3, "glow": [0.6] * 3}))
+        self.assertAlmostEqual(out[0, 0, 0], 0.6)
+        load = solid_loader({"room": [0] * 3, "glow": [0.6] * 3}, {"glow": 0.5})
+        self.assertAlmostEqual(lp.flatten(plan, 4, load)[0, 0, 0], 0.3)
+
+    def test_half_transparent_layers_composite_with_w3c_alpha(self):
+        plan = small_plan(allow_gaps=True)
+        plan["sources"]["glow"]["colourspace"] = "linear"
+        plan["layers"][0]["blend"] = "normal"
+        load = solid_loader({"room": [0.8] * 3, "glow": [0.2] * 3}, {"room": 0.5, "glow": 0.5})
+        out = lp.flatten(plan, 4, load)[0, 0, 0]
+        # premultiplied: top 0.2*0.5 over bottom 0.8*0.5 => 0.1 + 0.4*(1-0.5)
+        self.assertAlmostEqual(out, 0.1 + 0.4 * 0.5)
+
+    def test_solid_only_plan_without_sources_has_a_ledger(self):
+        plan = {"schema": lp.SCHEMA, "comp": {"width": 2, "height": 2, "fps": 24, "frames": 4},
+                "layers": [{"id": "bg", "kind": "solid", "solid": [0.1, 0.2, 0.3], "frames": {"start": 0, "end": 4}}]}
+        self.assertEqual(lp.validate_plan(plan)["errors"], [])
+        self.assertIsNone(lp.layer_ledger(plan)["layers"][0]["source_sha256"])
+        out = lp.flatten(plan, 1, lambda s, f: None)
+        np.testing.assert_allclose(out[0, 0], [0.1, 0.2, 0.3])
+
+    def test_cli_reports_missing_input_as_json_exit_2(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "c.json").write_text(json.dumps(chain({"op": "exposure", "stops": 1})))
+            result = subprocess.run([sys.executable, str(TOOL), "grade", "--chain", str(d / "c.json"),
+                                     "--input", str(d / "absent.png"), "--output", str(d / "o.png")],
+                                    capture_output=True, text=True, cwd=ROOT)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("I/O failure", result.stdout)
+            (d / "bad.png").write_bytes(b"not an image")
+            result = subprocess.run([sys.executable, str(TOOL), "grade", "--chain", str(d / "c.json"),
+                                     "--input", str(d / "bad.png"), "--output", str(d / "o.png")],
+                                    capture_output=True, text=True, cwd=ROOT)
+            self.assertEqual(result.returncode, 2)
+            self.assertFalse((d / "o.png").exists())
+
+
 class CliTests(unittest.TestCase):
     def run_tool(self, *args):
         return subprocess.run([sys.executable, str(TOOL), *args], capture_output=True, text=True, cwd=ROOT)
