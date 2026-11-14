@@ -124,7 +124,7 @@ The second form also saves the component as a `.tox`. Building again replaces th
 | Part | What it is |
 |---|---|
 | `fx_<id>` for every patch node | A Base COMP per node. Processors carry the workbench's own controls as custom parameters, named from the catalog (`Intensity`, `Wet`, `Bypass`, `Solo`, then each processor parameter, for example `Taps`) with the catalog's range, step and default; integer parameters are Int. The original id is kept in the read-only `Nodeid`. Operator names are made legal (`prior-returns` becomes `fx_prior_returns`; collisions get `_2`), the id in OSC addresses is never changed. |
-| inside a processor | Per port: a Select (`sel_<port>_<n>`, pointing at the upstream `out_<port>`), a gain operator where the wire has a gain, `in_<port>`, and `out_<port>`. Picture and audio also get a real wet/dry blend (`blend_*`, Cross TOP and Math CHOPs driven by `Wet`) and a bypass switch (`bypass_*`, driven by `Bypass`). The effect itself belongs in the empty `proc_picture` / `proc_audio` Null between `in_*` and the blend. Each processor also holds a `resolved` Table DAT (see Resolved parameters below). |
+| inside a processor | Per port: a Select (`sel_<port>_<n>`, pointing at the upstream `out_<port>`), a gain operator where the wire has a gain, `in_<port>`, and `out_<port>`. Picture and audio also get a real wet/dry blend (`blend_*`, Cross TOP and Math CHOPs driven by `Wet`) and a bypass switch (`bypass_*`, driven by `Bypass`). The effect chain sits between `in_*` and the `proc_picture` / `proc_audio` Null (see Effects below); a processor without an implemented effect leaves it a plain pass-through. Each processor also holds a `resolved` Table DAT (see Resolved parameters below). |
 | source, mix, output | The same ports; picture and audio take the node's `Gain`. The source reads `Sourcefile` (Movie File In, Audio File In); matte is full, text empty, control 0. Several wires meeting at a mix are combined (Add TOP, Math CHOP). |
 | `osc_in`, `osc_out` | OSC In DAT on the bridge's `--td-port`, OSC Out DAT to the bridge's `--osc-port`. |
 | `td_osc`, `td_contract` | The Python module and the contract JSON. `par_exec_nodes` and `par_exec_rack` (Parameter Execute DATs) turn edits into control messages; `osc_in_callbacks` hands received messages to the module. |
@@ -163,9 +163,31 @@ curve, step and linear lanes, add and multiply modulation, a clip scope and a So
 resolver that moves any value fails there. Editing a base parameter in TouchDesigner never sends the resolved value back
 over OSC: only edits made to the custom parameters are exchanged.
 
-**Not applied by this network:** the effects themselves (a freshly built rack passes signal through unchanged), the
-source excerpt offset (`Offset`, read-only), and audio device output. Text wires carry no gain, and several text wires
-at one mix read only the first.
+**Effects (five of thirteen).** Between `in_<port>` and `proc_<port>` a processor now holds the effect chain
+(`tools/td-network/effects.mjs`). Every effect parameter is an expression over the processor's resolved values, so
+macros, automation, events and sidechain drive it; the chain stays inside the processor, keeps the input's resolution,
+and the network stays static (a count parameter is a fixed maximum of stages switched by its resolved value).
+
+| Processor | Picture | Audio |
+|---|---|---|
+| Delay / Echo | Cache TOP with eight Cache Select TOPs at `n x Tap delay` frames back, Level TOP gain `Tap decay^n` while `n <= Echo taps`, summed with the input | eight Delay CHOPs at `n x Tap delay`, same gains, summed with the input |
+| Gate / Erase | Level TOP opacity from the gate | Math CHOP gain from the gate: periodic (`Open fraction`, `Gate period`, `Gate phase` against the playhead) or sidechain threshold; `Edge time` smooths it with a Lag CHOP; `Closed-state residue` is its floor |
+| Signal Damage | Level TOP stepping (`1 / Picture tone levels`), then Fit TOP down to the requested mosaic cells and back up to the input size, both nearest | drive (Math CHOP), bit-depth quantise (Expression CHOP), bandwidth limit (Lag CHOP, `1 / (2 pi band)`), independent output level |
+| Feedback | Feedback TOP returned through a Transform TOP (`Scale per recurrence`, `Rotation per recurrence`) and a Level TOP (`Return gain`), added to the input | none |
+| Displacement | moving Noise TOP (`Field scale`, `Field movement`) pulling the picture through a Displace TOP along `Direction` | none |
+
+`tests/test_td_effects.py` evaluates every one of these expressions (they are Python) against stand-ins for what they read,
+at each parameter's minimum, default and maximum, and checks the arithmetic: tap gains and delays, the gate's duty
+cycle, the bit-depth step grid, the mosaic cell counts, the displaced axis and the feedback transform.
+
+**Not applied by this network:** the effects of the other eight processors (Routing, Stutter, Granular, Reverse,
+Freeze / Hold, Queue / Overflow, Exchange, Typography), which pass signal through unchanged and are named in the
+spec's `warnings`; the audio of Feedback and Displacement; Signal Damage's sample-rate reduction and picture `Signal drive`;
+Feedback's `Maximum recurrences`, `Tail threshold` and `Reset time`; Displacement's `Boundary spill`, audio warp and ring
+blend; the source excerpt offset (`Offset`, read-only); and audio device output. Text wires carry no gain, and several
+text wires at one mix read only the first. The menu values these chains set (`custom` resolution, `nearest` filtering,
+`add` combining) are not in the application's parameter reference, which lists parameters but not menu tokens, so they stay
+unverified until a TouchDesigner session builds the network. The Delay CHOP's and Lag CHOP's unit menus are left at their defaults, which the expressions assume to be seconds.
 
 Parameter and operator names the network relies on are listed in one table, `tools/td-network/vocabulary.mjs`. The
 spec carries a copy and the builder refuses a spec with a name outside it before creating anything. On a machine with

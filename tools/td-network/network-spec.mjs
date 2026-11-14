@@ -20,6 +20,7 @@ import {CATALOG_BY_TYPE, PORTS} from '../../web/fx/catalog.mjs';
 import {describeControls} from '../../web/fx/controller-map.mjs';
 import {validatePatch} from '../../web/fx/core.mjs';
 import {OSC_ROOT, ECHO_TOLERANCE, encodeSegment, nodeAddress} from '../../web/fx/osc-control.mjs';
+import {EFFECTS, expr} from './effects.mjs';
 import {VOCABULARY, PORT_FAMILY, SELECT, NULL, CUSTOM_PAR_NAME, OPERATOR_NAME} from './vocabulary.mjs';
 
 export const SPEC_SCHEMA = 'amps.td-network.v1';
@@ -82,9 +83,6 @@ const parDefinition = (control, page) => control.kind === 'toggle'
     ...(control.options ? {help: control.options.join(' / ')} : {}),
   });
 
-/** How a processor's effect reads a resolved value: the row of its own `resolved` table (written once per frame). */
-export const resolvedExpr = key => `float(parent().op('resolved')['${key}',1].val)`;
-
 /** The initial `resolved` table: the base values, before the first frame is resolved. */
 function resolvedTable(node, controls) {
   const definition = CATALOG_BY_TYPE[node.type];
@@ -116,6 +114,7 @@ export function buildNetworkSpec(patch, options = {}) {
   const taken = new Set(['osc_in', 'osc_in_callbacks', 'osc_out', 'td_osc', 'td_contract', 'par_exec_nodes', 'par_exec_rack', 'td_resolve', 'frame_exec', 'video_out', 'audio_out']);
   const names = new Map(patch.nodes.map(node => [node.id, operatorName(node.id, taken)]));
   const warnings = [];
+  const implemented = [];
   const operators = [];
   const add = (parent, name, type, extra = {}) => {
     const entry = {path: parent ? `${parent}/${name}` : name, parent, name, type, pars: {}, inputs: [], customPars: [], ...extra};
@@ -194,14 +193,24 @@ export function buildNetworkSpec(patch, options = {}) {
       for (const port of ['matte', 'control', 'text']) add(comp, `out_${port}`, NULL[PORT_FAMILY[port]], {inputs: [`in_${port}`]});
     } else {
       add(comp, 'resolved', 'tableDAT', {table: resolvedTable(node, controls)});
-      const wet = {expr: resolvedExpr('wet'), resolved: 'wet'}, bypass = {expr: `int(${resolvedExpr('bypass')})`, resolved: 'bypass'};
-      add(comp, 'proc_picture', 'nullTOP', {inputs: ['in_picture'], slot: 'picture'});
+      const wet = expr('{wet}'), bypass = expr('int({bypass})');
+      const effect = EFFECTS[node.type]?.((name, type, extra = {}) => add(comp, name, type, {...extra, pars: Object.fromEntries(Object.entries(extra.pars ?? {}).map(([key, value]) => [key, value && typeof value === 'object' && 'ref' in value ? {ref: `${comp}/${value.ref}`} : value]))}));
+      effect?.shared?.();
+      const pictureTail = effect?.picture ? effect.picture() : 'in_picture';
+      const audioTail = effect?.audio ? effect.audio() : 'in_audio';
+      if (!effect) warnings.push(`${node.id}: the ${node.type} effect is not implemented in this network; it passes signal through unchanged.`);
+      else {
+        implemented.push({id: node.id, type: node.type, picture: Boolean(effect.picture), audio: Boolean(effect.audio)});
+        if (!effect.picture) warnings.push(`${node.id}: ${node.type} has no picture effect in this network.`);
+        if (!effect.audio) warnings.push(`${node.id}: ${node.type} has no audio effect in this network.`);
+      }
+      add(comp, 'proc_picture', 'nullTOP', {inputs: [pictureTail], slot: 'picture'});
       add(comp, 'blend_picture', 'crossTOP', {inputs: ['in_picture', 'proc_picture'], pars: {cross: wet}});
       add(comp, 'bypass_picture', 'switchTOP', {inputs: ['blend_picture', 'in_picture'], pars: {index: bypass}});
       add(comp, 'out_picture', 'nullTOP', {inputs: ['bypass_picture']});
-      add(comp, 'proc_audio', 'nullCHOP', {inputs: ['in_audio'], slot: 'audio'});
+      add(comp, 'proc_audio', 'nullCHOP', {inputs: [audioTail], slot: 'audio'});
       add(comp, 'wet_audio', 'mathCHOP', {inputs: ['proc_audio'], pars: {gain: wet}});
-      add(comp, 'dry_audio', 'mathCHOP', {inputs: ['in_audio'], pars: {gain: {expr: `1 - ${resolvedExpr('wet')}`, resolved: 'wet'}}});
+      add(comp, 'dry_audio', 'mathCHOP', {inputs: ['in_audio'], pars: {gain: expr('1 - {wet}')}});
       add(comp, 'blend_audio', 'mathCHOP', {inputs: ['wet_audio', 'dry_audio'], pars: {chopop: 'add'}});
       add(comp, 'bypass_audio', 'switchCHOP', {inputs: ['blend_audio', 'in_audio'], pars: {index: bypass}});
       add(comp, 'out_audio', 'nullCHOP', {inputs: ['bypass_audio']});
@@ -265,6 +274,7 @@ export function buildNetworkSpec(patch, options = {}) {
     operators: finish(operators),
     wires,
     contract,
+    effects: implemented,
     warnings: [...new Set(warnings)],
   };
 }
@@ -327,8 +337,18 @@ export function validateNetworkSpec(spec) {
           const owner = operator.parent;
           if ('resolved' in value) {
             const rows = tableKeys.get(owner ? `${owner}/resolved` : 'resolved');
-            if (!rows?.has(value.resolved)) fail(`${operator.path}.${name}: expression reads ${value.resolved}, which ${owner} does not resolve`);
-            if (value.expr !== undefined && !String(value.expr).includes(`['${value.resolved}',1]`)) fail(`${operator.path}.${name}: expression does not read ${value.resolved}`);
+            for (const row of value.resolved) {
+              if (!rows?.has(row)) fail(`${operator.path}.${name}: expression reads ${row}, which ${owner} does not resolve`);
+              if (!String(value.expr).includes(`['${row}',1]`)) fail(`${operator.path}.${name}: expression does not read ${row}`);
+            }
+            for (const rackPar of value.rack) {
+              if (!customOf.get('').has(rackPar)) fail(`${operator.path}.${name}: expression reads rack parameter ${rackPar}, which the rack does not define`);
+              if (!String(value.expr).includes(`.par.${rackPar}`)) fail(`${operator.path}.${name}: expression does not read rack parameter ${rackPar}`);
+            }
+            for (const sibling of value.siblings) {
+              if (byPath.get(owner ? `${owner}/${sibling}` : sibling)?.parent !== owner) fail(`${operator.path}.${name}: expression reads ${sibling}, which is not inside ${owner}`);
+              if (!String(value.expr).includes(`op('${sibling}')`)) fail(`${operator.path}.${name}: expression does not read ${sibling}`);
+            }
           } else if (value.par === null) {
             if (value.expr !== 'parent().path') fail(`${operator.path}.${name}: only parent().path may be an expression without a parameter`);
           } else if (!customOf.get(owner)?.has(value.par)) fail(`${operator.path}.${name}: expression uses ${value.par}, which ${owner || 'the rack'} does not define`);
