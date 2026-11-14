@@ -38,6 +38,23 @@ to visit cannot steer the rack or send OSC through your machine. Clients that se
 WebSocket DAT, scripts) are accepted; this is safe only because the socket is loopback. Binding another host
 (`--host 0.0.0.0`) exposes the bridge to your network and is your decision; there is no password.
 
+## Try the bridge without TouchDesigner or the film
+
+The workbench page needs its media pack before it draws the Control tab. Without the private pack, generate a stand-in
+and run a scripted TouchDesigner against the real page:
+
+```
+node tools/make-synthetic-asset-pack.mjs web/fx/assets      # git-ignored; synthetic: true in manifest and provenance
+node tools/fx-td-bridge.mjs                                  # terminal 1
+python3 -m http.server 8765 --bind 127.0.0.1                 # terminal 2, repository root
+node tools/fx-td-simulator.mjs outputs/bridge-e2e.json       # terminal 3: waits for the page to link
+```
+
+Open `http://127.0.0.1:8765/web/fx/index.html`, then **Control > TouchDesigner (OSC) > Connect bridge**. The simulator
+asks for the rack state until the page answers, then sends knob 0, switch 0 and transport loop (each to a value different from the one the rack reported, since a repeat is an echo, not an edit), then an unknown address, a wrong argument type and an unknown node id, and
+checks what the rack reports back. It exits 0 only when every check passes. The synthetic pack carries the source
+identity the factory patches bind to, so it is a local fixture: never publish or commit it.
+
 ## Addresses
 
 Values for ranges are **normalised 0 to 1** and are scaled onto each control's own range and step, exactly as a MIDI
