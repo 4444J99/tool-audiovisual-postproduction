@@ -27,6 +27,7 @@ export const VOCABULARY = Object.freeze({
   audiofileinCHOP: {family: 'CHOP', pars: ['file']},
   textDAT: {family: 'DAT', pars: []},
   tableDAT: {family: 'DAT', pars: []},
+  executeDAT: {family: 'DAT', pars: ['active', 'framestart']},
   oscinDAT: {family: 'DAT', pars: ['port', 'callbacks']},
   oscoutDAT: {family: 'DAT', pars: ['address', 'port']},
   parameterexecuteDAT: {family: 'DAT', pars: ['op', 'pars', 'custom', 'builtin', 'valuechange', 'onpulse']},

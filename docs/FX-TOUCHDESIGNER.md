@@ -124,7 +124,7 @@ The second form also saves the component as a `.tox`. Building again replaces th
 | Part | What it is |
 |---|---|
 | `fx_<id>` for every patch node | A Base COMP per node. Processors carry the workbench's own controls as custom parameters, named from the catalog (`Intensity`, `Wet`, `Bypass`, `Solo`, then each processor parameter, for example `Taps`) with the catalog's range, step and default; integer parameters are Int. The original id is kept in the read-only `Nodeid`. Operator names are made legal (`prior-returns` becomes `fx_prior_returns`; collisions get `_2`), the id in OSC addresses is never changed. |
-| inside a processor | Per port: a Select (`sel_<port>_<n>`, pointing at the upstream `out_<port>`), a gain operator where the wire has a gain, `in_<port>`, and `out_<port>`. Picture and audio also get a real wet/dry blend (`blend_*`, Cross TOP and Math CHOPs driven by `Wet`) and a bypass switch (`bypass_*`, driven by `Bypass`). The effect itself belongs in the empty `proc_picture` / `proc_audio` Null between `in_*` and the blend. |
+| inside a processor | Per port: a Select (`sel_<port>_<n>`, pointing at the upstream `out_<port>`), a gain operator where the wire has a gain, `in_<port>`, and `out_<port>`. Picture and audio also get a real wet/dry blend (`blend_*`, Cross TOP and Math CHOPs driven by `Wet`) and a bypass switch (`bypass_*`, driven by `Bypass`). The effect itself belongs in the empty `proc_picture` / `proc_audio` Null between `in_*` and the blend. Each processor also holds a `resolved` Table DAT (see Resolved parameters below). |
 | source, mix, output | The same ports; picture and audio take the node's `Gain`. The source reads `Sourcefile` (Movie File In, Audio File In); matte is full, text empty, control 0. Several wires meeting at a mix are combined (Add TOP, Math CHOP). |
 | `osc_in`, `osc_out` | OSC In DAT on the bridge's `--td-port`, OSC Out DAT to the bridge's `--osc-port`. |
 | `td_osc`, `td_contract` | The Python module and the contract JSON. `par_exec_nodes` and `par_exec_rack` (Parameter Execute DATs) turn edits into control messages; `osc_in_callbacks` hands received messages to the module. |
@@ -142,10 +142,30 @@ and is not sent. `Status` reads `linked: N processors` once the rack's report ma
 type or count mismatch. The module has no address parsing at all: the contract lists every address, and an address
 that is not in it is ignored.
 
+**Resolved parameters (macros, automation, events, sidechain, Solo).** A custom parameter is a processor's *base* value.
+What its blend, bypass (and the effects, as they are added) read is the **resolved** value in the processor's own
+`resolved` Table DAT (rows `intensity`, `wet`, `bypass`, `solo`, `active`, then `param.<key>` for each catalog
+parameter). An Execute DAT (`frame_exec`) calls `td_resolve` at the start of every frame, which reproduces the
+workbench's `evaluatedNode` at the rack's playhead (`Time`, reported by the workbench on `/fx/time`):
+
+1. Intensity and Wet: base, then the automation lane, then the patch's events, clamped to 0 to 1, then sidechain modulation.
+2. The patch's macro mappings remap the processor parameters from the resolved Intensity (linear, ease-in, ease-out, smoothstep).
+3. A direct automation lane or event on a parameter wins over its macro; sidechain modulation (add or multiply, by the
+   level of the processor's `in_control` channel, clamped to 0 to 1) is applied last; integer parameters are rounded.
+4. Solo is rack-scoped: when any processor is soloed (its Solo switch or a `solo` event), every other processor is
+   inactive; a clip-scoped processor is inactive outside its range. Bypass is the processor's own Bypass (or `bypass`
+   event) OR not active. The processor's bypass switch and wet/dry blend read these resolved rows.
+
+The resolver (`tools/td-network/python/fx_td_resolve.py`) is pure Python and is checked against the workbench's own
+`evaluatedNode`: `tests/test_td_resolve.py` compares every fixture patch at sampled times (every automation keyframe, event
+and clip edge, plus or minus 10 ms) with sidechain levels 0, 0.37 and 1, and the same patches rewritten to use every macro
+curve, step and linear lanes, add and multiply modulation, a clip scope and a Solo event (`--stress`). A change in the
+resolver that moves any value fails there. Editing a base parameter in TouchDesigner never sends the resolved value back
+over OSC: only edits made to the custom parameters are exchanged.
+
 **Not applied by this network:** the effects themselves (a freshly built rack passes signal through unchanged), the
-patch's automation events and macro mappings, sidechain modulation (the control wire is routed to `in_control` and the
-mapping is recorded in the contract), Solo (mirrored as state only), the source excerpt offset (`Offset`, read-only),
-and audio device output. Text wires carry no gain, and several text wires at one mix read only the first.
+source excerpt offset (`Offset`, read-only), and audio device output. Text wires carry no gain, and several text wires
+at one mix read only the first.
 
 Parameter and operator names the network relies on are listed in one table, `tools/td-network/vocabulary.mjs`. The
 spec carries a copy and the builder refuses a spec with a name outside it before creating anything. On a machine with
@@ -183,6 +203,17 @@ aliases; a report from the rack sets the Python module's parameters to the rack'
 the workbench applies; the builder runs against a fake operator tree that only offers the parameters the vocabulary
 lists; and one test runs a workbench session, the real bridge and the generated module over real UDP and WebSocket
 connections.
+
+**Why it was not built in TouchDesigner here (observed 2026-11-14, macOS, TouchDesigner.app arm64).** The bundle's
+`Contents/MacOS` holds `TouchDesigner`, `TouchEngine`, `toeexpand` and `toecollapse`. `toeexpand` and `toecollapse` only
+convert a `.toe` or `.tox` to and from a directory (their usage text lists no script or run option). `TouchDesigner -h`
+printed nothing and did not exit (it was stopped by a 10 s timeout), so the binary shows no command-line interface; no
+`-nowindow` or script flag appears in a read of its strings. `TouchEngine` exited 0 with no output when run bare; it
+is the player behind `libTouchEngine.dylib`, which a host application loads to run a `.tox`, and no host is installed
+or built here. There is no `.toe` on the machine to carry a start-up script. A run would therefore need the full
+application window, which this lane does not open. What does run here is the parameter reference inside the
+application (`check-vocabulary.mjs`, exit 0 against it), the generated module under CPython, and the builder against a
+fake operator tree.
 
 **Not verified:** a real TouchDesigner session (the generated network has never been built in TouchDesigner: the
 operator and parameter names are checked against TouchDesigner's own parameter reference, but the network, the `.module`

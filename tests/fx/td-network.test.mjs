@@ -264,6 +264,11 @@ test('validator catches broken specs', () => {
     'td_contract text out of step with the contract': spec => { spec.contract.nodes[0].controls[0].default = 0.123; },
     'wire pointing somewhere else': spec => { const o = spec.operators.find(op => op.path === spec.wires[0].select); Object.keys(o.pars).forEach(k => { o.pars[k] = {ref: spec.wires[1].source}; }); },
     'OSC port out of step': spec => { spec.osc.inPort = 9; },
+    'expression reading a row the resolved table does not hold': spec => { const o = spec.operators.find(op => op.pars.cross); o.pars.cross = {expr: "float(parent().op('resolved')['ghost',1].val)", resolved: 'ghost'}; },
+    'expression that does not read its declared row': spec => { const o = spec.operators.find(op => op.pars.cross); o.pars.cross = {expr: '0.5', resolved: 'wet'}; },
+    'a processor without its resolve block': spec => { delete spec.contract.nodes[0].resolve; spec.operators.find(o => o.name === 'td_contract').text = JSON.stringify(spec.contract); },
+    'resolve range differing from the catalog': spec => { const block = spec.contract.nodes[0].resolve; block.params[block.order[0]].max += 1; spec.operators.find(o => o.name === 'td_contract').text = JSON.stringify(spec.contract); },
+    'resolved table missing a row': spec => { const o = spec.operators.find(op => op.name === 'resolved'); o.table = o.table.slice(1); },
     'select given an input': spec => { const o = spec.operators.find(op => op.type === 'selectCHOP'); o.inputs = ['in_audio']; },
   };
   assert.deepEqual(validateNetworkSpec(base()), []);
@@ -462,4 +467,16 @@ test('an off-grid value on the rack (a preset, or an automation sample) is not s
   // Feeding TouchDesigner's own value back as an edit is a no-op, so the rack's 0.483 is never replaced by 0.48.
   const again = probe({module: moduleSource, contract: spec.contract, reports, edits: [{comp: node.comp, par: time.par, value: written}]});
   assert.equal(again.edits[0], null);
+});
+
+test('the processors read their wet, bypass and (soon) parameters from the resolved table, not from the raw custom parameters', () => {
+  const spec = buildNetworkSpec(createPatch('message-impact'));
+  const processor = spec.contract.nodes[0].comp;
+  const inside = spec.operators.filter(o => o.parent === processor);
+  const blends = inside.filter(o => /^(blend|wet|dry|bypass)_/.test(o.name));
+  assert.ok(blends.length >= 6);
+  for (const operator of blends) for (const value of Object.values(operator.pars)) if (value?.expr) assert.ok('resolved' in value && !value.expr.includes('par.Wet') && !value.expr.includes('par.Bypass'), operator.path);
+  const table = inside.find(o => o.name === 'resolved');
+  assert.deepEqual(table.table.slice(0, 5).map(row => row[0]), ['intensity', 'wet', 'bypass', 'solo', 'active']);
+  assert.ok(spec.operators.find(o => o.name === 'frame_exec' && o.type === 'executeDAT' && o.pars.framestart === 1));
 });
