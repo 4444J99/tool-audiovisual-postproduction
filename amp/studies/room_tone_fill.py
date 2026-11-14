@@ -245,10 +245,14 @@ def fill_holes(audio: np.ndarray, sr: int, *, seed: int = 0, min_hole_s: float =
         pre = _quiet_extent(a, start, -1, pre_limit, sr, ceiling_all)
         post = _quiet_extent(a, end, +1, post_limit, sr, ceiling_all)
         window = max(1, int(round(0.02 * sr)))
-        before = _rms(a[max(0, start - window):start])
-        after = _rms(a[end:end + window])
-        tone_before = bool(start - window >= 0 and before <= ceiling_all)
-        tone_after = bool(end + window <= len(a) and after <= ceiling_all)
+        # reference windows stop at the neighbouring hole, so another hole's silence never counts as tone
+        wb = min(window, start - previous_end)
+        wa = min(window, next_start - end)
+        minimum_window = max(1, sr // 1000)
+        before = _rms(a[start - wb:start])
+        after = _rms(a[end:end + wa])
+        tone_before = bool(wb >= minimum_window and before <= ceiling_all)
+        tone_after = bool(wa >= minimum_window and after <= ceiling_all)
         left, right = start - pre, end + post
         bed, info = build_bed(a, regions, right - left, sr, seed=seed + number)
         gain = target / max(_rms(bed), 1e-12)
@@ -270,6 +274,7 @@ def fill_holes(audio: np.ndarray, sr: int, *, seed: int = 0, min_hole_s: float =
         report["holes"].append({
             "start_sample": int(start), "end_sample": int(end), "pre_samples": int(pre), "post_samples": int(post),
             "neighbour_before_is_tone": tone_before, "neighbour_after_is_tone": tone_after,
+            "edge_window_before": int(wb), "edge_window_after": int(wa),
             "start_s": round(start / sr, 5), "end_s": round(end / sr, 5), "duration_s": round((end - start) / sr, 5),
             "crossfade_before_s": round(pre / sr, 5), "crossfade_after_s": round(post / sr, 5),
             "target_dbfs": round(_db(target), 2), "gain_db": round(_db(clamped), 2),
@@ -316,19 +321,19 @@ def fill_report(original: np.ndarray, filled: np.ndarray, sr: int, report: dict[
     reference = np.concatenate([a[s:e] for s, e in regions]) if regions else np.zeros((0, a.shape[1]))
     zones = []
     checks = []
+    bands_ref = band_levels(reference, sr) if len(reference) >= int(0.1 * sr) and report["holes"] else None   # once, not per hole
     for hole in report["holes"]:
         s, e = hole["start_sample"], hole["end_sample"]              # exact sample indices, never rounded seconds
         zones.append((s - hole["pre_samples"], e + hole["post_samples"]))
         inside = b[s:e]
-        window = max(1, int(round(0.02 * sr)))
+        wb, wa = hole["edge_window_before"], hole["edge_window_after"]      # bounded by the neighbouring hole
         deviations = []
         if hole["neighbour_before_is_tone"]:
-            deviations.append(abs(_db(_rms(inside[:window])) - _db(_rms(a[max(0, s - window):s]))))
+            deviations.append(abs(_db(_rms(inside[:wb])) - _db(_rms(a[s - wb:s]))))
         if hole["neighbour_after_is_tone"]:
-            deviations.append(abs(_db(_rms(inside[-window:])) - _db(_rms(a[e:e + window]))))
+            deviations.append(abs(_db(_rms(inside[-wa:])) - _db(_rms(a[e:e + wa]))))
         tone_rms = _rms(inside)
         bands_in = band_levels(inside, sr) if len(inside) >= int(0.1 * sr) else None
-        bands_ref = band_levels(reference, sr) if len(reference) >= int(0.1 * sr) else None
         spread = None
         if bands_in and bands_ref:
             # compare spectral shape: remove the overall level difference, then take the worst band

@@ -322,6 +322,36 @@ class ReviewRegressionRoundTwoTests(unittest.TestCase):
         self.assertEqual(rt.find_holes(filled, SR), [])
         self.assertEqual({h["pre_samples"] for h in report["holes"]} | {h["post_samples"] for h in report["holes"]}, {0})
 
+class ReviewRegressionRoundThreeTests(unittest.TestCase):
+    def test_edge_check_ignores_a_neighbouring_holes_silence(self):
+        sr = 16000
+        track = np.full(sr * 3, 0.0)
+        rng = np.random.default_rng(21)
+        track[:] = rng.standard_normal(len(track)) * 0.01
+        track[16000:17600] = 0.0
+        track[17616:19216] = 0.0                                    # 16 samples of tone between the holes
+        filled, report = rt.fill_holes(track, sr, seed=1)
+        full = rt.fill_report(track, filled, sr, report)
+        first, second = full["holes"]
+        self.assertLessEqual(first["edge_window_after"], 16)
+        self.assertLessEqual(second["edge_window_before"], 16)
+        for check in full["checks"]:
+            self.assertTrue(check["edge_level_deviation_db"] is None or check["edge_level_deviation_db"] < 6.0, check)
+
+    def test_reference_spectrum_is_computed_once(self):
+        audio, _ = dialogue()
+        filled, report = rt.fill_holes(audio, SR, seed=1)
+        calls = []
+        original = rt.band_levels
+        rt.band_levels = lambda block, sr: calls.append(len(block)) or original(block, sr)
+        try:
+            rt.fill_report(audio, filled, SR, report)
+        finally:
+            rt.band_levels = original
+        reference_length = sum(r["end_sample"] - r["start_sample"] for r in report["tone_regions"])
+        self.assertEqual(calls.count(reference_length), 1)                  # the extracted tone is analysed once, not per hole
+        self.assertEqual(len(calls), 1 + sum(1 for h in report["holes"] if h["duration_s"] >= 0.1))
+
 
 if __name__ == "__main__":
     unittest.main()
