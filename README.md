@@ -40,6 +40,10 @@ The workbench's Control tab adds touch faders, knobs and switches with MIDI lear
 
 See [the workbench guide](docs/FX-WORKBENCH.md), [the processing contract](docs/FX-ENGINE.md), and [the source specification](docs/god-here-fx-workbench-spec.md). Portable JSON fixtures and schema are in `web/fx/fixtures/` and `web/fx/rack.schema.json`. Original film and derived media stay outside the public repository.
 
+## Horizontal / vertical layout geometry
+
+The eight-layout comparison's placement rules are a pure module (`web/fx/layout-geometry.mjs`) that the renderer and `tools/analyze-layout-geometry.mjs` share; the measured horizontal-versus-vertical result is in [docs/LAYOUT-COMPARISON.md](docs/LAYOUT-COMPARISON.md).
+
 ## Reverse-angle ledger
 
 `tools/reverse_angle.py` plans a same-side reverse camera and reports which reverse-view pixels the source recording genuinely shows ([guide](docs/REVERSE-ANGLE.md)).
