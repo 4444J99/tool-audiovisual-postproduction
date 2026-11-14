@@ -42,6 +42,8 @@ export function writeNetwork(patch, outDir, options = {}) {
     'modules/osc_in_callbacks.py': pythonText('fx_td_osc_in_callbacks.py'),
     'modules/par_exec_nodes.py': pythonText('fx_td_par_exec_nodes.py'),
     'modules/par_exec_rack.py': pythonText('fx_td_par_exec_rack.py'),
+    'modules/td_resolve.py': pythonText('fx_td_resolve.py'),
+    'modules/frame_exec.py': pythonText('fx_td_frame_exec.py'),
   };
   for (const [name, text] of Object.entries(files)) writeFileSync(join(outDir, name), text);
   return {spec, files: Object.keys(files)};

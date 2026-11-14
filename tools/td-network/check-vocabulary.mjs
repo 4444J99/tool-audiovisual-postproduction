@@ -13,7 +13,11 @@ import {readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {VOCABULARY} from './vocabulary.mjs';
 
-const TUPLET_SUFFIXES = ['r', 'g', 'b', 'a', 'x', 'y', 'z', 'w'];
+const TUPLET_SUFFIXES = ['r', 'g', 'b', 'a', 'x', 'y', 'z', 'w', 'h'];
+/** Tuple parameters the reference lists only by their base name with a plain component type: the output resolution is
+ *  `resolutionw` and `resolutionh` in TouchDesigner's Python API (`resolution`, Int, in the reference), and a Lag CHOP's
+ *  lag is a pair, up then down (`lag1`, `lag2`; the reference's summary says "the first value is for lagging up"). */
+const BASE_TUPLETS = {resolution: ['w', 'h'], lag: ['1', '2'], overshoot: ['1', '2']};
 
 export function checkVocabulary(help, vocabulary = VOCABULARY) {
   const types = Object.assign({}, ...Object.values(help.help));
@@ -23,6 +27,7 @@ export function checkVocabulary(help, vocabulary = VOCABULARY) {
     if (!reference) { problems.push(`${type}: not an operator type in the reference`); continue; }
     for (const name of item.pars) {
       const known = name in reference.parameters
+        || Object.entries(BASE_TUPLETS).some(([base, suffixes]) => base in reference.parameters && suffixes.some(suffix => name === base + suffix))
         || TUPLET_SUFFIXES.some(suffix => name.endsWith(suffix) && name.slice(0, -1) in reference.parameters && ['RGB', 'RGBA', 'XY', 'XYZ', 'XYZW', 'UV', 'UVW', 'WH'].includes(reference.parameters[name.slice(0, -1)].parType));
       if (!known) problems.push(`${type}.${name}: not a parameter in the reference`);
     }

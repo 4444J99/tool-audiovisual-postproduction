@@ -46,7 +46,7 @@ The eight-layout comparison's placement rules are a pure module (`web/fx/layout-
 
 ## TouchDesigner network
 
-`tools/fx-td-network.mjs` generates the rack's TouchDesigner version from a patch: components with the catalog's own parameters, wired ports, a real wet/dry and bypass, and an OSC module that follows the bridge's address contract ([guide](docs/FX-TOUCHDESIGNER.md#the-touchdesigner-network-generated)). Not yet built in a real TouchDesigner.
+`tools/fx-td-network.mjs` generates the rack's TouchDesigner version from a patch: components with the catalog's own parameters, wired ports, a real wet/dry and bypass, per-frame automation/macro/modulation/Solo resolution, effect chains for five processors, and an OSC module that follows the bridge's address contract ([guide](docs/FX-TOUCHDESIGNER.md#the-touchdesigner-network-generated)). Not yet built in a real TouchDesigner.
 
 ## Reverse-angle ledger
 
@@ -55,6 +55,11 @@ The eight-layout comparison's placement rules are a pure module (`web/fx/layout-
 ## Set spec to Blender scene
 
 `tools/set_scene.py` validates a set spec (bounds, materials, boxes, cylinders, stepped arch bands, lights, cameras) and builds it in headless Blender, then compares Blender's measured scene with the spec's scene graph ([guide](docs/SET-SCENE.md)). `shot-set` exports the same environment as a shot plan's `set` block.
+
+||||||| 5e53f6a
+## Actor-coverage matrix
+
+`tools/coverage_matrix.py` derives, from a shot plan's geometry, what size and angle each shot gives each actor, checks required cells, dialogue lines and recorded room tone, and proposes validated shots for the gaps ([guide](docs/COVERAGE-MATRIX.md)).
 
 ## Shot plan and animatic
 
