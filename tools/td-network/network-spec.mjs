@@ -185,7 +185,7 @@ export function buildNetworkSpec(patch, options = {}) {
       add(comp, 'out_text', 'nullDAT', {inputs: ['text']});
       // The sidechain envelope the workbench derives from the source (audio-engine.mjs amplitudeEnvelope): peak level,
       // 6 ms attack, 75 ms release, times 5, limited to 1. It is the only producer of the control signal.
-      add(comp, 'env_peak', 'expressionCHOP', {inputs: ['audio'], pars: {expr0expr: expr('abs(me.inputVal)')}});
+      add(comp, 'env_peak', 'expressionCHOP', {inputs: ['audio'], pars: {expr0expr: expr('max(abs({op:audio}[0][me.inputIndex]), abs({op:audio}[{op:audio}.numChans - 1][me.inputIndex]))')}});
       add(comp, 'env_follow', 'lagCHOP', {inputs: ['env_peak'], pars: {lag1: 0.006, lag2: 0.075}});
       add(comp, 'control', 'expressionCHOP', {inputs: ['env_follow'], pars: {expr0expr: expr('min(1, me.inputVal * 5)')}});
       add(comp, 'out_control', 'nullCHOP', {inputs: ['control']});
@@ -199,12 +199,18 @@ export function buildNetworkSpec(patch, options = {}) {
       add(comp, 'resolved', 'tableDAT', {table: resolvedTable(node, controls)});
       const wet = expr('{wet}'), bypass = expr('int({bypass})');
       const effect = EFFECTS[node.type]?.((name, type, extra = {}) => add(comp, name, type, {...extra, pars: Object.fromEntries(Object.entries(extra.pars ?? {}).map(([key, value]) => [key, value && typeof value === 'object' && 'ref' in value ? {ref: `${comp}/${value.ref}`} : value]))}));
+      // Like the workbench, a processor only touches the shared voice when it targets `voice`, and the picture when it
+      // targets any visual stream; otherwise that signal passes through untouched.
+      const targetsVoice = !node.targets || node.targets.includes('voice');
+      const targetsPicture = !node.targets || node.targets.some(target => ['picture', 'body', 'objects', 'room'].includes(target));
       effect?.shared?.();
-      const pictureTail = effect?.picture ? effect.picture() : 'in_picture';
-      const audioTail = effect?.audio ? effect.audio() : 'in_audio';
+      const pictureTail = effect?.picture && targetsPicture ? effect.picture() : 'in_picture';
+      const audioTail = effect?.audio && targetsVoice ? effect.audio() : 'in_audio';
+      if (effect?.picture && !targetsPicture) warnings.push(`${node.id}: no picture target, so the ${node.type} picture effect is not built.`);
+      if (effect?.audio && !targetsVoice) warnings.push(`${node.id}: no voice target, so the ${node.type} audio effect is not built.`);
       if (!effect) warnings.push(`${node.id}: the ${node.type} effect is not implemented in this network; it passes signal through unchanged.`);
       else {
-        implemented.push({id: node.id, type: node.type, picture: Boolean(effect.picture), audio: Boolean(effect.audio)});
+        implemented.push({id: node.id, type: node.type, picture: Boolean(effect.picture && targetsPicture), audio: Boolean(effect.audio && targetsVoice)});
         if (!effect.picture) warnings.push(`${node.id}: ${node.type} has no picture effect in this network.`);
         if (!effect.audio) warnings.push(`${node.id}: ${node.type} has no audio effect in this network.`);
       }

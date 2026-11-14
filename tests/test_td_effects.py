@@ -28,9 +28,10 @@ def spec_for(patch_path):
     return json.loads(next(directory.glob("*.network.json")).read_text())
 
 
-def single_patch(type_name):
+def single_patch(type_name, targets=None):
     """A one-processor patch for a processor type, written by the workbench's own factory."""
-    script = ("import {freshPatch} from './tests/fx/runtime.mjs'; process.stdout.write(JSON.stringify(freshPatch(%s)));" % json.dumps(type_name))
+    script = ("import {freshPatch} from './tests/fx/runtime.mjs'; const patch = freshPatch(%s); const targets = %s; "
+              "if (targets) patch.nodes.find(node => node.id === 'fx-1').targets = targets; process.stdout.write(JSON.stringify(patch));" % (json.dumps(type_name), json.dumps(targets)))
     result = subprocess.run(["node", "--input-type=module", "-e", script], capture_output=True, text=True, cwd=ROOT, check=False)
     if result.returncode != 0:
         raise AssertionError(result.stderr)
@@ -74,9 +75,20 @@ class Channels(list):
         return len(self)
 
 
+class Audio:
+    """Two source channels; indexing a channel by sample gives that sample."""
+    def __init__(self, left, right):
+        self.channels = [left, right]
+        self.numChans = 2
+
+    def __getitem__(self, index):
+        return self.channels[index]
+
+
 class Comp:
     def __init__(self, rows, time, control, gate):
         self.table, self.control, self.gate = Table(rows), control, gate
+        self.audio = Audio([0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
         self.par = type("P", (), {"Time": time})()
 
     def op(self, name):
@@ -88,6 +100,8 @@ class Comp:
             return [Chan(self.gate)]
         if name == "in_picture":
             return Sized()
+        if name == "audio":
+            return self.audio
         raise KeyError(name)
 
     def parent(self):
@@ -99,13 +113,15 @@ class Project:
 
 
 class Me:
-    def __init__(self, value):
-        self.inputVal = value
+    def __init__(self, value, index=0):
+        self.inputVal, self.inputIndex = value, index
 
 
-def evaluate(text, rows, time=0.0, control=0.0, gate=1.0, sample=0.0):
+def evaluate(text, rows, time=0.0, control=0.0, gate=1.0, sample=0.0, audio=None, index=0):
     comp = Comp(rows, time, control, gate)
-    return eval(text, {"parent": lambda: comp, "project": Project, "me": Me(sample), "float": float, "int": int, "max": max, "min": min, "round": round})
+    if audio:
+        comp.audio = Audio(*audio)
+    return eval(text, {"parent": lambda: comp, "project": Project, "me": Me(sample, index), "float": float, "int": int, "max": max, "min": min, "round": round})
 
 
 def rows_for(definition_params, picks):
@@ -172,6 +188,9 @@ class EffectTests(unittest.TestCase):
         self.assertEqual([delays["dly_tap_%d" % i] for i in range(4)], [0.5, 1.0, 1.5, 2.0])
         frame = {o["name"]: evaluate(o["pars"]["index"]["expr"], rows) for o in self.chain("delay") if o["name"].startswith("dly_frame_")}
         self.assertEqual([frame["dly_frame_%d" % i] for i in range(3)], [-30, -60, -90])
+        by_name = {o["name"]: o for o in self.chain("delay")}
+        self.assertNotIn("in_audio", by_name["dly_sum"]["inputs"])   # a fully wet delay is silent before its first tap
+        self.assertEqual(len(by_name["dly_sum"]["inputs"]), 8)
 
     def test_a_picture_tap_beyond_the_cache_is_switched_off_not_collapsed_onto_the_oldest_frame(self):
         by_name = {o["name"]: o for o in self.chain("delay")}
@@ -220,6 +239,30 @@ class EffectTests(unittest.TestCase):
         self.assertEqual(by_name["fb_state"]["pars"]["top"], {"ref": "fx_fx_1/fb_sum"})
 
 
+class TargetTests(unittest.TestCase):
+    def build(self, targets):
+        return spec_for(single_patch("damage", targets))
+
+    def tails(self, spec):
+        inside = {o["name"]: o for o in spec["operators"] if o["parent"] == "fx_fx_1"}
+        return inside["proc_picture"]["inputs"][0], inside["proc_audio"]["inputs"][0]
+
+    def test_a_processor_without_a_voice_target_leaves_the_audio_alone(self):
+        spec = self.build(["picture"])
+        self.assertEqual(self.tails(spec), ("dmg_full", "in_audio"))
+        self.assertEqual(spec["effects"], [{"id": "fx-1", "type": "damage", "picture": True, "audio": False}])
+        self.assertTrue(any("no voice target" in w for w in spec["warnings"]))
+
+    def test_a_processor_without_a_visual_target_leaves_the_picture_alone(self):
+        spec = self.build(["voice"])
+        self.assertEqual(self.tails(spec), ("in_picture", "dmg_out"))
+        self.assertEqual(spec["effects"][0]["picture"], False)
+        self.assertTrue(any("no picture target" in w for w in spec["warnings"]))
+
+    def test_the_default_targets_build_both(self):
+        self.assertEqual(self.tails(self.build(None)), ("dmg_full", "dmg_out"))
+
+
 class EnvelopeTests(unittest.TestCase):
     def test_the_source_produces_the_sidechain_envelope_the_workbench_derives(self):
         spec = spec_for(FIXTURES / "message-impact.json")
@@ -230,7 +273,10 @@ class EnvelopeTests(unittest.TestCase):
         self.assertEqual(source["env_peak"]["inputs"], ["audio"])
         self.assertEqual(source["env_follow"]["pars"], {"lag1": 0.006, "lag2": 0.075})   # attack and release of amplitudeEnvelope
         peak, limit = (source[n]["pars"]["expr0expr"]["expr"] for n in ("env_peak", "control"))
-        self.assertEqual([evaluate(peak, {}, sample=x) for x in (-0.5, 0.25)], [0.5, 0.25])
+        # the larger of the two channels' magnitudes, sample by sample, as amplitudeEnvelope takes it
+        left, right = [0.1, -0.2, 0.0], [0.0, 0.05, -0.7]
+        self.assertEqual([evaluate(peak, {}, audio=(left, right), index=i) for i in range(3)], [0.1, 0.2, 0.7])
+        self.assertEqual(evaluate(peak, {}, audio=([0.0, 0.0, 0.0], [0.0, 0.9, 0.0]), index=1), 0.9)   # signal in the right channel only
         self.assertEqual([evaluate(limit, {}, sample=x) for x in (0.1, 0.5, 0.9)], [0.5, 1, 1])   # times 5, limited to 1
         self.assertFalse([o for o in spec["operators"] if o["type"] == "constantCHOP" and o["name"] == "control"])
 

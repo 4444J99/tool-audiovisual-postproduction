@@ -161,9 +161,9 @@ The resolver (`tools/td-network/python/fx_td_resolve.py`) is pure Python and is 
 and clip edge, plus or minus 10 ms) with sidechain levels 0, 0.37 and 1, and the same patches rewritten to use every macro
 curve, step and linear lanes, add and multiply modulation, a clip scope and a Solo event (`--stress`). A change in the
 resolver that moves any value fails there. The sidechain level is produced inside the network: the source component derives the same envelope as the workbench's
-`amplitudeEnvelope` (peak level of the source audio, 6 ms attack, 75 ms release, times 5, limited to 1) from its audio
+`amplitudeEnvelope` (the larger magnitude of the two source channels, sample by sample, 6 ms attack, 75 ms release, times 5, limited to 1) from its audio
 and sends it down the control wires; the Lag CHOP's two values are attack and release as that operator defines them, and
-its default unit is assumed to be seconds. Only the first channel is read.
+its default unit is assumed to be seconds. The envelope is computed with a per-sample Python expression, which costs CPU at audio rates. Only the first channel is read.
 
 The rules in the contract (automation, events, macros) are a snapshot of the patch the network was generated from. Editing
 a control by hand in TouchDesigner removes that control's rules in the network exactly as the workbench's `setParameter`
@@ -180,11 +180,13 @@ and the network stays static (a count parameter is a fixed maximum of stages swi
 
 | Processor | Picture | Audio |
 |---|---|---|
-| Delay / Echo | Cache TOP with eight Cache Select TOPs at `n x Tap delay` frames back, Level TOP gain `Tap decay^n` while `n <= Echo taps`, summed with the input; the cache holds 240 frames (4 s at 60 fps) and a tap that would reach further back is switched off, not collapsed onto the oldest frame | eight Delay CHOPs at `n x Tap delay`, same gains, summed with the input |
+| Delay / Echo | Cache TOP with eight Cache Select TOPs at `n x Tap delay` frames back, Level TOP gain `Tap decay^n` while `n <= Echo taps`, summed with the input; the cache holds 240 frames (4 s at 60 fps) and a tap that would reach further back is switched off, not collapsed onto the oldest frame | eight Delay CHOPs at `n x Tap delay`, same gains, the delayed returns only (the processor's dry branch carries the direct signal, so a fully wet delay is silent before its first tap) |
 | Gate / Erase | Level TOP opacity from the gate | Math CHOP gain from the gate: periodic (`Open fraction`, `Gate period`, `Gate phase` against the playhead) or sidechain threshold (with no control cable the gate reads zero and stays closed); `Edge time` smooths it with a Lag CHOP; `Closed-state residue` is its floor |
 | Signal Damage | Level TOP stepping (`1 / Picture tone levels`), then Fit TOP down to the requested mosaic cells and back up to the input size, both nearest | drive (Math CHOP), bit-depth quantise (Expression CHOP), bandwidth limit (Lag CHOP, `1 / (2 pi band)`), independent output level |
 | Feedback | Feedback TOP returned through a Transform TOP (`Scale per recurrence`, `Rotation per recurrence`) and a Level TOP (`Return gain`), added to the input | none |
 | Displacement | moving Noise TOP (`Field scale`, `Field movement`) pulling the picture through a Displace TOP along `Direction` | none |
+
+Like the workbench, a processor builds its audio chain only when it targets `voice` and its picture chain only when it targets `picture`, `body`, `objects` or `room`; otherwise that signal passes through and the spec's `warnings` say so.
 
 `tests/test_td_effects.py` evaluates every one of these expressions (they are Python) against stand-ins for what they read,
 at each parameter's minimum, default and maximum, and checks the arithmetic: tap gains and delays, the gate's duty

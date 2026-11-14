@@ -70,7 +70,7 @@ function delay(add) {
       add(`dly_gain_${i}`, 'mathCHOP', {inputs: [`dly_tap_${i}`], pars: {gain: expr(tapGain(i))}});
       return `dly_gain_${i}`;
     });
-    add('dly_sum', 'mathCHOP', {inputs: ['in_audio', ...names], pars: {chopop: 'add'}});
+    add('dly_sum', 'mathCHOP', {inputs: names, pars: {chopop: 'add'}});   // delayed returns only: the processor's dry branch carries the direct signal
     return 'dly_sum';
   };
   const picture = () => {
