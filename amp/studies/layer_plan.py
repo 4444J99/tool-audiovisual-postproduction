@@ -178,6 +178,8 @@ def validate_plan(plan: Any) -> dict[str, list[str]]:
                 errors.append(f"{where}: an adjustment layer has no source")
             if not layer.get("chain"):
                 errors.append(f"{where}: an adjustment layer needs a chain")
+            if layer.get("blend", "normal") != "normal":
+                errors.append(f"{where}: an adjustment layer blends by opacity only (blend must be normal)")
             if i == 0:
                 errors.append(f"{where}: an adjustment layer has nothing below it to adjust")
         chain = layer.get("chain")

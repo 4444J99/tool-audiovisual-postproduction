@@ -321,6 +321,14 @@ class ReviewRegressionTests(unittest.TestCase):
                 cg.parse_cube(bad)
             self.assertEqual(len(cg.validate_chain(chain({"op": "lut", "cube": bad}))), 1)
 
+    def test_non_string_cube_and_adjustment_blend_are_validation_errors(self):
+        for cube in (None, 5, ["LUT_3D_SIZE 2"]):
+            errors = cg.validate_chain(chain({"op": "lut", "cube": cube}))
+            self.assertTrue(any("cube must be a string" in e for e in errors), errors)
+        plan = copy.deepcopy(lp.synthetic_plan())
+        plan["layers"][3]["blend"] = "multiply"
+        self.assertTrue(any("blends by opacity only" in e for e in lp.validate_plan(plan)["errors"]))
+
     def test_malformed_plan_fields_return_errors_instead_of_raising(self):
         def mutated(fn):
             plan = copy.deepcopy(lp.synthetic_plan())

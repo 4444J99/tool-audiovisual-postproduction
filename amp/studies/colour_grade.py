@@ -86,6 +86,8 @@ def identity_lut(size: int) -> np.ndarray:
 
 def parse_cube(text: str) -> np.ndarray:
     """Parse an Adobe/Resolve ``.cube`` 3D LUT; red varies fastest in the file."""
+    if not isinstance(text, str):
+        raise ValueError("cube must be a string of .cube text")
     size = None
     rows: list[list[float]] = []
     for raw in text.splitlines():
