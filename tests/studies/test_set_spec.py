@@ -247,6 +247,29 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertEqual(graph["materials"]["hex-3C6E8F"]["color"], "3C6E8F")
         self.assertEqual(graph["materials"]["hex-3C6E8F"]["roughness"], 0.6)
 
+    def test_non_string_references_are_reported_not_raised(self):
+        for bad in ([], {}, 3, True):
+            s = spec()
+            s["floor"]["material"] = bad
+            self.assertTrue(any("floor: material" in e for e in errors(s)), bad)
+            s = spec()
+            s["elements"][0]["material"] = bad
+            self.assertTrue(any("material" in e for e in errors(s)), bad)
+            s = spec()
+            s["active_camera"] = bad
+            self.assertTrue(any("active_camera" in e for e in errors(s)), bad)
+
+    def test_sensor_width_must_be_a_finite_positive_number(self):
+        for bad in ("bad", None, 0, -36.0, float("nan"), True, [36]):
+            s = spec()
+            s["cameras"][0]["sensor_width_mm"] = bad
+            self.assertTrue(any("sensor_width_mm" in e for e in errors(s)), bad)
+        s = spec()
+        s["cameras"][0]["sensor_width_mm"] = 24.0
+        self.assertEqual(errors(s), [])
+        graph = ss.scene_graph(s)
+        self.assertEqual(next(o for o in graph["objects"] if o["name"] == "cam-wide")["sensor_width_mm"], 24.0)
+
     def test_camera_override_changes_the_graph_hash(self):
         a = ss.scene_graph(spec())
         s = spec()

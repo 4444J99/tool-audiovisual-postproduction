@@ -141,8 +141,8 @@ def validate_spec(spec: Mapping[str, Any]) -> dict[str, list[str]]:
     if not isinstance(floor, dict):
         errors.append("floor: must be an object")
         floor = {}
-    if floor.get("material") is not None and floor["material"] not in materials:
-        errors.append(f"floor: material {floor['material']!r} is not defined")
+    if floor.get("material") is not None and not (isinstance(floor["material"], str) and floor["material"] in materials):
+        errors.append(f"floor: material {floor['material']!r} is not a defined material name")
 
     ids: set[str] = set()
 
@@ -192,8 +192,8 @@ def validate_spec(spec: Mapping[str, Any]) -> dict[str, list[str]]:
                 ok = False
         else:
             ok = _arch_errors(element, label, materials, errors)
-        if element.get("material") is not None and element["material"] not in materials:
-            errors.append(f"{label}: material {element['material']!r} is not defined")
+        if element.get("material") is not None and not (isinstance(element["material"], str) and element["material"] in materials):
+            errors.append(f"{label}: material {element['material']!r} is not a defined material name")
             ok = False
         if kind != "arch_bands" and element.get("material") is None:
             errors.append(f"{label}: material is required")
@@ -250,12 +250,14 @@ def validate_spec(spec: Mapping[str, Any]) -> dict[str, list[str]]:
             errors.append(f"{label}: aim has no horizontal direction from the position")
         if not (_is_num(camera.get("lens_mm")) and 8.0 <= camera["lens_mm"] <= 400.0):
             errors.append(f"{label}: lens_mm must be within 8 to 400")
+        if "sensor_width_mm" in camera and not _positive(camera["sensor_width_mm"]):
+            errors.append(f"{label}: sensor_width_mm must be a finite positive number")
         if not (bx[0] <= px <= bx[1] and bz[0] <= pz <= bz[1]):
             warnings.append(f"{label}: stands outside the set bounds")
     active = spec.get("active_camera")
     if cameras and active is None:
         warnings.append("spec: no active_camera; the first camera will be used")
-    elif active is not None and active not in camera_ids:
+    elif active is not None and not (isinstance(active, str) and active in camera_ids):
         errors.append(f"spec: active_camera {active!r} is not a defined camera")
     if not cameras:
         warnings.append("spec: no cameras defined")
