@@ -52,6 +52,10 @@ The eight-layout comparison's placement rules are a pure module (`web/fx/layout-
 
 `tools/reverse_angle.py` plans a same-side reverse camera and reports which reverse-view pixels the source recording genuinely shows ([guide](docs/REVERSE-ANGLE.md)).
 
+## Set spec to Blender scene
+
+`tools/set_scene.py` validates a set spec (bounds, materials, boxes, cylinders, stepped arch bands, lights, cameras) and builds it in headless Blender, then compares Blender's measured scene with the spec's scene graph ([guide](docs/SET-SCENE.md)). `shot-set` exports the same environment as a shot plan's `set` block.
+
 ## Shot plan and animatic
 
 `tools/shot_plan.py` validates a one-set shot plan (camera coverage, axis of action, handles, finite physical caches, render receipts), then writes a shot ledger, an EDL, plan-view cards and an optional animatic video ([guide](docs/SHOT-PLAN.md)).
