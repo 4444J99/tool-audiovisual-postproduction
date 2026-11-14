@@ -68,6 +68,12 @@ class Table:
         return Cell(self.rows[key[0]])
 
 
+class Channels(list):
+    @property
+    def numChans(self):
+        return len(self)
+
+
 class Comp:
     def __init__(self, rows, time, control, gate):
         self.table, self.control, self.gate = Table(rows), control, gate
@@ -77,7 +83,7 @@ class Comp:
         if name == "resolved":
             return self.table
         if name == "in_control":
-            return [Chan(self.control)]
+            return Channels() if self.control is None else Channels([Chan(self.control)])
         if name == "gate_ctrl":
             return [Chan(self.gate)]
         if name == "in_picture":
@@ -167,6 +173,15 @@ class EffectTests(unittest.TestCase):
         frame = {o["name"]: evaluate(o["pars"]["index"]["expr"], rows) for o in self.chain("delay") if o["name"].startswith("dly_frame_")}
         self.assertEqual([frame["dly_frame_%d" % i] for i in range(3)], [-30, -60, -90])
 
+    def test_a_picture_tap_beyond_the_cache_is_switched_off_not_collapsed_onto_the_oldest_frame(self):
+        by_name = {o["name"]: o for o in self.chain("delay")}
+        rows = rows_for(None, {"time": 2.0, "taps": 8, "decay": 0.9, "spread": 0, "scale": 1})   # 120 frames per tap at 60 fps; the cache holds 240
+        offsets = [evaluate(by_name["dly_frame_%d" % i]["pars"]["index"]["expr"], rows) for i in range(8)]
+        opacities = [evaluate(by_name["dly_copy_%d" % i]["pars"]["opacity"]["expr"], rows) for i in range(8)]
+        self.assertEqual(offsets[:2], [-120, -239])
+        self.assertEqual([o > 0 for o in opacities], [True, False, False, False, False, False, False, False])
+        self.assertEqual(by_name["dly_cache"]["pars"]["cachesize"], 240)
+
     def test_the_gate_opens_for_its_duty_fraction_of_each_period(self):
         raw = next(o for o in self.chain("gate") if o["name"] == "gate_raw")["pars"]["const0value"]["expr"]
         rows = rows_for(None, {"duty": 0.25, "period": 2.0, "edge": 0.01, "phase": 0.0, "retain": 0.1, "threshold": 0.5, "detector": 0})
@@ -176,6 +191,7 @@ class EffectTests(unittest.TestCase):
         rows["param.detector"] = 1
         self.assertEqual(evaluate(raw, rows, control=0.9), 1.0)
         self.assertAlmostEqual(evaluate(raw, rows, control=0.2), 0.1)
+        self.assertAlmostEqual(evaluate(raw, rows, control=None), 0.1)   # no control cable: the gate stays closed, no index error
 
     def test_signal_damage_quantises_to_the_bit_depth_and_the_mosaic_has_the_requested_cells(self):
         by_name = {o["name"]: o for o in self.chain("damage")}

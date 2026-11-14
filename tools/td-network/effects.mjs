@@ -31,6 +31,8 @@ export function expr(template) {
 }
 
 const MAX_TAPS = 8;
+/** Frames of picture history the Delay keeps (4 s at 60 fps); a longer delay times a tap number is switched off. */
+const CACHE_FRAMES = 240;
 const indices = count => Array.from({length: count}, (_, i) => i);
 
 /** Signal Damage: tone-level posterize and nearest-neighbour mosaic; drive, bit-depth quantize, bandwidth limit and output level. */
@@ -72,10 +74,11 @@ function delay(add) {
     return 'dly_sum';
   };
   const picture = () => {
-    add('dly_cache', 'cacheTOP', {inputs: ['in_picture'], pars: {cachesize: 240, active: 1}});
+    add('dly_cache', 'cacheTOP', {inputs: ['in_picture'], pars: {cachesize: CACHE_FRAMES, active: 1}});
     const names = indices(MAX_TAPS).map(i => {
-      add(`dly_frame_${i}`, 'cacheselectTOP', {pars: {cachetop: {ref: 'dly_cache'}, index: expr(`-min(239, int(round({time} * ${i + 1} * project.cookRate)))`)}});
-      add(`dly_copy_${i}`, 'levelTOP', {inputs: [`dly_frame_${i}`], pars: {opacity: expr(tapGain(i))}});
+      add(`dly_frame_${i}`, 'cacheselectTOP', {pars: {cachetop: {ref: 'dly_cache'}, index: expr(`-min(${CACHE_FRAMES - 1}, int(round({time} * ${i + 1} * project.cookRate)))`)}});
+      // a tap that would reach further back than the cache holds is switched off, never collapsed onto the oldest frame
+      add(`dly_copy_${i}`, 'levelTOP', {inputs: [`dly_frame_${i}`], pars: {opacity: expr(`(${tapGain(i)}) if int(round({time} * ${i + 1} * project.cookRate)) < ${CACHE_FRAMES} else 0`)}});
       return `dly_copy_${i}`;
     });
     add('dly_mix', 'addTOP', {inputs: ['in_picture', ...names]});
@@ -86,7 +89,7 @@ function delay(add) {
 
 /** Gate / Erase: a periodic (or sidechain-threshold) opening, edge-smoothed, closed state held at Closed-state residue. */
 function gate(add) {
-  const open = '(1 if (({rack.Time} / max(0.1, {period}) + {phase}) % 1) < {duty} else 0) if {detector} < 0.5 else (1 if float({op:in_control}[0].eval()) > {threshold} else 0)';
+  const open = '(1 if (({rack.Time} / max(0.1, {period}) + {phase}) % 1) < {duty} else 0) if {detector} < 0.5 else (1 if (float({op:in_control}[0].eval()) if {op:in_control}.numChans else 0) > {threshold} else 0)';
   const shared = () => {
     add('gate_raw', 'constantCHOP', {pars: {const0name: 'open', const0value: expr(`{retain} + (1 - {retain}) * (${open})`)}});
     add('gate_ctrl', 'lagCHOP', {inputs: ['gate_raw'], pars: {lag1: expr('max(0.002, {edge})'), lag2: expr('max(0.002, {edge})')}});
