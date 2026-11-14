@@ -7,6 +7,7 @@ methods, so the same code is exercised by the repository tests against a fake ne
     backend.get(comp, par)            current value of a custom parameter ('' = the rack component)
     backend.set(comp, par, value)     write a custom parameter
     backend.send(address, args)       send one OSC message to the bridge
+    backend.release(comp, path)       optional: a control was edited here, so its automation, events and macro go (td_resolve)
 
 The contract (`td_contract` DAT) is generated from the patch and lists every address with its own range,
 so this module does no address parsing: an address either is in the contract or it is ignored.
@@ -166,6 +167,7 @@ class RackLink:
                 args = [norm]
             self.last[control['address']] = args[0]
             self.backend.send(control['address'], args)
+            self._released(node['comp'], control['path'])
             return (control['address'], args)
         if comp != '':
             return None
@@ -185,6 +187,13 @@ class RackLink:
             self.backend.send(item['address'], args)
             return (item['address'], args)
         return None
+
+    def _released(self, comp, path):
+        """An edit sent to the rack removes that control's automation, events and macro there, so it does here too
+        (the resolver, td_resolve). A backend without a resolver ignores it."""
+        release = getattr(self.backend, 'release', None)
+        if release:
+            release(comp, path)
 
     def pulse(self, comp, par):
         item = self.pulses.get(par) if comp == '' else None
@@ -215,6 +224,9 @@ class TDBackend:
 
     def send(self, address, args):
         self.rack.op('osc_out').sendOSC(address, *args)   # values are positional arguments, not a list
+
+    def release(self, comp, path):
+        self.rack.op('td_resolve').module.release(self.rack, comp, path)
 
 
 _LINKS = {}

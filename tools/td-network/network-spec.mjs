@@ -20,6 +20,7 @@ import {CATALOG_BY_TYPE, PORTS} from '../../web/fx/catalog.mjs';
 import {describeControls} from '../../web/fx/controller-map.mjs';
 import {validatePatch} from '../../web/fx/core.mjs';
 import {OSC_ROOT, ECHO_TOLERANCE, encodeSegment, nodeAddress} from '../../web/fx/osc-control.mjs';
+import {EFFECTS, expr} from './effects.mjs';
 import {VOCABULARY, PORT_FAMILY, SELECT, NULL, CUSTOM_PAR_NAME, OPERATOR_NAME} from './vocabulary.mjs';
 
 export const SPEC_SCHEMA = 'amps.td-network.v1';
@@ -82,14 +83,38 @@ const parDefinition = (control, page) => control.kind === 'toggle'
     ...(control.options ? {help: control.options.join(' / ')} : {}),
   });
 
+/** The initial `resolved` table: the base values, before the first frame is resolved. */
+function resolvedTable(node, controls) {
+  const definition = CATALOG_BY_TYPE[node.type];
+  return [
+    ['intensity', fixed(node.intensity)], ['wet', fixed(node.wet)], ['bypass', node.bypass ? 1 : 0], ['solo', node.solo ? 1 : 0], ['active', 1],
+    ...definition.params.map(item => [`param.${item.key}`, fixed(node.params[item.key])]),
+  ];
+}
+
+/** Everything the resolver needs to reproduce the workbench's evaluatedNode for one processor. */
+function resolveBlock(node, patch) {
+  const definition = CATALOG_BY_TYPE[node.type];
+  return {
+    order: definition.params.map(item => item.key),
+    params: Object.fromEntries(definition.params.map(item => [item.key, {min: item.min, max: item.max, step: item.step}])),
+    macro: (node.macro ?? []).map(item => ({parameter: item.parameter, min: item.min, max: item.max, curve: item.curve})),
+    automation: (node.automation ?? []).map(lane => ({parameter: lane.parameter, interpolation: lane.interpolation, keyframes: lane.keyframes.map(frame => ({time: frame.time, value: frame.value}))})),
+    events: (patch.events ?? []).filter(event => event.nodeId === node.id).map(event => ({time: event.time, parameter: event.parameter, value: event.value})),
+    ...(node.modulation ? {modulation: {parameter: node.modulation.parameter, mode: node.modulation.mode, amount: node.modulation.amount}} : {}),
+    ...(node.scope?.type === 'clip' ? {scope: {type: 'clip', start: node.scope.start, end: node.scope.end}} : {}),
+  };
+}
+
 export function buildNetworkSpec(patch, options = {}) {
   const verdict = validatePatch(patch);
   if (!verdict.valid) throw Error(`Patch ${patch?.id} is not valid: ${verdict.errors.slice(0, 3).join(' ')}`);
   const oscIn = options.oscInPort ?? 7000, oscOut = options.oscOutPort ?? 7001, host = options.host ?? '127.0.0.1';
   const rootName = options.rootName ?? 'fx_rack';
-  const taken = new Set(['osc_in', 'osc_in_callbacks', 'osc_out', 'td_osc', 'td_contract', 'par_exec_nodes', 'par_exec_rack', 'video_out', 'audio_out']);
+  const taken = new Set(['osc_in', 'osc_in_callbacks', 'osc_out', 'td_osc', 'td_contract', 'par_exec_nodes', 'par_exec_rack', 'td_resolve', 'frame_exec', 'video_out', 'audio_out']);
   const names = new Map(patch.nodes.map(node => [node.id, operatorName(node.id, taken)]));
   const warnings = [];
+  const implemented = [];
   const operators = [];
   const add = (parent, name, type, extra = {}) => {
     const entry = {path: parent ? `${parent}/${name}` : name, parent, name, type, pars: {}, inputs: [], customPars: [], ...extra};
@@ -158,7 +183,11 @@ export function buildNetworkSpec(patch, options = {}) {
       add(comp, 'out_matte', 'nullTOP', {inputs: ['matte']});
       add(comp, 'text', 'textDAT', {text: ''});
       add(comp, 'out_text', 'nullDAT', {inputs: ['text']});
-      add(comp, 'control', 'constantCHOP', {pars: {const0name: 'control', const0value: 0}});
+      // The sidechain envelope the workbench derives from the source (audio-engine.mjs amplitudeEnvelope): peak level,
+      // 6 ms attack, 75 ms release, times 5, limited to 1. It is the only producer of the control signal.
+      add(comp, 'env_peak', 'expressionCHOP', {inputs: ['audio'], pars: {expr0expr: expr('max(abs({op:audio}[0][me.inputIndex]), abs({op:audio}[{op:audio}.numChans - 1][me.inputIndex]))')}});
+      add(comp, 'env_follow', 'lagCHOP', {inputs: ['env_peak'], pars: {lag1: 0.006, lag2: 0.075}});
+      add(comp, 'control', 'expressionCHOP', {inputs: ['env_follow'], pars: {expr0expr: expr('min(1, me.inputVal * 5)')}});
       add(comp, 'out_control', 'nullCHOP', {inputs: ['control']});
     } else if (!isFx) {
       add(comp, 'gain_picture', 'levelTOP', {inputs: ['in_picture'], pars: {opacity: gainExpr()}});
@@ -167,21 +196,38 @@ export function buildNetworkSpec(patch, options = {}) {
       add(comp, 'out_audio', 'nullCHOP', {inputs: ['gain_audio']});
       for (const port of ['matte', 'control', 'text']) add(comp, `out_${port}`, NULL[PORT_FAMILY[port]], {inputs: [`in_${port}`]});
     } else {
-      const wet = {expr: 'parent().par.Wet', par: 'Wet'}, bypass = {expr: 'int(parent().par.Bypass)', par: 'Bypass'};
-      add(comp, 'proc_picture', 'nullTOP', {inputs: ['in_picture'], slot: 'picture'});
+      add(comp, 'resolved', 'tableDAT', {table: resolvedTable(node, controls)});
+      const wet = expr('{wet}'), bypass = expr('int({bypass})');
+      const effect = EFFECTS[node.type]?.((name, type, extra = {}) => add(comp, name, type, {...extra, pars: Object.fromEntries(Object.entries(extra.pars ?? {}).map(([key, value]) => [key, value && typeof value === 'object' && 'ref' in value ? {ref: `${comp}/${value.ref}`} : value]))}));
+      // Like the workbench, a processor only touches the shared voice when it targets `voice`, and the picture when it
+      // targets any visual stream; otherwise that signal passes through untouched.
+      const targetsVoice = !node.targets || node.targets.includes('voice');
+      const targetsPicture = !node.targets || node.targets.some(target => ['picture', 'body', 'objects', 'room'].includes(target));
+      effect?.shared?.();
+      const pictureTail = effect?.picture && targetsPicture ? effect.picture() : 'in_picture';
+      const audioTail = effect?.audio && targetsVoice ? effect.audio() : 'in_audio';
+      if (effect?.picture && !targetsPicture) warnings.push(`${node.id}: no picture target, so the ${node.type} picture effect is not built.`);
+      if (effect?.audio && !targetsVoice) warnings.push(`${node.id}: no voice target, so the ${node.type} audio effect is not built.`);
+      if (!effect) warnings.push(`${node.id}: the ${node.type} effect is not implemented in this network; it passes signal through unchanged.`);
+      else {
+        implemented.push({id: node.id, type: node.type, picture: Boolean(effect.picture && targetsPicture), audio: Boolean(effect.audio && targetsVoice)});
+        if (!effect.picture) warnings.push(`${node.id}: ${node.type} has no picture effect in this network.`);
+        if (!effect.audio) warnings.push(`${node.id}: ${node.type} has no audio effect in this network.`);
+      }
+      add(comp, 'proc_picture', 'nullTOP', {inputs: [pictureTail], slot: 'picture'});
       add(comp, 'blend_picture', 'crossTOP', {inputs: ['in_picture', 'proc_picture'], pars: {cross: wet}});
       add(comp, 'bypass_picture', 'switchTOP', {inputs: ['blend_picture', 'in_picture'], pars: {index: bypass}});
       add(comp, 'out_picture', 'nullTOP', {inputs: ['bypass_picture']});
-      add(comp, 'proc_audio', 'nullCHOP', {inputs: ['in_audio'], slot: 'audio'});
+      add(comp, 'proc_audio', 'nullCHOP', {inputs: [audioTail], slot: 'audio'});
       add(comp, 'wet_audio', 'mathCHOP', {inputs: ['proc_audio'], pars: {gain: wet}});
-      add(comp, 'dry_audio', 'mathCHOP', {inputs: ['in_audio'], pars: {gain: {expr: '1 - parent().par.Wet', par: 'Wet'}}});
+      add(comp, 'dry_audio', 'mathCHOP', {inputs: ['in_audio'], pars: {gain: expr('1 - {wet}')}});
       add(comp, 'blend_audio', 'mathCHOP', {inputs: ['wet_audio', 'dry_audio'], pars: {chopop: 'add'}});
       add(comp, 'bypass_audio', 'switchCHOP', {inputs: ['blend_audio', 'in_audio'], pars: {index: bypass}});
       add(comp, 'out_audio', 'nullCHOP', {inputs: ['bypass_audio']});
       for (const port of ['matte', 'control', 'text']) add(comp, `out_${port}`, NULL[PORT_FAMILY[port]], {inputs: [`in_${port}`]});
       if (node.modulation) warnings.push(`${node.id}: sidechain modulation (${node.modulation.parameter}, ${node.modulation.mode}) is carried in the contract but not applied by this network.`);
     }
-    nodes.push({id: node.id, comp, type: node.type, structural: !isFx, typeAddress: `/${OSC_ROOT}/node/${encodeSegment(node.id)}/type`, controls, ...(node.modulation ? {modulation: node.modulation} : {})});
+    nodes.push({id: node.id, comp, type: node.type, structural: !isFx, typeAddress: `/${OSC_ROOT}/node/${encodeSegment(node.id)}/type`, controls, ...(node.modulation ? {modulation: node.modulation} : {}), ...(isFx ? {resolve: resolveBlock(node, patch)} : {})});
   }
 
   const output = patch.nodes.find(node => node.type === 'output');
@@ -219,6 +265,8 @@ export function buildNetworkSpec(patch, options = {}) {
     ['td_osc', 'textDAT', {text: pythonText('fx_td_osc.py')}],
     ['td_contract', 'textDAT', {text: JSON.stringify(contract)}],
     ['par_exec_nodes', 'parameterexecuteDAT', {pars: {op: 'fx_*', pars: '*', custom: 1, builtin: 0, valuechange: 1, onpulse: 1}, text: pythonText('fx_td_par_exec_nodes.py')}],
+    ['td_resolve', 'textDAT', {text: pythonText('fx_td_resolve.py')}],
+    ['frame_exec', 'executeDAT', {pars: {active: 1, framestart: 1}, text: pythonText('fx_td_frame_exec.py')}],
     ['par_exec_rack', 'parameterexecuteDAT', {pars: {op: {expr: 'parent().path', par: null}, pars: '*', custom: 1, builtin: 0, valuechange: 1, onpulse: 1}, text: pythonText('fx_td_par_exec_rack.py')}],
     ['video_out', 'selectTOP', {pars: {top: {ref: `${names.get(output.id)}/out_picture`}}}],
     ['audio_out', 'selectCHOP', {pars: {chop: {ref: `${names.get(output.id)}/out_audio`}}}],
@@ -236,6 +284,7 @@ export function buildNetworkSpec(patch, options = {}) {
     operators: finish(operators),
     wires,
     contract,
+    effects: implemented,
     warnings: [...new Set(warnings)],
   };
 }
@@ -254,6 +303,7 @@ function finish(operators) {
 export function validateNetworkSpec(spec) {
   const errors = [], fail = message => errors.push(message);
   if (spec?.schema !== SPEC_SCHEMA) return [`schema must be ${SPEC_SCHEMA}`];
+  const tableKeys = new Map(spec.operators.filter(item => item.table).map(item => [item.path, new Set(item.table.map(row => row[0]))]));
   const byPath = new Map(), customOf = new Map([['', new Set(spec.root.customPars.map(item => item.name))]]);
   for (const [type, item] of Object.entries(spec.vocabulary)) if (!VOCABULARY[type] || VOCABULARY[type].family !== item.family) fail(`vocabulary: ${type} is not a supported operator type`);
   for (const operator of spec.operators) {
@@ -295,10 +345,24 @@ export function validateNetworkSpec(spec) {
           else if (name === 'callbacks' && target.type !== 'textDAT') fail(`${operator.path}.callbacks must point at a text DAT`);
         } else if ('expr' in value) {
           const owner = operator.parent;
-          if (value.par === null) {
+          if ('resolved' in value) {
+            const rows = tableKeys.get(owner ? `${owner}/resolved` : 'resolved');
+            for (const row of value.resolved) {
+              if (!rows?.has(row)) fail(`${operator.path}.${name}: expression reads ${row}, which ${owner} does not resolve`);
+              if (!String(value.expr).includes(`['${row}',1]`)) fail(`${operator.path}.${name}: expression does not read ${row}`);
+            }
+            for (const rackPar of value.rack) {
+              if (!customOf.get('').has(rackPar)) fail(`${operator.path}.${name}: expression reads rack parameter ${rackPar}, which the rack does not define`);
+              if (!String(value.expr).includes(`.par.${rackPar}`)) fail(`${operator.path}.${name}: expression does not read rack parameter ${rackPar}`);
+            }
+            for (const sibling of value.siblings) {
+              if (byPath.get(owner ? `${owner}/${sibling}` : sibling)?.parent !== owner) fail(`${operator.path}.${name}: expression reads ${sibling}, which is not inside ${owner}`);
+              if (!String(value.expr).includes(`op('${sibling}')`)) fail(`${operator.path}.${name}: expression does not read ${sibling}`);
+            }
+          } else if (value.par === null) {
             if (value.expr !== 'parent().path') fail(`${operator.path}.${name}: only parent().path may be an expression without a parameter`);
           } else if (!customOf.get(owner)?.has(value.par)) fail(`${operator.path}.${name}: expression uses ${value.par}, which ${owner || 'the rack'} does not define`);
-          if (value.par !== null && !String(value.expr).includes(`parent().par.${value.par}`)) fail(`${operator.path}.${name}: expression does not use ${value.par}`);
+          if (!('resolved' in value) && value.par !== null && !String(value.expr).includes(`parent().par.${value.par}`)) fail(`${operator.path}.${name}: expression does not use ${value.par}`);
         } else fail(`${operator.path}.${name}: unrecognised value`);
       }
     }
@@ -345,12 +409,25 @@ export function validateNetworkSpec(spec) {
       } else if (par.style !== 'Toggle') fail(`contract: ${node.id}.${control.par} must be a toggle`);
     }
   }
+  for (const node of spec.contract.nodes) {
+    const definition = CATALOG_BY_TYPE[node.type];
+    const block = node.resolve;
+    if (!block || !definition) {fail(`contract: ${node.id} has no resolve block`); continue;}
+    if (JSON.stringify(block.order) !== JSON.stringify(definition.params.map(item => item.key))) fail(`contract: ${node.id} resolves parameters in a different order from the catalog`);
+    for (const item of definition.params) {
+      const range = block.params[item.key];
+      if (!range || range.min !== item.min || range.max !== item.max || range.step !== item.step) fail(`contract: ${node.id}.${item.key} resolve range differs from the catalog`);
+    }
+    const rows = tableKeys.get(`${node.comp}/resolved`);
+    const expected = ['intensity', 'wet', 'bypass', 'solo', 'active', ...definition.params.map(item => `param.${item.key}`)];
+    if (!rows || expected.length !== rows.size || !expected.every(key => rows.has(key))) fail(`contract: ${node.comp}/resolved does not hold the resolved rows`);
+  }
   const rack = spec.contract.rack;
   for (const item of [rack.selected, rack.count, rack.time, rack.status, ...rack.transport, ...rack.pulses]) if (!customOf.get('').has(item.par)) fail(`contract: rack lacks ${item.par}`);
   for (const item of [rack.selected, rack.selectedType, rack.count, rack.time, ...rack.transport, ...rack.pulses.filter(p => p.par !== rack.sync.par)]) claim(item.address, 'rack');
   const dat = path => byPath.get(path);
   if (JSON.stringify(JSON.parse(dat('td_contract')?.text ?? 'null')) !== JSON.stringify(spec.contract)) fail('td_contract text is not the contract');
-  for (const required of ['osc_in', 'osc_out', 'td_osc', 'td_contract', 'par_exec_nodes', 'par_exec_rack', 'video_out', 'audio_out']) if (!dat(required)) fail(`rack plumbing ${required} is missing`);
+  for (const required of ['osc_in', 'osc_out', 'td_osc', 'td_contract', 'par_exec_nodes', 'par_exec_rack', 'td_resolve', 'frame_exec', 'video_out', 'audio_out']) if (!dat(required)) fail(`rack plumbing ${required} is missing`);
   if (dat('osc_in')?.pars.port !== spec.osc.inPort || dat('osc_out')?.pars.port !== spec.osc.outPort) fail('OSC ports in the operators differ from spec.osc');
   return errors;
 }

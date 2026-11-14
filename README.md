@@ -46,7 +46,7 @@ The eight-layout comparison's placement rules are a pure module (`web/fx/layout-
 
 ## TouchDesigner network
 
-`tools/fx-td-network.mjs` generates the rack's TouchDesigner version from a patch: components with the catalog's own parameters, wired ports, a real wet/dry and bypass, and an OSC module that follows the bridge's address contract ([guide](docs/FX-TOUCHDESIGNER.md#the-touchdesigner-network-generated)). Not yet built in a real TouchDesigner.
+`tools/fx-td-network.mjs` generates the rack's TouchDesigner version from a patch: components with the catalog's own parameters, wired ports, a real wet/dry and bypass, per-frame automation/macro/modulation/Solo resolution, effect chains for five processors, and an OSC module that follows the bridge's address contract ([guide](docs/FX-TOUCHDESIGNER.md#the-touchdesigner-network-generated)). Not yet built in a real TouchDesigner.
 
 ## Reverse-angle ledger
 
@@ -55,6 +55,11 @@ The eight-layout comparison's placement rules are a pure module (`web/fx/layout-
 ## Room-tone fill
 
 `tools/room_tone_fill.py` finds digital-silence holes in edited dialogue, borrows steady room tone from the same recording, builds it into a loop-matched bed with equal-power crossfades, and fills each hole level-matched to the nearest real tone, leaving every other sample bit-identical ([guide](docs/ROOM-TONE-FILL.md)).
+
+||||||| 5e53f6a
+## Actor-coverage matrix
+
+`tools/coverage_matrix.py` derives, from a shot plan's geometry, what size and angle each shot gives each actor, checks required cells, dialogue lines and recorded room tone, and proposes validated shots for the gaps ([guide](docs/COVERAGE-MATRIX.md)).
 
 ## Shot plan and animatic
 
