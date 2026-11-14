@@ -178,16 +178,16 @@ def main():
     except (OSError, json.JSONDecodeError) as error:
         print(json.dumps({"error": f"cannot read spec: {error}"}))
         return 2
+    if args.camera:
+        if args.camera not in {c.get("id") for c in spec.get("cameras", []) if isinstance(c, dict)}:
+            print(json.dumps({"error": f"camera {args.camera!r} is not in the spec"}))
+            return 2
+        spec = {**spec, "active_camera": args.camera}      # before expansion, so the graph hash covers the choice
     try:
         graph = set_spec.scene_graph(spec)
     except set_spec.SpecError as error:
         print(json.dumps({"errors": error.errors}, indent=2))
         return 2
-    if args.camera:
-        if args.camera not in {o["name"] for o in graph["objects"] if o["type"] == "camera"}:
-            print(json.dumps({"error": f"camera {args.camera!r} is not in the spec"}))
-            return 2
-        graph["active_camera"] = args.camera
     scene = reset_scene()
     build(scene, graph)
     observed = measure(scene, graph)

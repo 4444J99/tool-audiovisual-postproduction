@@ -200,6 +200,61 @@ class SceneGraphTests(unittest.TestCase):
         self.assertEqual(rows["arch"]["radius"], 3.2)
         self.assertEqual(rows["bench"]["radius"], 1.2)
 
+class ReviewRegressionTests(unittest.TestCase):
+    def test_arch_base_elevation_counts_toward_the_set_height(self):
+        s = spec()
+        s["elements"][1]["y"] = 4.0                      # 4 + outer radius 3.2 = 7.2 m, above the 7 m set
+        self.assertTrue(any("exceeds the set height" in e for e in errors(s)))
+        s["elements"][1]["y"] = 3.8                      # 7.0 m exactly fits
+        self.assertEqual(errors(s), [])
+
+    def test_arch_rotation_turns_every_band_about_the_element_centre(self):
+        s = spec()
+        s["elements"][1]["rotation_deg"] = 90.0
+        s["elements"][1]["center"] = [0.0, 4.0]          # room for the turned footprint (6.4 deep along z)
+        graph = ss.scene_graph(s)
+        bands = [o for o in graph["objects"] if o.get("arch") == "arch"]
+        self.assertTrue(all(b["rotation_deg"] == 90.0 for b in bands))
+        # unrotated the bands recede along +y (Blender depth); turned 90 degrees they recede along -x
+        xs = [b["location"][0] for b in bands]
+        ys = [round(b["location"][1], 6) for b in bands]
+        self.assertEqual(ys, [4.0] * 4)
+        self.assertEqual([round(x, 6) for x in xs], [0.45, 0.35, 0.25, 0.15])
+        self.assertEqual(xs, sorted(xs, reverse=True))
+        hx, hz = ss.element_extent(s["elements"][1])
+        self.assertAlmostEqual(hx, 0.45)
+        self.assertAlmostEqual(hz, 3.2)
+
+    def test_rotated_arch_footprint_is_checked_against_the_bounds(self):
+        s = spec()
+        s["elements"][1]["rotation_deg"] = 90.0          # half-extent along z becomes the 3.2 m radius, past z=8
+        self.assertTrue(any("outside the set bounds" in e for e in errors(s)))
+
+    def test_invalid_base_elevation_is_reported_not_raised(self):
+        for kind_index in (1, 2, 3):
+            for bad in ("1", None, True, -0.5, float("inf")):
+                s = spec()
+                s["elements"][kind_index]["y"] = bad
+                found = errors(s)
+                self.assertTrue(any("base elevation" in e for e in found), (kind_index, bad, found))
+
+    def test_user_materials_cannot_collide_with_generated_names(self):
+        for name in ("hex-3C6E8F", "wood-soffit", "floor-default"):
+            s = spec()
+            s["materials"][name] = {"color": "123456"}
+            self.assertTrue(any("reserved" in e for e in errors(s)), name)
+        graph = ss.scene_graph(spec())
+        self.assertEqual(graph["materials"]["hex-3C6E8F"]["color"], "3C6E8F")
+        self.assertEqual(graph["materials"]["hex-3C6E8F"]["roughness"], 0.6)
+
+    def test_camera_override_changes_the_graph_hash(self):
+        a = ss.scene_graph(spec())
+        s = spec()
+        s["active_camera"] = "cam-side"
+        b = ss.scene_graph(s)
+        self.assertEqual(b["active_camera"], "cam-side")
+        self.assertNotEqual(a["graph_sha256"], b["graph_sha256"])
+
 
 if __name__ == "__main__":
     unittest.main()

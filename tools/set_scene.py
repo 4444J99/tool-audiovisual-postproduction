@@ -18,6 +18,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -110,25 +111,33 @@ def main(argv=None):
     if not blender:
         print(json.dumps({"error": "Blender not found; set AMP_BLENDER or put blender on PATH"}))
         return 2
+    scratch = None
+    report_path = args.report
+    if not report_path:
+        scratch = tempfile.TemporaryDirectory()
+        report_path = str(Path(scratch.name) / "report.json")
     command = [blender, "-b", "--factory-startup", "--python", str(ROOT / "tools" / "blender_set_scene.py"), "--",
-               "--spec", args.spec, "--width", str(args.width), "--height", str(args.height), "--samples", str(args.samples)]
-    for flag in ("blend", "report", "still", "camera"):
+               "--spec", args.spec, "--report", report_path, "--width", str(args.width), "--height", str(args.height),
+               "--samples", str(args.samples)]
+    for flag in ("blend", "still", "camera"):
         if getattr(args, flag):
             command += [f"--{flag}", getattr(args, flag)]
     try:
         run = subprocess.run(command, capture_output=True, text=True, timeout=args.timeout)
+        if run.returncode != 0 or "SET_SCENE_OK" not in run.stdout:
+            print(json.dumps({"error": "Blender build failed", "returncode": run.returncode, "tail": run.stdout[-1500:] + run.stderr[-1500:]}))
+            return 2
+        data = json.loads(Path(report_path).read_text())
     except subprocess.TimeoutExpired:
         print(json.dumps({"error": f"Blender exceeded {args.timeout} s"}))
         return 2
-    if run.returncode != 0 or "SET_SCENE_OK" not in run.stdout:
-        print(json.dumps({"error": "Blender build failed", "returncode": run.returncode, "tail": run.stdout[-1500:] + run.stderr[-1500:]}))
+    finally:
+        if scratch:
+            scratch.cleanup()
+    mismatches = compare(data["expected"], data["observed"])      # always checked, with or without --report
+    if mismatches:
+        print(json.dumps({"error": "Blender scene differs from the scene graph", "mismatches": mismatches}, indent=2))
         return 2
-    if args.report:
-        data = json.loads(Path(args.report).read_text())
-        mismatches = compare(data["expected"], data["observed"])
-        if mismatches:
-            print(json.dumps({"error": "Blender scene differs from the scene graph", "mismatches": mismatches}, indent=2))
-            return 2
     print([line for line in run.stdout.splitlines() if line.startswith("SET_SCENE_OK")][-1])
     return 0
 

@@ -142,6 +142,40 @@ class BlenderSetSceneTests(unittest.TestCase):
             low, high = image.convert("L").getextrema()
             self.assertGreater(high - low, 20)
 
+    def test_build_without_a_report_still_checks_blender_against_the_graph(self):
+        spec = self.dir / "spec.json"
+        original = set_scene.compare
+        calls = []
+        set_scene.compare = lambda expected, observed: calls.append(1) or original(expected, observed)
+        try:
+            self.assertEqual(set_scene.main(["build", "--spec", str(spec)]), 0)
+        finally:
+            set_scene.compare = original
+        self.assertEqual(calls, [1])
+
+    def test_camera_override_is_reflected_in_the_graph_hash_blender_reports(self):
+        spec = self.dir / "spec.json"
+        side_report = self.dir / "side.json"
+        result = run("build", "--spec", str(spec), "--camera", "cam-side", "--report", str(side_report))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(side_report.read_text())
+        self.assertEqual(data["observed"]["active_camera"], "cam-side")
+        self.assertNotEqual(data["graph_sha256"], self.report["graph_sha256"])
+        override = set_spec.synthetic_spec()
+        override["active_camera"] = "cam-side"
+        self.assertEqual(data["graph_sha256"], set_spec.scene_graph(override)["graph_sha256"])
+
+    def test_rotated_arch_has_the_expected_world_extent_in_blender(self):
+        spec = set_spec.synthetic_spec()
+        spec["elements"][1].update(rotation_deg=90.0, center=[0.0, 4.0])
+        path = self.dir / "rotated.json"
+        path.write_text(json.dumps(spec))
+        report = self.dir / "rotated-report.json"
+        result = run("build", "--spec", str(path), "--report", str(report))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        rows = {o["name"]: o for o in json.loads(report.read_text())["observed"]["objects"]}
+        self.assertEqual(rows["arch.Band_A"]["location"][0], 0.45)       # recess moved along -x with the turn
+
     def test_unknown_camera_is_refused(self):
         result = run("build", "--spec", str(self.dir / "spec.json"), "--camera", "ghost")
         self.assertEqual(result.returncode, 2)

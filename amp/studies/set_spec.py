@@ -39,6 +39,9 @@ ELEMENT_KINDS = ("box", "cylinder", "arch_bands")
 LIGHT_KINDS = ("point", "sun", "area")
 DEFAULT_SEGMENTS = 48
 RESERVED_FLOOR = "FLOOR"
+GENERATED_PREFIX = "hex-"
+SOFFIT_SUFFIX = "-soffit"
+FLOOR_DEFAULT = "floor-default"
 BLENDER_NAME_LIMIT = 63
 
 
@@ -85,7 +88,10 @@ def element_extent(element: Mapping[str, Any]) -> tuple[float, float]:
         return (width * c + depth * s) / 2.0, (width * s + depth * c) / 2.0
     if kind == "cylinder":
         return element["radius"], element["radius"]
-    return element["outer_radius"], element["depth"] / 2.0
+    angle = math.radians(element.get("rotation_deg", 0.0))
+    c, s = abs(math.cos(angle)), abs(math.sin(angle))
+    width, depth = 2.0 * element["outer_radius"], element["depth"]
+    return (width * c + depth * s) / 2.0, (width * s + depth * c) / 2.0
 
 
 def element_radius(element: Mapping[str, Any]) -> float:
@@ -115,6 +121,10 @@ def validate_spec(spec: Mapping[str, Any]) -> dict[str, list[str]]:
         errors.append("materials: must be an object of name -> {color, roughness, emission}")
         raw_materials = {}
     for name, material in raw_materials.items():
+        if not isinstance(name, str) or name.startswith(GENERATED_PREFIX) or name.endswith(SOFFIT_SUFFIX) or name == FLOOR_DEFAULT:
+            errors.append(f"material {name!r}: names starting with {GENERATED_PREFIX!r}, ending with {SOFFIT_SUFFIX!r} or equal to "
+                          f"{FLOOR_DEFAULT!r} are reserved for generated materials")
+            continue
         if not isinstance(material, dict) or not isinstance(material.get("color"), str) or not HEX.match(material["color"]):
             errors.append(f"material {name!r}: color must be a six-digit hex string")
             continue
@@ -165,6 +175,9 @@ def validate_spec(spec: Mapping[str, Any]) -> dict[str, list[str]]:
         if "rotation_deg" in element and not _is_num(element["rotation_deg"]):
             errors.append(f"{label}: rotation_deg must be a number")
             continue
+        if "y" in element and not (_is_num(element["y"]) and element["y"] >= 0):
+            errors.append(f"{label}: y (base elevation) must be a number >= 0")
+            continue
         ok = True
         if kind == "box":
             ok = _vec(element.get("size"), 3) and all(v > 0 for v in element["size"])
@@ -192,7 +205,7 @@ def validate_spec(spec: Mapping[str, Any]) -> dict[str, list[str]]:
         elif kind == "cylinder":
             top = element["height"] + element.get("y", 0.0)
         else:
-            top = element["outer_radius"]
+            top = element["outer_radius"] + element.get("y", 0.0)
         if top > height + 1e-9:
             errors.append(f"{label}: top at {top:g} m exceeds the set height {height:g} m")
         hx, hz = element_extent(element)
@@ -358,7 +371,7 @@ def _material_for(name: str | None, colour: str | None, materials: dict[str, Any
     """Return the material name; band colours given as hex become derived materials."""
     if name is not None:
         return name
-    key = f"hex-{colour.upper()}"
+    key = f"{GENERATED_PREFIX}{colour.upper()}"
     materials.setdefault(key, {"color": colour.upper(), "roughness": 0.6, "emission": 0.0})
     return key
 
@@ -375,7 +388,7 @@ def scene_graph(spec: Mapping[str, Any]) -> dict[str, Any]:
     floor = spec.get("floor", {})
     floor_material = floor.get("material")
     if floor_material is None:
-        floor_material = "floor-default"
+        floor_material = FLOOR_DEFAULT
         materials.setdefault(floor_material, {"color": "808080", "roughness": 0.9, "emission": 0.0})
     thickness = 0.05
     floor_mesh = _box_mesh(bx[1] - bx[0], thickness, bz[1] - bz[0])
@@ -411,7 +424,7 @@ def scene_graph(spec: Mapping[str, Any]) -> dict[str, Any]:
                 colour = band["color"]
                 material = colour if colour in element_materials(spec) else None
                 material = _material_for(material, colour, materials)
-                soffit = f"{material}-soffit"
+                soffit = f"{material}{SOFFIT_SUFFIX}"
                 base_colour = materials[material]["color"]
                 materials.setdefault(soffit, {"color": _darken(base_colour, 0.55), "roughness": 0.7, "emission": 0.0})
                 # per-face material index: front, back and outer use the face material, inner the soffit
@@ -419,9 +432,12 @@ def scene_graph(spec: Mapping[str, Any]) -> dict[str, Any]:
                 for _ in range(segments):
                     face_materials.extend([0, 0, 0, 1])
                 face_materials.extend([0, 0])                 # the two end caps
+                turn = math.radians(element.get("rotation_deg", 0.0))
+                offset = front + index * step - cz              # the band's recess along the arch's own depth axis
+                location = [round(cx - offset * math.sin(turn), 9), round(cz + offset * math.cos(turn), 9), base]
                 objects.append({"name": band_object_name(eid, band["name"]), "type": "mesh", "role": "architecture",
                                 "collection": "Architecture", "mesh": mesh,
-                                "location": [cx, front + index * step, base], "rotation_deg": 0.0,
+                                "location": location, "rotation_deg": element.get("rotation_deg", 0.0),
                                 "materials": [material, soffit], "face_materials": face_materials,
                                 "band_index": index, "arch": eid})
     for light in spec.get("lights", []):
