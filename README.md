@@ -44,6 +44,10 @@ See [the workbench guide](docs/FX-WORKBENCH.md), [the processing contract](docs/
 
 The eight-layout comparison's placement rules are a pure module (`web/fx/layout-geometry.mjs`) that the renderer and `tools/analyze-layout-geometry.mjs` share; the measured horizontal-versus-vertical result is in [docs/LAYOUT-COMPARISON.md](docs/LAYOUT-COMPARISON.md).
 
+## TouchDesigner network
+
+`tools/fx-td-network.mjs` generates the rack's TouchDesigner version from a patch: components with the catalog's own parameters, wired ports, a real wet/dry and bypass, and an OSC module that follows the bridge's address contract ([guide](docs/FX-TOUCHDESIGNER.md#the-touchdesigner-network-generated)). Not yet built in a real TouchDesigner.
+
 ## Reverse-angle ledger
 
 `tools/reverse_angle.py` plans a same-side reverse camera and reports which reverse-view pixels the source recording genuinely shows ([guide](docs/REVERSE-ANGLE.md)).

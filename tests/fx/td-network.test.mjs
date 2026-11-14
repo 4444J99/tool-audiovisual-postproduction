@@ -31,7 +31,8 @@ function viewOf(patch, selectedId) {
       const node = nodes.find(item => item.id === id);
       return path === 'bypass' || path === 'solo' ? Boolean(node[path]) : path.startsWith('params.') ? node.params[path.slice(7)] : node[path];
     },
-    global: name => name === 'loop',
+    globals: new Map([['loop', true]]),
+    global(name) { return this.globals.get(name) ?? false; },
   };
 }
 const probe = (request) => {
@@ -386,4 +387,30 @@ test('the headless OSC codec agrees with the Node codec in both directions', asy
     await td.command({cmd: 'edit', comp: '', par: 'Selected', value: 'a/b ünï'});
     await until(() => received.some(m => m.address === '/fx/selected' && m.args[0] === 'a/b ünï'));
   } finally { await td.close(); await new Promise(r => socket.close(r)); }
+});
+
+test('the simulator, driven by the generated spec, passes against a rack that follows the contract', async () => {
+  const patch = createPatch('closed-inbox'), spec = buildNetworkSpec(patch);
+  const dir = mkdtempSync(join(tmpdir(), 'td-sim-'));
+  const specPath = join(dir, 'network.json'), resultPath = join(dir, 'result.json');
+  writeFileSync(specPath, serialise(spec));
+  const freePort = () => new Promise(resolve => { const s = createSocket('udp4'); s.bind(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); }); });
+  const tdPort = await freePort();
+  const view = viewOf(patch);
+  const host = {getView: () => view, apply(action) { if (action.global) { view.globals.set(action.global, action.value); return; } view.values.set(`${action.nodeId}|${action.path}`, action.value); }, gesture() {}, select() {}, selectNode() {}};
+  const bridge = await startBridge({wsPort: 0, oscPort: 0, tdPort, log: () => {}});
+  const session = new oscSession.OscSession(host, {});
+  try {
+    session.connect(`ws://127.0.0.1:${bridge.wsPort}`);
+    await until(() => bridge.stats.clients === 1);
+    const run = spawn(process.execPath, [join(here, '../../tools/fx-td-simulator.mjs'), resultPath, '--spec', specPath, '--td-port', String(tdPort), '--osc-port', String(bridge.oscPort), '--wait-seconds', '20'], {stdio: ['ignore', 'pipe', 'pipe']});
+    let output = '';
+    run.stdout.on('data', chunk => { output += chunk; }); run.stderr.on('data', chunk => { output += chunk; });
+    const code = await new Promise(resolve => run.once('close', resolve));
+    const result = JSON.parse(readFileSync(resultPath, 'utf8'));
+    assert.equal(code, 0, output);
+    assert.equal(result.passed, true);
+    assert.ok(result.checks.length >= 3 * spec.contract.nodes.length, `checks: ${result.checks.length}`);
+    for (const node of spec.contract.nodes) assert.ok(result.checks.some(c => c.name.startsWith(`${node.id}: ${node.controls.find(x => x.path === 'intensity').address}`)), node.id);
+  } finally { session.disconnect(); await bridge.close(); }
 });
