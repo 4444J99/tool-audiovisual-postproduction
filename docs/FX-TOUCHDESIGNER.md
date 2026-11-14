@@ -135,7 +135,8 @@ The rack component's own parameters: `Selected`, `Time`, `Count` and `Status` (l
 
 **How it speaks OSC.** The rack reports its state on the same addresses TouchDesigner uses to control it, so one
 table serves both ways. A report sets the matching parameter (a normalised value is scaled onto the parameter's own
-range and step, exactly as the workbench scales a MIDI fader); a parameter edit in TouchDesigner sends the normalised
+range without snapping it to the step, so an off-grid preset or automation value comes back unchanged; integer parameters
+get the nearest integer); a parameter edit in TouchDesigner sends the normalised
 value on that address. A value that only repeats what was last exchanged on that address (within 0.0002) is an echo
 and is not sent. `Status` reads `linked: N processors` once the rack's report matches the network, and names any
 type or count mismatch. The module has no address parsing at all: the contract lists every address, and an address

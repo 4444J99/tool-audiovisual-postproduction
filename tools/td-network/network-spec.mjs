@@ -219,7 +219,7 @@ export function buildNetworkSpec(patch, options = {}) {
     ['td_osc', 'textDAT', {text: pythonText('fx_td_osc.py')}],
     ['td_contract', 'textDAT', {text: JSON.stringify(contract)}],
     ['par_exec_nodes', 'parameterexecuteDAT', {pars: {op: 'fx_*', pars: '*', custom: 1, builtin: 0, valuechange: 1, onpulse: 1}, text: pythonText('fx_td_par_exec_nodes.py')}],
-    ['par_exec_rack', 'parameterexecuteDAT', {pars: {op: '..', pars: '*', custom: 1, builtin: 0, valuechange: 1, onpulse: 1}, text: pythonText('fx_td_par_exec_rack.py')}],
+    ['par_exec_rack', 'parameterexecuteDAT', {pars: {op: {expr: 'parent().path', par: null}, pars: '*', custom: 1, builtin: 0, valuechange: 1, onpulse: 1}, text: pythonText('fx_td_par_exec_rack.py')}],
     ['video_out', 'selectTOP', {pars: {top: {ref: `${names.get(output.id)}/out_picture`}}}],
     ['audio_out', 'selectCHOP', {pars: {chops: {ref: `${names.get(output.id)}/out_audio`}}}],
   ];
@@ -295,8 +295,10 @@ export function validateNetworkSpec(spec) {
           else if (name === 'callbacks' && target.type !== 'textDAT') fail(`${operator.path}.callbacks must point at a text DAT`);
         } else if ('expr' in value) {
           const owner = operator.parent;
-          if (!customOf.get(owner)?.has(value.par)) fail(`${operator.path}.${name}: expression uses ${value.par}, which ${owner || 'the rack'} does not define`);
-          if (!String(value.expr).includes(`parent().par.${value.par}`)) fail(`${operator.path}.${name}: expression does not use ${value.par}`);
+          if (value.par === null) {
+            if (value.expr !== 'parent().path') fail(`${operator.path}.${name}: only parent().path may be an expression without a parameter`);
+          } else if (!customOf.get(owner)?.has(value.par)) fail(`${operator.path}.${name}: expression uses ${value.par}, which ${owner || 'the rack'} does not define`);
+          if (value.par !== null && !String(value.expr).includes(`parent().par.${value.par}`)) fail(`${operator.path}.${name}: expression does not use ${value.par}`);
         } else fail(`${operator.path}.${name}: unrecognised value`);
       }
     }

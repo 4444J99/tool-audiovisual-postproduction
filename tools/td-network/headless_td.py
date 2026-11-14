@@ -87,13 +87,17 @@ def decode(data):
 
 class Backend:
     def __init__(self, sock, target):
-        self.params, self.sock, self.target = {}, sock, target
+        self.params, self.sock, self.target, self.link = {}, sock, target, None
 
     def get(self, comp, par):
         return self.params.get('%s|%s' % (comp, par))
 
     def set(self, comp, par, value):
-        self.params['%s|%s' % (comp, par)] = value
+        key = '%s|%s' % (comp, par)
+        changed = self.params.get(key) != value
+        self.params[key] = value
+        if changed and self.link is not None:
+            self.link.par_changed(comp, par, value)   # TouchDesigner's Parameter Execute fires on every change
 
     def send(self, address, args):
         self.sock.sendto(encode(address, args), self.target)
@@ -111,6 +115,7 @@ def main():
     sock.bind(('127.0.0.1', options.td_port))
     backend = Backend(sock, ('127.0.0.1', options.osc_port))
     link = module.RackLink(contract, backend)
+    backend.link = link
     print(json.dumps({'ready': True, 'port': sock.getsockname()[1]}), flush=True)
     pending = b''
     while True:

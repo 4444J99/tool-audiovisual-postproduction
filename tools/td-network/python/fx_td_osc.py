@@ -41,17 +41,12 @@ def value_to_norm(control, value):
 
 
 def norm_to_value(control, norm):
-    """Scale a 0..1 position onto the control's range and step (same arithmetic as the workbench)."""
+    """Scale a 0..1 position onto the control's range. It is not snapped to the step: the rack owns the step grid,
+    and a value on its own report must come back as the same position (an off-grid preset or automation value
+    would otherwise be snapped by the echo of its own report). Integer parameters get the nearest integer."""
     position = _clamp(norm if _number(norm) else 0.0, 0.0, 1.0)
-    value = control['min'] + position * (control['max'] - control['min'])
-    step = control['step']
-    if step > 0:
-        text = repr(float(step)) if not float(step).is_integer() else str(int(step))
-        decimals = len(text.split('.')[1]) if '.' in text else 0
-        value = control['min'] + math.floor((value - control['min']) / step + 0.5) * step
-        value = round(value, min(10, decimals + 2))
-    value = _clamp(value, control['min'], control['max'])
-    return int(round(value)) if control.get('integer') else value
+    value = _clamp(control['min'] + position * (control['max'] - control['min']), control['min'], control['max'])
+    return int(math.floor(value + 0.5)) if control.get('integer') else value
 
 
 class RackLink:
@@ -97,9 +92,11 @@ class RackLink:
             else:
                 if not _number(args[0]):
                     return False
-                norm = _clamp(args[0], 0.0, 1.0)
-                self.last[address] = norm
-                self.backend.set(node['comp'], control['par'], norm_to_value(control, norm))
+                value = norm_to_value(control, args[0])
+                # What the parameter now shows is the baseline: writing it fires the parameter callback, which must
+                # find nothing new to send. Only an integer parameter can differ from the report (it is rounded).
+                self.last[address] = _clamp(args[0], 0.0, 1.0) if not control.get('integer') else _round_half_up(value_to_norm(control, value), NORM_DECIMALS)
+                self.backend.set(node['comp'], control['par'], value)
             return True
         node = self.types.get(address)
         if node:

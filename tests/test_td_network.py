@@ -380,13 +380,40 @@ class OscModuleTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             osc_lib.RackLink({"schema": "other"}, RecordingBackend())
 
-    def test_scaling_matches_the_workbench_arithmetic_at_awkward_steps(self):
-        control = {"min": 0, "max": 1, "step": 0.005}
-        self.assertEqual(osc_lib.norm_to_value(control, 0.3333), 0.335)
+    def test_scaling_keeps_the_rack_position_and_rounds_only_integers(self):
         control = {"min": 0.04, "max": 2, "step": 0.01}
-        self.assertEqual(osc_lib.norm_to_value(control, 0.5), 1.02)
-        control = {"min": 1, "max": 8, "step": 1, "integer": True}
-        self.assertEqual(osc_lib.norm_to_value(control, 0.5), 5)
+        value = osc_lib.norm_to_value(control, 0.226)
+        self.assertAlmostEqual(value, 0.04 + 0.226 * 1.96, places=9)
+        self.assertEqual(osc_lib.norm_to_value({"min": 1, "max": 8, "step": 1, "integer": True}, 0.5), 5)
+        self.assertEqual(osc_lib.norm_to_value(control, 7), 2)
+
+    def test_applying_a_report_as_a_parameter_write_sends_nothing_back(self):
+        """TouchDesigner fires its parameter callback on every write; the module must not answer its own report."""
+        class Echoing(RecordingBackend):
+            link = None
+
+            def set(self, comp, par, value):
+                changed = self.params.get((comp, par)) != value
+                super().set(comp, par, value)
+                if changed:
+                    self.link.par_changed(comp, par, value)
+
+        backend = Echoing()
+        link = osc_lib.RackLink(self.contract, backend)
+        backend.link = link
+        for node in self.contract["nodes"]:
+            for control in node["controls"]:
+                if control["kind"] == "range":
+                    for norm in (0.0, 0.226, 0.5, 0.7771, 1.0):
+                        link.receive(control["address"], [round(norm, 4)])
+                else:
+                    link.receive(control["address"], [1])
+        self.assertEqual(backend.sent, [])
+
+    def test_the_python_text_runs_on_the_python_touchdesigner_ships(self):
+        import ast
+        for path in sorted(PYTHON_DIR.glob("*.py")):
+            ast.parse(path.read_text(), filename=str(path), feature_version=(3, 11))
 
 
 class GoldenAddressTests(unittest.TestCase):

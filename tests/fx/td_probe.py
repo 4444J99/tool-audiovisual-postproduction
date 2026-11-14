@@ -15,13 +15,17 @@ spec.loader.exec_module(td_osc)
 
 class Backend:
     def __init__(self):
-        self.params, self.sent = {}, []
+        self.params, self.sent, self.link = {}, [], None
 
     def get(self, comp, par):
         return self.params.get('%s|%s' % (comp, par))
 
     def set(self, comp, par, value):
-        self.params['%s|%s' % (comp, par)] = value
+        key = '%s|%s' % (comp, par)
+        changed = self.params.get(key) != value
+        self.params[key] = value
+        if changed and self.link is not None:
+            self.link.par_changed(comp, par, value)   # TouchDesigner's Parameter Execute fires on every change
 
     def send(self, address, args):
         self.sent.append({'address': address, 'args': list(args)})
@@ -29,11 +33,13 @@ class Backend:
 
 backend = Backend()
 link = td_osc.RackLink(request['contract'], backend)
+backend.link = link
 understood = [link.receive(item['address'], item['args']) for item in request['reports']]
+during_reports = list(backend.sent)
 backend.sent.clear()
 edits = []
 for edit in request['edits']:
     sent = link.par_changed(edit['comp'], edit['par'], edit['value'])
     edits.append(None if sent is None else {'address': sent[0], 'args': sent[1]})
-json.dump({'params': backend.params, 'understood': understood, 'edits': edits, 'sent': backend.sent,
+json.dump({'echoed': during_reports, 'params': backend.params, 'understood': understood, 'edits': edits, 'sent': backend.sent,
            'status': backend.params.get('|' + request['contract']['rack']['status']['par'])}, sys.stdout)

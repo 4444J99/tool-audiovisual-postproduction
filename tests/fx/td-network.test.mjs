@@ -194,6 +194,7 @@ test('round trip: the rack reports its state, the Python module sets the paramet
     const reports = new OscFeedback().collect(view, {full: true});
     const out = probe({module: moduleSource, contract: spec.contract, reports, edits: []});
     assert.ok(out.understood.every(Boolean), `${label}: some rack report was not understood`);
+    assert.deepEqual(out.echoed, [], `${label}: applying the rack's own report must not send anything back`);
     for (const node of spec.contract.nodes) for (const control of node.controls) {
       const got = out.params[`${node.comp}|${control.par}`], want = view.current(node.id, control.path);
       if (control.kind === 'toggle') assert.equal(Boolean(got), Boolean(want), `${label} ${node.id}.${control.path}`);
@@ -334,6 +335,8 @@ test('end to end: workbench session <-> bridge <-> the generated TouchDesigner m
     session.connect(`ws://127.0.0.1:${bridge.wsPort}`);
     // The session opens by sending the whole rack state; TouchDesigner's parameters take those values.
     await until(async () => (await td.params()).status === `linked: ${view.nodes.length} processors`);
+    await wait(300);
+    assert.deepEqual(applied, [], 'the rack\'s own report applied to TouchDesigner must not come back as an edit');
     const comp = spec.contract.nodes.find(n => n.id === node.id);
     const intensity = comp.controls.find(c => c.path === 'intensity'), bypass = comp.controls.find(c => c.path === 'bypass');
     await until(async () => { const {params} = await td.params(); return params[`${comp.comp}|Bypass`] === 0 && params['|Selected'] === node.id && params['|Loop'] === 1; });
@@ -413,4 +416,19 @@ test('the simulator, driven by the generated spec, passes against a rack that fo
     assert.ok(result.checks.length >= 3 * spec.contract.nodes.length, `checks: ${result.checks.length}`);
     for (const node of spec.contract.nodes) assert.ok(result.checks.some(c => c.name.startsWith(`${node.id}: ${node.controls.find(x => x.path === 'intensity').address}`)), node.id);
   } finally { session.disconnect(); await bridge.close(); }
+});
+
+test('an off-grid value on the rack (a preset, or an automation sample) is not snapped by the echo of its own report', () => {
+  const patch = freshPatch('delay'), spec = buildNetworkSpec(patch), node = spec.contract.nodes[0];
+  const view = viewOf(patch);
+  const time = node.controls.find(c => c.path === 'params.time');
+  view.values.set(`${node.id}|params.time`, 0.483);      // step is 0.01
+  const reports = new OscFeedback().collect(view, {full: true});
+  const out = probe({module: moduleSource, contract: spec.contract, reports, edits: []});
+  assert.deepEqual(out.echoed, []);
+  const written = out.params[`${node.comp}|${time.par}`];
+  assert.ok(Math.abs(written - 0.483) < 1e-3, `written ${written}`);
+  // Feeding TouchDesigner's own value back as an edit is a no-op, so the rack's 0.483 is never replaced by 0.48.
+  const again = probe({module: moduleSource, contract: spec.contract, reports, edits: [{comp: node.comp, par: time.par, value: written}]});
+  assert.equal(again.edits[0], null);
 });
