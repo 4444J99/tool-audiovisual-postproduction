@@ -48,6 +48,10 @@ The eight-layout comparison's placement rules are a pure module (`web/fx/layout-
 
 `tools/reverse_angle.py` plans a same-side reverse camera and reports which reverse-view pixels the source recording genuinely shows ([guide](docs/REVERSE-ANGLE.md)).
 
+## Shot plan and animatic
+
+`tools/shot_plan.py` validates a one-set shot plan (camera coverage, axis of action, handles, finite physical caches, render receipts), then writes a shot ledger, an EDL, plan-view cards and an optional animatic video ([guide](docs/SHOT-PLAN.md)).
+
 ## First implemented project: god-here
 
 This repository now contains a working Python renderer and a static interactive edition for **God's Ears**. The artist's sketch becomes five independently scored regions in the existing shared room. Each performer keeps a visual identity across the two camera views. The five authored trial vocabularies are pressure, lag, refraction, residue, and erosion.
