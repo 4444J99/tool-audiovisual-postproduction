@@ -40,6 +40,10 @@ The workbench's Control tab adds touch faders, knobs and switches with MIDI lear
 
 See [the workbench guide](docs/FX-WORKBENCH.md), [the processing contract](docs/FX-ENGINE.md), and [the source specification](docs/god-here-fx-workbench-spec.md). Portable JSON fixtures and schema are in `web/fx/fixtures/` and `web/fx/rack.schema.json`. Original film and derived media stay outside the public repository.
 
+## Reverse-angle ledger
+
+`tools/reverse_angle.py` plans a same-side reverse camera and reports which reverse-view pixels the source recording genuinely shows ([guide](docs/REVERSE-ANGLE.md)).
+
 ## First implemented project: god-here
 
 This repository now contains a working Python renderer and a static interactive edition for **God's Ears**. The artist's sketch becomes five independently scored regions in the existing shared room. Each performer keeps a visual identity across the two camera views. The five authored trial vocabularies are pressure, lag, refraction, residue, and erosion.
