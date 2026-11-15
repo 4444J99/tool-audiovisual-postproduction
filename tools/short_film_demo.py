@@ -125,6 +125,8 @@ def aligned_snr_db(heard, reference):
     lags = np.concatenate([np.arange(0, AUDIO_MAX_LAG + 1), np.arange(-AUDIO_MAX_LAG, 0)])
     lag = int(lags[np.argmax(np.concatenate([cross[:AUDIO_MAX_LAG + 1], cross[size - AUDIO_MAX_LAG:]]))])
     shifted = heard[lag:lag + n] if lag >= 0 else np.concatenate([np.zeros(-lag), heard[:n + lag]])
+    if len(shifted) < n:  # the track ends before the dialogue does: the missing samples count as silence, so the SNR drops
+        shifted = np.concatenate([shifted, np.zeros(n - len(shifted))])
     error = float(np.sum((shifted - reference) ** 2))
     return float("inf") if error == 0 else float(10 * np.log10(np.sum(reference ** 2) / error))
 
