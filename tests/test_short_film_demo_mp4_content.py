@@ -82,7 +82,7 @@ class Mp4ContentTests(unittest.TestCase):
         self.assertEqual(cli("verify", "--output", str(self.first)).returncode, 0)
         report = json.loads((self.first / demo.DEMO_QC).read_text())
         ids = {check["id"] for check in report["checks"]}
-        self.assertTrue({"mp4.audio_matches_delivered", "mp4.audio_padding_silent", "mp4.chroma_flat"} <= ids, ids)
+        self.assertTrue({"mp4.audio_matches_delivered", "mp4.audio_blocks_match_delivered", "mp4.audio_padding_silent", "mp4.chroma_flat", "mp4.video_pixel_format"} <= ids, ids)
 
     def test_noise_at_the_delivered_loudness_in_place_of_the_dialogue_is_named(self):
         out = self.copy()
@@ -184,6 +184,84 @@ class Mp4ContentTests(unittest.TestCase):
         self.swap_audio(out, samples)
         self.verify_names(out, "mp4.audio_matches_delivered")
 
+    # ---- Findings of the second independent review (head 5448846) ----
+
+    def dialogue_in_padding(self, edit):
+        total = int(round(self.ledger["total_seconds"] * self.rate))
+        samples = np.zeros(total)
+        samples[:len(self.delivered)] = self.delivered
+        edit(samples, len(self.delivered))
+        return samples
+
+    def test_muting_a_quarter_of_the_dialogue_is_named(self):
+        out = self.copy()
+        self.swap_audio(out, self.dialogue_in_padding(lambda x, n: x.__setitem__(slice(46243, 80003), 0.0)))
+        self.verify_names(out, "mp4.audio_blocks_match_delivered")
+
+    def test_a_loud_150_ms_tone_laid_over_the_dialogue_is_named(self):
+        out = self.copy()
+        tone = 0.1 * np.sin(2 * np.pi * 1000 * np.arange(2400) / self.rate)
+        self.swap_audio(out, self.dialogue_in_padding(lambda x, n: x.__setitem__(slice(40000, 42400), x[40000:42400] + tone)))
+        self.verify_names(out, "mp4.audio_blocks_match_delivered")
+
+    def test_a_full_scale_click_inside_the_guard_after_the_dialogue_is_named(self):
+        out = self.copy()
+        self.swap_audio(out, self.dialogue_in_padding(lambda x, n: x.__setitem__(slice(n + 500, n + 504), [0.99, -0.99, 0.99, -0.99])))
+        self.verify_names(out, "mp4.audio_padding_silent")
+
+    def test_colour_matrix_transfer_and_primaries_flags_are_named(self):
+        for name, bsf in (("matrix", "h264_metadata=matrix_coefficients=0"), ("transfer", "h264_metadata=transfer_characteristics=16"),
+                          ("primaries", "h264_metadata=colour_primaries=11")):
+            out = Path(self.tmp.name) / f"copy-{name}"
+            shutil.copytree(self.first, out)
+            self.swap_video(out, ["-i", str(out / demo.MP4), "-c", "copy", "-bsf:v", bsf])
+            self.verify_names(out, "mp4.video_pixel_format")
+
+    def test_the_thresholds_sit_where_the_doc_says(self):
+        """Pins both sides of each bound with a copy that is just inside and just outside it."""
+        for name, amplitude, passes in (("pad-ok", 0.0005, True), ("pad-bad", 0.002, False)):
+            out = Path(self.tmp.name) / f"copy-{name}"
+            shutil.copytree(self.first, out)
+            n = len(self.delivered)
+            self.swap_audio(out, self.dialogue_in_padding(lambda x, m, a=amplitude: x.__setitem__(slice(m, None), x[m:] + a * np.sin(2 * np.pi * 1000 * np.arange(len(x) - m) / self.rate))))
+            self.assertEqual(cli("verify", "--output", str(out)).returncode, 0 if passes else 2, name)
+        for name, delay, passes in (("lag-ok", 400, True), ("lag-bad", 600, False)):
+            out = Path(self.tmp.name) / f"copy-{name}"
+            shutil.copytree(self.first, out)
+            total = int(round(self.ledger["total_seconds"] * self.rate))
+            samples = np.zeros(total)
+            samples[delay:delay + len(self.delivered)] = self.delivered
+            self.swap_audio(out, samples)
+            self.assertEqual(cli("verify", "--output", str(out)).returncode, 0 if passes else 2, name)
+        for name, level, passes in (("chroma-ok", 129, True), ("chroma-bad", 130, False)):
+            out = Path(self.tmp.name) / f"copy-{name}"
+            shutil.copytree(self.first, out)
+            original = demo.yuv420_stream
+
+            def tinted(frames, width, height, level=level):
+                size, half = width * height, (width // 2) * (height // 2)
+                return b"".join(frames[o:o + size] + bytes([level]) * (2 * half) for o in range(0, len(frames), size))
+
+            demo.yuv420_stream = tinted
+            try:
+                demo.mux(out, self.ledger, self.burnin, self.ffmpeg)
+            finally:
+                demo.yuv420_stream = original
+            self.reseal(out)
+            self.assertEqual(cli("verify", "--output", str(out)).returncode, 0 if passes else 2, name)
+
+    def test_audio_too_short_to_measure_fails_a_check_instead_of_raising(self):
+        out = self.copy()
+        target = out / "swapped.mp4"
+        subprocess.run([self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(out / demo.MP4), "-map", "0:v:0", "-map", "0:a:0",
+                        "-c:v", "copy", "-af", "atrim=0:0.01", "-c:a", "aac", "-b:a", "64k", str(target)], check=True)
+        (out / demo.MP4).write_bytes(target.read_bytes())
+        target.unlink()
+        self.reseal(out)
+        result = cli("verify", "--output", str(out))
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
 
 class AlignedSnrTests(unittest.TestCase):
     """CodeRabbit on this PR: a decoded track that is a little longer than the dialogue but shorter than dialogue plus lag must fail, not raise."""
@@ -223,6 +301,18 @@ class AlignedSnrTests(unittest.TestCase):
             reference = rng.standard_normal(n)
             heard = rng.standard_normal(int(rng.integers(n, n + 3 * demo.AUDIO_MAX_LAG))) * float(rng.choice([0.0, 1.0, 10.0]))
             self.assertIsInstance(demo.aligned_snr_db(heard, reference), float)
+
+
+    def test_an_anti_correlated_short_reference_does_not_raise(self):
+        reference = np.random.default_rng(44).standard_normal(4)
+        self.assertIsInstance(demo.aligned_snr_db(np.concatenate([-reference, np.zeros(600)]), reference), float)
+
+    def test_the_snr_threshold_sits_between_12_and_18_db(self):
+        reference = np.random.default_rng(9).standard_normal(16000)
+        noise = np.random.default_rng(10).standard_normal(16000)
+        noise *= np.sqrt(np.sum(reference ** 2) / np.sum(noise ** 2))
+        self.assertLess(demo.aligned_snr_db(reference + noise * 10 ** (-12 / 20), reference), demo.AUDIO_MIN_SNR_DB)
+        self.assertGreater(demo.aligned_snr_db(reference + noise * 10 ** (-18 / 20), reference), demo.AUDIO_MIN_SNR_DB)
 
 
 if __name__ == "__main__":
