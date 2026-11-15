@@ -296,3 +296,27 @@ test('applyParameterEdit is exactly what the workbench setter does outside recor
   assert.equal(node.params.taps, 3);
   assert.ok(!node.macro.some(m => m.parameter === 'taps'));
 });
+
+test('the largest lane the rack will send arrives through a real UDP socket, whole', async () => {
+  const {encodeMessage, decodePacket} = await import('../../tools/fx-bridge/osc-codec.mjs');
+  const dgram = await import('node:dgram');
+  const {node, ruleMessages, feedback} = ruleRig();
+  ruleMessages(feedback);
+  let count = 1;
+  const make = n => [{parameter: 'wet', interpolation: 'linear', keyframes: Array.from({length: n}, (_, i) => ({time: i / 13, value: 0.123456789012}))}];
+  while (JSON.stringify(make(count + 1)[0]).length <= oscControl.MAX_RULE_CHARS) count++;
+  node.automation = make(count);
+  const lane = ruleMessages(feedback).find(m => m.address.endsWith('/lane/wet'));
+  assert.ok(lane, 'a lane at the limit is still sent');
+  const packet = encodeMessage(lane.address, lane.args);
+  assert.ok(packet.length < 9216, `${packet.length} bytes`);
+  const receiver = dgram.createSocket('udp4'), sender = dgram.createSocket('udp4');
+  await new Promise(resolve => receiver.bind(0, '127.0.0.1', resolve));
+  const arrived = new Promise(resolve => receiver.once('message', resolve));
+  await new Promise((resolve, reject) => sender.send(packet, receiver.address().port, '127.0.0.1', error => error ? reject(error) : resolve()));
+  const got = decodePacket(new Uint8Array(await arrived));
+  receiver.close(); sender.close();
+  assert.deepEqual(JSON.parse(got[0].args[0]).keyframes.length, count);
+  node.automation = make(count + 40);
+  assert.deepEqual(ruleMessages(feedback), [{address: '/fx/node/fx-1/released/wet', args: []}], 'one past the limit is released, never sent');
+});

@@ -121,6 +121,23 @@ class RuleSyncTests(unittest.TestCase):
         self.assertEqual([m["address"].split("/")[4] for m in step["messages"]], ["released"])
         self.assertTrue(step["messages"][0]["address"].endswith("/released/intensity"))
 
+    def test_a_hand_edit_in_touchdesigner_while_the_workbench_records_keeps_the_lane_and_adds_the_event(self):
+        """The network used to drop the control's rules the moment it sent the edit; the workbench, recording, keeps the lane
+        and adds an event, so the network lost a rule nothing re-sent. The rack is the only authority now."""
+        contract = json.loads(json.dumps(self.data["contract"]))
+        node = contract["nodes"][0]
+        control = next(c for c in node["controls"] if c["path"] == "wet")
+        node["resolve"]["automation"] = [{"parameter": "wet", "interpolation": "linear", "keyframes": [{"time": 0, "value": 0.2}, {"time": 4, "value": 0.8}]}]
+        backend = Mirror(contract)
+        link = osc.RackLink(contract, backend)
+        link.par_changed(node["comp"], control["par"], 0.3)                  # the edit goes to the rack
+        self.assertEqual(len(node["resolve"]["automation"]), 1, "the lane is still there until the rack says otherwise")
+        link.receive(control["rules"]["event"], [1.5, 0.3])                  # the recording workbench reports the event
+        self.assertEqual(len(node["resolve"]["automation"]), 1)
+        self.assertEqual([(e["time"], e["value"]) for e in node["resolve"]["events"] if e["parameter"] == "wet"], [(1.5, 0.3)])
+        link.receive(control["rules"]["released"], [])                        # a non-recording workbench reports a release instead
+        self.assertEqual(node["resolve"]["automation"], [])
+
     def test_malformed_rule_messages_are_refused_and_change_nothing(self):
         contract = json.loads(json.dumps(self.data["contract"]))
         backend = Mirror(contract)

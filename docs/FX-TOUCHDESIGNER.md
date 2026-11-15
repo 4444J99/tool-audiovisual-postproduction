@@ -187,9 +187,10 @@ that only differences are sent, so an unchanged rack is silent. The page compute
 (`web/fx/parameter-rules.mjs`, `processorRules`), the same code path the parameter setter uses (`applyParameterEdit`),
 so recording, a hand edit, the automation form, Clear and a preset restore are all mirrored. In the network,
 `td_osc` hands a rule message to `td_resolve.apply`, which edits the rules the next frame resolves from; a malformed
-message is refused and changes nothing. A hand edit made in TouchDesigner is also applied to the workbench (which then
-reports the release back, a no-op), and an edit made while the workbench records becomes an event there and arrives
-here as one.
+message is refused and changes nothing. A hand edit made in TouchDesigner changes nothing in the network's rules
+by itself: the workbench applies it, decides what it does to the control's rules (it drops them, or, while recording,
+adds an event and keeps the lane) and reports that, so the two cannot diverge. With **Send rack state back** off the
+network hears none of this, so its copy of the rules is then the snapshot it was generated with.
 
 `tests/test_td_rulesync.py` checks the whole path: `tools/td-network/oracle-rulesync.mjs` edits a stressed patch the way
 the workbench does (a hand edit of an automated control, of a macro-driven parameter and of a recorded control; recording
@@ -198,8 +199,9 @@ edit, and samples `evaluatedNode`; the generated Python module receives those me
 before the patch had its rules, and its resolver must return the same values after every step.
 
 Not mirrored: sidechain modulation and clip scope (set by editing the graph, not by a control edit; regenerate the network
-after changing them), event times beyond 4 decimals (a sub-millisecond rounding), and a lane longer than 32,000
-characters (about 900 keyframes), which does not fit one bridge frame: the control is released in the network and stays so.
+after changing them), event times beyond 4 decimals (a sub-millisecond rounding), and a lane longer than 8,000
+characters (about 220 keyframes), which would not fit one UDP datagram (macOS refuses more than 9,216 bytes): the control
+is released in the network and stays so.
 Editing a base parameter in TouchDesigner never sends the resolved value back over OSC: only edits made to the custom
 parameters are exchanged.
 

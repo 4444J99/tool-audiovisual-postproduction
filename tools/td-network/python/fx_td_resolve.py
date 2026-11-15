@@ -258,19 +258,6 @@ def _contract_rules(rack):
     return contract
 
 
-def release(rack, comp, path):
-    """A person edited a control by hand in this network: the workbench drops that control's automation, events and
-    macro mapping (web/fx/app.mjs setParameter), so the resolver drops them too. Returns True when a rule went."""
-    contract = _contract_rules(rack)
-    for node in contract['nodes']:
-        if node['comp'] == comp:
-            changed = release_rules(node['resolve'], path)
-            if changed:
-                _LAST.pop((rack.path, comp), None)
-            return changed
-    return False
-
-
 def apply(rack, comp, kind, path, payload):
     """The workbench reported a rule change for one control of one processor (OSC, `td_osc`): mirror it. Returns True
     when the processor's rules changed."""

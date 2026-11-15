@@ -328,20 +328,18 @@ class OscModuleTests(unittest.TestCase):
         link.receive(node["typeAddress"], ["not-" + node["type"]])
         self.assertTrue(backend.params[status].startswith("mismatch: " + node["id"]))
 
-    def test_a_sent_edit_releases_that_control_in_the_resolver_and_an_echo_does_not(self):
+    def test_a_sent_edit_does_not_touch_the_rules_here_the_rack_decides_and_reports(self):
         link, backend = self.link()
-        released = []
-        backend.release = lambda comp, path: released.append((comp, path))
+        rules = []
+        backend.rule = lambda comp, kind, path, payload: rules.append((comp, kind, path, payload))
         node, control = self.first_range()
         value = control["min"] + 0.25 * (control["max"] - control["min"])
-        link.par_changed(node["comp"], control["par"], value)
-        link.par_changed(node["comp"], control["par"], value)   # a repeat is an echo: nothing sent, nothing released
-        self.assertEqual(released, [(node["comp"], control["path"])])
-        link.receive(control["address"], [0.9])                 # a report from the rack never releases
-        self.assertEqual(len(released), 1)
-        toggle = next(c for c in node["controls"] if c["path"] == "solo")
-        link.par_changed(node["comp"], toggle["par"], 1)
-        self.assertEqual(released[-1], (node["comp"], "solo"))
+        self.assertIsNotNone(link.par_changed(node["comp"], control["par"], value))
+        self.assertEqual(rules, [], "no local release: while the workbench records, the same edit keeps the lane and adds an event")
+        self.assertTrue(link.receive(control["rules"]["released"], []))   # what the rack reports for a hand edit
+        self.assertEqual(rules, [(node["comp"], "released", control["path"], None)])
+        link.receive(control["address"], [0.9])                            # a value report never changes rules
+        self.assertEqual(len(rules), 1)
 
     def test_edits_become_control_messages_and_repeats_are_not_resent(self):
         link, backend = self.link()

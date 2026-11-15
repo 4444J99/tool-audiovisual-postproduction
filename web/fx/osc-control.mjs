@@ -63,8 +63,9 @@ export function decodeSegment(text) {
 
 /** The rule message kinds the rack reports to a mirroring network, besides control values. */
 export const RULE_KINDS = Object.freeze(['released', 'event', 'lane', 'macro']);
-/** A lane whose JSON is longer than this is not mirrored (it would not fit one bridge frame); the mirror drops its copy instead. */
-export const MAX_RULE_CHARS = 32000;
+/** A lane whose JSON is longer than this is not mirrored: each message leaves the bridge as one UDP datagram, and macOS
+ *  refuses datagrams over 9216 bytes (net.inet.udp.maxdgram). The mirror drops its copy of that control's rules instead. */
+export const MAX_RULE_CHARS = 8000;
 /** Event times travel with this many decimals (float32 on the wire keeps them to about a microsecond). */
 export const EVENT_TIME_DECIMALS = 4;
 
