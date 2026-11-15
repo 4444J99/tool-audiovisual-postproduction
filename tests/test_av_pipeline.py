@@ -163,6 +163,7 @@ class CliTests(unittest.TestCase):
             manifest = json.loads((Path(d) / "chain" / "pipeline-manifest.json").read_text())
             self.assertEqual(result["blender_graph_sha256"], manifest["stages"][0]["graph_sha256"])
             self.assertTrue((Path(d) / "chain" / "set" / "scene.blend").is_file())
+            self.assertEqual(result["chain_sha256"], manifest["chain_sha256"])
             self.assertEqual(manifest["stages"][-1]["stage"], "blender")
             self.assertEqual(manifest["stages"][-1]["graph_sha256"], result["blender_graph_sha256"])
             self.assertEqual(cli("verify", "--output", str(Path(d) / "chain")).returncode, 0)

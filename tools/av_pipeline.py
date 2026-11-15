@@ -52,7 +52,7 @@ def main(argv=None):
                                   "expected": expected, "observed": (built or {}).get("graph_sha256")}))
                 return 2
             try:
-                pc.append_blender_stage(out, built["graph_sha256"])
+                result["chain_sha256"] = pc.append_blender_stage(out, built["graph_sha256"])["chain_sha256"]
             except pc.ChainError as error:
                 print(json.dumps({"errors": error.errors}, indent=2))
                 return 2
