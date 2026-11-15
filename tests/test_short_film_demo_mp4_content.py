@@ -253,6 +253,8 @@ class Mp4ContentTests(unittest.TestCase):
             finally:
                 demo.yuv420_stream = original
             self.reseal(out)
+            checks = demo.judge_mp4(out, self.ledger, self.burnin, (self.ffmpeg, shutil.which("ffprobe")))  # demo-qc.json must record this mp4's judgement too
+            (out / demo.DEMO_QC).write_text(demo.pc.dumps({"schema": demo.SCHEMA, "ok": all(c["ok"] for c in checks), "checks": checks}))
             self.assertEqual(cli("verify", "--output", str(out)).returncode, 0 if passes else 2, name)
 
     def test_audio_too_short_to_measure_fails_a_check_instead_of_raising(self):

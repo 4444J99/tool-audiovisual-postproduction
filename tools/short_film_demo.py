@@ -13,6 +13,7 @@ Exit status 2: any chain, ffmpeg, hash or mp4 problem; the problems print as JSO
 import argparse
 import hashlib
 import json
+import math
 import shutil
 import subprocess
 import sys
@@ -161,6 +162,20 @@ def worst_block_snr_db(heard, reference):
     return worst, at
 
 
+def as_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def as_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def judge_mp4(out, ledger, burnin, tools):
     """Checks that tie the mp4 back to the sealed chain.  Each entry names what it compared."""
     ffmpeg, ffprobe = tools
@@ -174,23 +189,27 @@ def judge_mp4(out, ledger, burnin, tools):
     def add(check_id, ok, detail, **facts):
         checks.append({"id": check_id, "ok": bool(ok), "detail": detail, **facts})
 
+    add("mp4.container", "mp4" in str(info.get("format", {}).get("format_name", "")).split(","), "the file is an MP4 container (a remux into another container is refused)", observed=info.get("format", {}).get("format_name"))
     add("mp4.streams", len(video) == 1 and len(audio) == 1 and len(info["streams"]) == 2, "one video and one audio stream", streams=[s["codec_name"] for s in info["streams"]])
     if len(video) != 1 or len(audio) != 1:
         return checks
     v, a = video[0], audio[0]
-    add("mp4.video_geometry", (v["codec_name"], v["width"], v["height"], v["avg_frame_rate"]) == ("h264", width, height, f"{ledger['fps']}/1"),
-        "H.264 at the burn-in geometry and the ledger's exact frame rate", observed=[v["codec_name"], v["width"], v["height"], v["avg_frame_rate"]], expected=["h264", width, height, f"{ledger['fps']}/1"])
+    seen = [v.get("codec_name"), v.get("width"), v.get("height"), v.get("avg_frame_rate")]
+    add("mp4.video_geometry", seen == ["h264", width, height, f"{ledger['fps']}/1"],
+        "H.264 at the burn-in geometry and the ledger's exact frame rate", observed=seen, expected=["h264", width, height, f"{ledger['fps']}/1"])
     pixel_format, color_range, aspect = v.get("pix_fmt"), v.get("color_range"), v.get("sample_aspect_ratio")
     colour = [v.get("color_space"), v.get("color_transfer"), v.get("color_primaries")]
     add("mp4.video_pixel_format", pixel_format == "yuv420p" and color_range in (None, "tv", "unknown") and aspect in (None, "1:1", "0:1", "N/A")
         and all(flag in (None, "unknown") for flag in colour),
         "yuv420p, limited or unflagged range, square pixels, no colour matrix, transfer or primaries flags: the chroma check reads the stream as it is, so a 4:4:4, full-range or re-flagged stream is refused",
         observed=[pixel_format, color_range, aspect, *colour])
-    add("mp4.audio_format", (a["codec_name"], int(a["sample_rate"]), a["channels"]) == ("aac", 16000, 1), "AAC, 16 kHz, mono", observed=[a["codec_name"], int(a["sample_rate"]), a["channels"]])
-    duration = float(info["format"]["duration"])
-    add("mp4.duration", abs(duration - ledger["total_seconds"]) <= DURATION_TOLERANCE_S, "container duration equals the final ledger's total seconds",
-        observed_s=round(duration, 3), ledger_s=ledger["total_seconds"])
-    add("mp4.frame_count", int(v["nb_frames"]) == ledger["total_frames"], "the video holds exactly the ledger's frames", observed=int(v["nb_frames"]), ledger=ledger["total_frames"])
+    heard_format = [a.get("codec_name"), as_int(a.get("sample_rate")), a.get("channels")]
+    add("mp4.audio_format", heard_format == ["aac", 16000, 1], "AAC, 16 kHz, mono", observed=heard_format)
+    duration = as_float(info.get("format", {}).get("duration"))
+    add("mp4.duration", duration is not None and abs(duration - ledger["total_seconds"]) <= DURATION_TOLERANCE_S, "container duration equals the final ledger's total seconds",
+        observed_s=None if duration is None else round(duration, 3), ledger_s=ledger["total_seconds"])
+    frames = as_int(v.get("nb_frames"))
+    add("mp4.frame_count", frames == ledger["total_frames"], "the video holds exactly the ledger's frames", observed=frames, ledger=ledger["total_frames"])
 
     decoded = decode(ffmpeg, path, "-map", "0:v:0", "-pix_fmt", "yuv420p")
     size = width * height
@@ -235,8 +254,11 @@ def artefact_hashes(out):
     return {str(p.relative_to(out)): sha256_file(p) for p in sorted(out.rglob("*")) if p.is_file() and str(p.relative_to(out)) not in own}
 
 
-def collect_hashes(out, manifest, ffmpeg_line):
-    files = artefact_hashes(out)
+ENCODER_NOTE = "the mp4 bytes depend on this ffmpeg/libx264/aac build; they repeat on one build"
+
+
+def chain_fields(manifest):
+    """The fields of demo-hashes.json that the sealed chain determines, so verify can recompute and compare them."""
     stages = {entry["stage"]: entry for entry in manifest["stages"]}
     return {
         "schema": SCHEMA,
@@ -248,18 +270,63 @@ def collect_hashes(out, manifest, ffmpeg_line):
             "qc_report_sha256": stages["qc"]["outputs"]["qc-report"],
             "captions_srt_sha256": stages["captions"]["outputs"]["captions-srt"],
         },
-        "encoder": {"ffmpeg": ffmpeg_line, "note": "the mp4 bytes depend on this ffmpeg/libx264/aac build; they repeat on one build"},
+    }
+
+
+def collect_hashes(out, manifest, ffmpeg_line):
+    files = artefact_hashes(out)
+    return {
+        **chain_fields(manifest),
+        "encoder": {"ffmpeg": ffmpeg_line, "note": ENCODER_NOTE},
         "mp4_sha256": sha256_file(out / MP4),
         "files": files,
     }
 
 
+def same_report(recorded, fresh):
+    """Equal JSON values, except that a float may differ by a rounding step (the facts are rounded floats measured on this host)."""
+    if isinstance(recorded, dict) and isinstance(fresh, dict):
+        return recorded.keys() == fresh.keys() and all(same_report(recorded[k], fresh[k]) for k in fresh)
+    if isinstance(recorded, list) and isinstance(fresh, list):
+        return len(recorded) == len(fresh) and all(same_report(r, f) for r, f in zip(recorded, fresh))
+    if isinstance(recorded, float) and isinstance(fresh, float):
+        return math.isclose(recorded, fresh, abs_tol=0.05)
+    return recorded == fresh and type(recorded) is type(fresh)
+
+
+def sealed_problems(recorded, manifest):
+    """What demo-hashes.json claims that the chain, not the mp4, can check: shape, schema, chain, stages, deterministic hashes, encoder note."""
+    if not isinstance(recorded, dict):
+        return ["demo-hashes.json is not a JSON object"]
+    problems = []
+    for key, expected in chain_fields(manifest).items():
+        if recorded.get(key) != expected:
+            problems.append(f"demo-hashes.json {key} differs from the sealed chain" if key != "chain_sha256" else "demo-hashes.json names a chain hash that differs from pipeline-manifest.json")
+    encoder = recorded.get("encoder")
+    if not (isinstance(encoder, dict) and isinstance(encoder.get("ffmpeg"), str) and encoder["ffmpeg"].startswith("ffmpeg version") and encoder.get("note") == ENCODER_NOTE):
+        problems.append("demo-hashes.json encoder is not an ffmpeg version line and the encoder note")
+    files = recorded.get("files")
+    if not (isinstance(files, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in files.items())):
+        problems.append("demo-hashes.json files is not an object of file name to hash")
+    if not isinstance(recorded.get("mp4_sha256"), str):
+        problems.append("demo-hashes.json mp4_sha256 is not a hash")
+    return problems
+
+
 def run_demo(out, delivery=None, qc_spec=None):
     out = Path(out)
     tools = ffmpeg_tools()
+    if out.is_symlink():
+        raise DemoError([f"{out} is a symbolic link; choose a real directory"])
+    if out.exists() and not out.is_dir():
+        raise DemoError([f"{out} exists and is not a directory; choose a new directory"])
     if out.exists() and any(out.iterdir()):
         marker = out / MARKER
-        if not (marker.is_file() and not marker.is_symlink() and marker.read_text() == SCHEMA):
+        try:
+            marked = marker.is_file() and not marker.is_symlink() and marker.read_text() == SCHEMA
+        except (OSError, UnicodeDecodeError):
+            marked = False
+        if not marked:
             raise DemoError([f"{out} is not empty and is not a previous demo output; choose a new directory"])
         shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -296,13 +363,14 @@ def verify_demo(out, delivery=None, qc_spec=None):
     if problems:
         return problems
     manifest = json.loads((out / "pipeline-manifest.json").read_text())
-    if recorded.get("chain_sha256") != manifest["chain_sha256"]:
-        problems.append("demo-hashes.json names a chain hash that differs from pipeline-manifest.json")
+    problems = sealed_problems(recorded, manifest)
+    if problems:
+        return problems
     on_disk = artefact_hashes(out)
-    for name in sorted(set(on_disk) | set(recorded.get("files", {}))):
-        if on_disk.get(name) != recorded.get("files", {}).get(name):
+    for name in sorted(set(on_disk) | set(recorded["files"])):
+        if on_disk.get(name) != recorded["files"].get(name):
             problems.append(f"{name} differs from demo-hashes.json" if name in on_disk and name in recorded["files"] else f"{name} is not in both the directory and demo-hashes.json")
-    if on_disk.get(MP4) != recorded.get("mp4_sha256"):
+    if on_disk.get(MP4) != recorded["mp4_sha256"]:
         problems.append("mp4_sha256 differs from the mp4 on disk")
     if problems:
         return problems
@@ -313,7 +381,16 @@ def verify_demo(out, delivery=None, qc_spec=None):
         checks = judge_mp4(out, ledger, burnin, tools)
     except DemoError as error:
         return error.errors
-    return [f"{c['id']}: {c['detail']}" for c in checks if not c["ok"]]
+    failed = [f"{c['id']}: {c['detail']}" for c in checks if not c["ok"]]
+    if failed:
+        return failed
+    try:
+        written = json.loads((out / DEMO_QC).read_text())
+    except (OSError, ValueError) as error:
+        return [f"{DEMO_QC} cannot be read: {error}"]
+    if not same_report(written, {"schema": SCHEMA, "ok": True, "checks": checks}):
+        return [f"{DEMO_QC} differs from the mp4 judgement verify just made"]
+    return []
 
 
 def main(argv=None):
@@ -343,6 +420,9 @@ def main(argv=None):
         problems = verify_demo(args.output, delivery, qc_spec)
     except DemoError as error:
         print(json.dumps({"errors": error.errors}, indent=2))
+        return 2
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        print(json.dumps({"errors": [f"{args.command}: {type(error).__name__}: {error}"]}, indent=2))
         return 2
     if problems:
         print(json.dumps({"errors": problems}, indent=2))
