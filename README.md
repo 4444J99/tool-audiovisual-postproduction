@@ -46,7 +46,7 @@ The eight-layout comparison's placement rules are a pure module (`web/fx/layout-
 
 ## TouchDesigner network
 
-`tools/fx-td-network.mjs` generates the rack's TouchDesigner version from a patch: components with the catalog's own parameters, wired ports, a real wet/dry and bypass, per-frame automation/macro/modulation/Solo resolution, effect chains for five processors, and an OSC module that follows the bridge's address contract ([guide](docs/FX-TOUCHDESIGNER.md#the-touchdesigner-network-generated)). Not yet built in a real TouchDesigner.
+`tools/fx-td-network.mjs` generates the rack's TouchDesigner version from a patch: components with the catalog's own parameters, wired ports, a real wet/dry and bypass, per-frame automation/macro/modulation/Solo resolution, effect chains for five processors, and an OSC module that follows the bridge's address contract ([guide](docs/FX-TOUCHDESIGNER.md#the-touchdesigner-network-generated)). **Status: never built or run in a real TouchDesigner**; it is verified only structurally and numerically (validator, fake operator tree, CPython, parameter-name check). The first in-app check is listed in the [guide](docs/FX-TOUCHDESIGNER.md#first-in-app-check-for-the-owner).
 
 ## Branch and push rules
 
@@ -59,6 +59,8 @@ No force pushes (including `--force-with-lease`); update open branches with `git
 ## Set spec to Blender scene
 
 `tools/set_scene.py` validates a set spec (bounds, materials, boxes, cylinders of any axis, cones, spheres, tori, stairs, stepped arch bands, lights, cameras; schema v1 or v1.1) and builds it in headless Blender, then compares Blender's measured scene with the spec's scene graph ([guide](docs/SET-SCENE.md)). `shot-set` exports the same environment as a shot plan's `set` block.
+
+Headless Blender check, 2026-11-14 (Blender 5.0.1, macOS, main `f2a4047`): `python3 -m unittest -v tests.test_set_scene_blender` ran 21 tests, 21 ok, 0 skipped (Blender was found, so the two Blender-gated classes ran, including the saved-`.blend` reopen and the still render). This verifies the headless build only, not any interactive Blender session.
 
 ## End-to-end chain
 
