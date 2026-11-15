@@ -46,7 +46,7 @@ The eight-layout comparison's placement rules are a pure module (`web/fx/layout-
 
 ## TouchDesigner network
 
-`tools/fx-td-network.mjs` generates the rack's TouchDesigner version from a patch: components with the catalog's own parameters, wired ports, a real wet/dry and bypass, per-frame automation/macro/modulation/Solo resolution, effect chains for five processors, and an OSC module that follows the bridge's address contract ([guide](docs/FX-TOUCHDESIGNER.md#the-touchdesigner-network-generated)). **Status: never built or run in a real TouchDesigner**; it is verified only structurally and numerically (validator, fake operator tree, CPython, parameter-name check). The first in-app check is listed in the [guide](docs/FX-TOUCHDESIGNER.md#first-in-app-check-for-the-owner).
+`tools/fx-td-network.mjs` generates the rack's TouchDesigner version from a patch: components with the catalog's own parameters, wired ports, a real wet/dry and bypass, per-frame automation/macro/modulation/Solo resolution, picture chains for all thirteen processors (voice chains for seven, two of them only delaying the voice), and an OSC module that follows the bridge's address contract ([guide](docs/FX-TOUCHDESIGNER.md#the-touchdesigner-network-generated)). **Status: never built or run in a real TouchDesigner**; it is verified only structurally and numerically (validator, fake operator tree, CPython, parameter-name check). The first in-app check is listed in the [guide](docs/FX-TOUCHDESIGNER.md#first-in-app-check-for-the-owner).
 
 ## Branch and push rules
 
@@ -65,6 +65,10 @@ Headless Blender check, 2026-11-14 (Blender 5.0.1, macOS, main `f2a4047`): `pyth
 ## End-to-end chain
 
 `tools/av_pipeline.py` runs set spec, shot plan, coverage matrix, room-tone fill and colour plan on synthetic inputs and pins each hand-off by hash ([guide](docs/PIPELINE-CHAIN.md)).
+
+## Loudness and true peak
+
+`tools/loudness.py` measures integrated loudness, loudness range and true peak (BS.1770-4, EBU R128), checks a mix against EBU, ATSC, streaming, podcast or your own spec, and applies one linear gain to reach a target, refusing (or, by choice, stopping short) when the true-peak ceiling forbids it; the written file is read back and measured ([guide](docs/LOUDNESS.md)).
 
 ## Room-tone fill
 

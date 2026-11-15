@@ -14,13 +14,14 @@ const args = process.argv.slice(2);
 const option = (name, fallback) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : fallback; };
 const patchPath = args.find((arg, i) => !arg.startsWith('--') && (i === 0 || !args[i - 1].startsWith('--')));
 const outDir = option('--out');
-if (!patchPath || !outDir) { console.error('usage: node tools/fx-td-network.mjs patch.json --out DIR [--source-file PATH] [--osc-in-port N] [--osc-out-port N] [--host H] [--root-name NAME] [--picture-fps N] [--word-cues cues.json]'); process.exit(2); }
+if (!patchPath || !outDir) { console.error('usage: node tools/fx-td-network.mjs patch.json --out DIR [--source-file PATH] [--osc-in-port N] [--osc-out-port N] [--host H] [--root-name NAME] [--picture-fps N] [--word-cues cues.json] [--picture-size WxH]'); process.exit(2); }
 const number = (name, fallback) => { const value = option(name); return value === undefined ? fallback : Number(value); };
 try {
   const patch = JSON.parse(readFileSync(patchPath, 'utf8'));
   const {spec, files} = writeNetwork(patch, outDir, {
     sourceFile: option('--source-file'), oscInPort: number('--osc-in-port', 7000), oscOutPort: number('--osc-out-port', 7001),
     host: option('--host'), rootName: option('--root-name'), pictureFps: number('--picture-fps', undefined),
+    pictureSize: option('--picture-size') ? Object.fromEntries(['width', 'height'].map((key, i) => [key, Number(option('--picture-size').split('x')[i])])) : undefined,
     wordCues: option('--word-cues') ? JSON.parse(readFileSync(option('--word-cues'), 'utf8')) : undefined,
   });
   console.log(JSON.stringify({patch: spec.patch.id, operators: spec.operators.length, processors: spec.contract.nodes.length, wires: spec.wires.length, files, warnings: spec.warnings}, null, 2));
