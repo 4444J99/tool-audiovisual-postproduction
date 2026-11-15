@@ -250,6 +250,7 @@ export function buildNetworkSpec(patch, options = {}) {
       if (!effect) warnings.push(`${node.id}: the ${node.type} effect is not implemented in this network; it passes signal through unchanged.`);
       else {
         implemented.push({id: node.id, type: node.type, picture: Boolean(effect.picture && targetsPicture), audio: Boolean(effect.audio && targetsVoice)});
+        for (const note of effect.notes ?? []) warnings.push(`${node.id}: ${note}`);
         if (!effect.picture) warnings.push(`${node.id}: ${node.type} has no picture effect in this network.`);
         if (!effect.audio) warnings.push(`${node.id}: ${node.type} has no audio effect in this network.`);
       }
