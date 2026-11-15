@@ -228,7 +228,7 @@ export class ControllerMap {
       return next === null || next === current ? null : {global: target.global, value: next, binding: key};
     }
     // A held momentary switch releases the processor that received the press, even if the selection moved since.
-    const holdSlot = `${key}>${target.slot ?? target.path}`;
+    const holdSlot = `${sourceKey(sourceOf(message))}>${target.slot ?? target.path}`;   // the concrete incoming channel, not an any-channel binding key
     const heldId = mode === 'momentary' && target.nodeId === SELECTED ? this.held.get(holdSlot) : undefined;
     const nodeId = heldId !== undefined && view.nodes.some(item => item.id === heldId) ? heldId
       : target.nodeId === SELECTED ? view.selectedId : target.nodeId;

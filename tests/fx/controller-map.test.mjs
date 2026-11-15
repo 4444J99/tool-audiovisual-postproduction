@@ -338,3 +338,19 @@ test('clearing the gesture tracker makes the next edit a new gesture', () => {
   tracker.clear();
   assert.equal(tracker.touch('k', 1200), true, 'a gesture started within the gap after Undo still snapshots');
 });
+
+test('an any-channel momentary binding holds each incoming channel separately', () => {
+  const {patch, node, view} = rig('delay');
+  const other = {id: 'other-processor', type: 'stutter'};
+  const nodes = [...view.nodes, other];
+  const base = {...view, nodes};
+  const map = new ControllerMap([{source: {kind: 'cc', channel: 0, number: 64}, target: {nodeId: SELECTED, path: 'bypass'}, mode: 'momentary'}]);
+  assert.equal(map.process(cc(64, 127, 1), base).actions[0].nodeId, node.id);
+  const moved = {...base, selectedId: other.id};
+  const second = map.process(cc(64, 127, 2), moved).actions;
+  assert.deepEqual(second.map(a => [a.nodeId, a.value]), [[other.id, true]], 'channel 2 press follows the new selection');
+  const releaseOne = map.process(cc(64, 0, 1), {...moved, current: (id, path) => id === node.id && path === 'bypass' ? true : moved.current(id, path)}).actions;
+  assert.deepEqual(releaseOne.map(a => [a.nodeId, a.value]), [[node.id, false]], 'channel 1 releases its own processor');
+  const releaseTwo = map.process(cc(64, 0, 2), {...moved, current: (id, path) => id === other.id && path === 'bypass' ? true : moved.current(id, path)}).actions;
+  assert.deepEqual(releaseTwo.map(a => [a.nodeId, a.value]), [[other.id, false]], 'channel 2 hold survived channel 1 release');
+});
