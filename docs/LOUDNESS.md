@@ -11,7 +11,7 @@
 | `momentary_max_lufs`, `short_term_max_lufs` | Largest 400 ms and 3 s values. |
 | `sample_peak_dbfs`, `true_peak_dbtp` | True peak by 4x oversampling below 96 kHz, 2x below 192 kHz, none above. |
 
-K-weighting coefficients are derived for the file's own sample rate from the standard's analogue prototype, so 44.1 kHz and 96 kHz are exact rather than resampled. At 48 kHz they equal the standard's published table (a test pins all ten values). Channel weights: left, right and centre 1.0, surrounds 1.41, LFE excluded; mono, stereo and 5.1 (L R C LFE Ls Rs) are chosen from the channel count, any other layout needs `--layout` (a name, or weights such as `1,1,1,0,1.41,1.41`).
+K-weighting coefficients are derived for the file's own sample rate from the standard's analogue prototype, so 44.1 kHz and 96 kHz are exact rather than resampled. At 48 kHz they equal the standard's published table (a test pins the published pre-filter and RLB coefficients). Channel weights: left, right and centre 1.0, surrounds 1.41, LFE excluded; mono, stereo and 5.1 (L R C LFE Ls Rs) are chosen from the channel count, any other layout needs `--layout` (a name, or weights such as `1,1,1,0,1.41,1.41`).
 
 ## Commands
 
@@ -44,7 +44,7 @@ If the gain needed would put the true peak over the ceiling, `--on-ceiling refus
 
 ## What the tests assert
 
-`tests/studies/test_loudness.py`: standard coefficient table at 48 kHz and the response shape at five rates; the EBU stereo 1 kHz -23 dBFS case reads -23.0; the closed form for a sine; mono is 3 LU under the same stereo; level independence across 32, 44.1, 48 and 96 kHz; a gain moves loudness, true peak and range by exactly the gain; the absolute and relative gates (each fails if disabled); 5.1 weights and LFE exclusion; a between-samples peak found by oversampling (sample peak -3.01, true peak 0 dBTP); loudness range of steady, two-level and gated programmes; spec checks reporting every failure and refusing malformed specs; gain planning (reach, refuse, cap); and agreement with FFmpeg's `ebur128` on invented stereo programme (integrated within 0.05 LU, range within 0.6 LU, true peak within 0.2 dB).
+`tests/studies/test_loudness.py`: standard coefficient table at 48 kHz and the response shape at five rates; the EBU stereo 1 kHz -23 dBFS case reads -23.0; the closed form for a sine; mono is 3 LU under the same stereo; level independence across 32, 44.1, 48 and 96 kHz; a gain moves loudness, true peak and range by exactly the gain; the absolute and relative gates (a test fails when either is disabled); 5.1 weights and LFE exclusion; a between-samples peak found by oversampling (sample peak -3.01, true peak 0 dBTP); loudness range of steady, two-level and gated programmes; spec checks reporting every failure and refusing malformed specs; gain planning (reach, refuse, cap); and agreement with FFmpeg's `ebur128` on invented stereo programme (integrated within 0.05 LU, range within 0.6 LU, true peak within 0.2 dB).
 
 `tests/test_loudness_cli.py`: every sub-command's exit status, the three WAV formats, written-file measurement, refusal and cap with no file written on refusal, clipping refusal, bad input, determinism of the demo.
 
