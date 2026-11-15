@@ -196,7 +196,9 @@ test('round trip: the rack reports its state, the Python module sets the paramet
     const reports = new OscFeedback().collect(view, {full: true});
     const out = probe({module: moduleSource, contract: spec.contract, reports, edits: []});
     assert.ok(out.understood.every(Boolean), `${label}: some rack report was not understood`);
-    assert.deepEqual(out.echoed, [], `${label}: applying the rack's own report must not send anything back`);
+    // the only thing a rack may say back is its declared latency, once, when it hears the count
+    const latency = spec.contract.latency.seconds > 0 ? [{address: spec.contract.latency.address, args: [spec.contract.latency.seconds]}] : [];
+    assert.deepEqual(out.echoed, latency, `${label}: applying the rack's own report must not send anything back but its latency`);
     for (const node of spec.contract.nodes) for (const control of node.controls) {
       const got = out.params[`${node.comp}|${control.par}`], want = view.current(node.id, control.path);
       if (control.kind === 'toggle') assert.equal(Boolean(got), Boolean(want), `${label} ${node.id}.${control.path}`);

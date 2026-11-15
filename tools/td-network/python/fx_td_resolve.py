@@ -134,24 +134,96 @@ def resolve_node(spec, base, time, control=0.0, others_soloed=None):
             value = evaluate_lane(lane, time, value)
         result['params'][key] = _bounded(spec, path, event_value(events, path, time, value))
         modulate(path)
+    # a look-ahead buffer of finite depth can only serve a parameter up to its latency (latency.mjs, LIMITED)
+    for key, limit in (spec.get('limits') or {}).items():
+        if key in result['params']:
+            result['params'][key] = min(result['params'][key], limit)
     result['solo'] = bool(event_value(events, 'solo', time, base['solo']))
     result['bypass'] = bool(event_value(events, 'bypass', time, base['bypass']))
     return result
+
+
+def _js_round_int(value):
+    return int(_round(value))
+
+
+def reverse_source_time(t, span, pivot, speed, mode, duration):
+    """audio-engine.mjs reverseSourceTime for the picture (no per-sample offset): the source time the interval playing backward
+    reads at output time `t`; route mode (1) reads the running time."""
+    if _js_round_int(mode) == 1:
+        return t
+    span, speed = max(1e-5, span), max(1e-5, speed)
+    start = pivot + math.floor((t - pivot) / span) * span
+    left, right = max(0.0, start), min(duration, start + span)
+    if not right > left:
+        return t
+    return right - ((t - left) * speed) % (right - left) - 1e-7
+
+
+def stutter_read(t, capture, window, rate, gap, repeats):
+    """audio-engine.mjs stutterSourceTime, with the gap named: ('live', t) outside the stutter, ('gap', None) between repeats,
+    ('repeat', source time) while a repeat plays."""
+    window, rate, gap = max(1e-5, window), max(1e-5, rate), max(0.0, gap)
+    repeats = max(1, _js_round_int(repeats))
+    period = window / rate + gap
+    elapsed = t - capture
+    if elapsed < 0 or elapsed >= repeats * period:
+        return ('live', t)
+    phase = elapsed % period
+    return ('gap', None) if phase >= window / rate else ('repeat', capture + phase * rate)
+
+
+def derived_rows(node_type, block, params, clock):
+    """The extra `resolved` rows of a processor behind a look-ahead buffer, from its resolved parameters at its own clock.
+    `depth` is how many seconds behind the live edge of its input (which runs `lookahead` seconds ahead of the clock) the
+    frame to show was cached; it is never negative (a read the buffer cannot cover shows the newest frame).
+    Reverse: depth, shift (route mode: the picture's slide, a fraction of the width). Stutter: pick (0 running picture, 1 repeat,
+    2 gap), depth, record (1 while the repeat cache takes frames)."""
+    lookahead = block.get('lookahead', 0.0)
+    live_edge = clock + lookahead
+    if node_type == 'reverse':
+        if _js_round_int(params['mode']) == 1:
+            span = params['span']
+            fraction = ((clock * params['speed']) % max(0.15, span)) / span
+            return [['depth', lookahead], ['shift', (1 - 2 * fraction) * 0.75]]
+        source = reverse_source_time(clock, params['span'], params['pivot'], params['speed'], params['mode'], block['duration'])
+        return [['depth', max(0.0, live_edge - source)], ['shift', 0.0]]
+    if node_type == 'stutter':
+        kind, source = stutter_read(clock, params['capture'], params['window'], params['rate'], params['gap'], params['repeats'])
+        window = max(1e-5, params['window'])
+        period = window / max(1e-5, params['rate']) + max(0.0, params['gap'])
+        run = max(1, _js_round_int(params['repeats'])) * period
+        # the cache stops once the captured window has arrived and stays still while any repeat can still read it
+        frozen = params['capture'] + window <= live_edge < params['capture'] + run + lookahead
+        newest = params['capture'] + window if frozen else live_edge   # the newest source time in the repeat cache
+        pick = {'live': 0, 'repeat': 1, 'gap': 2}[kind]
+        depth = lookahead if kind == 'live' else (0.0 if source is None else max(0.0, newest - source))
+        return [['pick', pick], ['depth', depth], ['record', 0 if frozen else 1]]
+    return []
 
 
 def resolve_rack(contract, bases, time, controls=None):
     """Resolve every processor of the rack and apply the rack-scoped Solo: when any processor is soloed, the others
     are inactive and therefore bypassed. `bases` and `controls` are keyed by processor id."""
     controls = controls or {}
-    partial = {node['id']: resolve_node(node['resolve'], bases[node['id']], time, controls.get(node['id'], 0.0)) for node in contract['nodes']}
-    solo_exists = any(item['solo'] for item in partial.values())
+    if not _finite(time):
+        raise ValueError('resolve time must be finite')
+    # a processor behind a look-ahead buffer evaluates at its own clock: the rack time minus the lag of what it emits
+    clocks = {node['id']: max(0.0, time - node['resolve'].get('lag', 0.0)) for node in contract['nodes']}
+    partial = {node['id']: resolve_node(node['resolve'], bases[node['id']], clocks[node['id']], controls.get(node['id'], 0.0)) for node in contract['nodes']}
     out = {}
     for node in contract['nodes']:
         item = partial[node['id']]
         scope = node['resolve'].get('scope') or {}
-        outside = scope.get('type') == 'clip' and (time < scope['start'] or time >= scope['end'])
+        clock = clocks[node['id']]
+        # Solo is rack-scoped at the instant being rendered: any processor soloed at this processor's own clock (behind a look-ahead buffer
+        # the clocks differ), as the workbench's evaluatedNode asks
+        solo_exists = any(bool(event_value(other['resolve']['events'], 'solo', clock, bases[other['id']]['solo'])) for other in contract['nodes'])
+        outside = scope.get('type') == 'clip' and (clock < scope['start'] or clock >= scope['end'])
         active = not outside and (not solo_exists or item['solo'])
-        out[node['id']] = {**item, 'active': active, 'bypass': item['bypass'] or not active}
+        out[node['id']] = {**item, 'active': active, 'bypass': item['bypass'] or not active, 'clock': clock}
+        if node['resolve'].get('lag', 0.0) > 0:
+            out[node['id']]['derived'] = [['clock', clock]] + (derived_rows(node['type'], node['resolve'], item['params'], clock) if node['resolve'].get('lookahead', 0.0) > 0 else [])
     return out
 
 
@@ -168,6 +240,7 @@ def resolved_rows(spec, resolved, epoch=0.0):
     rows += [['param.' + key, resolved['params'][key]] for key in spec['order']]
     if has_epoch(spec):
         rows.append(['epoch', epoch])
+    rows += [list(row) for row in resolved.get('derived', [])]
     return rows
 
 
@@ -360,7 +433,7 @@ def tick(rack):
             held = _LATCH.get(key)
             if held is None or held[0] != base:
                 held = _LATCH[key] = (json.loads(json.dumps(base)), EpochLatch(node['resolve'], base, picture_fps(contract)))
-            epoch = held[1].at(time, controls[node['id']])
+            epoch = held[1].at(resolved[node['id']]['clock'], controls[node['id']])
         rows = resolved_rows(node['resolve'], resolved[node['id']], epoch)
         if _LAST.get(key) == rows:
             continue

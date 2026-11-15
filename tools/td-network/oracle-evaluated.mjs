@@ -29,7 +29,9 @@ for (const node of processors) {
 const cases = [...times].sort((a, b) => a - b).flatMap((time, index) => [0, 0.37, 1].map((envelope, slot) => {
   const controls = Object.fromEntries(processors.map((node, i) => [node.id, [0, 0.37, 1][(index + slot + i) % 3]]));
   const evaluated = Object.fromEntries(processors.map(node => {
-    const value = evaluatedNode(node, time, patch, controls[node.id]);
+    // a processor behind a look-ahead buffer is evaluated at its own clock, the rack time minus the lag of what it emits
+    const lag = spec.contract.nodes.find(item => item.id === node.id).resolve.lag ?? 0;
+    const value = evaluatedNode(node, Math.max(0, time - lag), patch, controls[node.id]);
     return [node.id, {intensity: value.intensity, wet: value.wet, params: value.params, solo: value.solo, bypass: value.bypass, active: value.active}];
   }));
   return {time, controls, evaluated};
