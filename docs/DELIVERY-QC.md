@@ -23,14 +23,14 @@ Deterministic JSON (no clock, no host): `schema`, `spec`, `status` (`pass` or `f
 | `timebase.burnin_segments` | burn-in background segments tile the edit |
 | `timebase.shot_lengths` | per shot: the suggested plan's frames are the edit length and the ledger's scene frames; render frames are the plan range plus its handles; the colour plate layer is the shot's edit range |
 | `timebase.set_caches` | each cache named by a shot exists in the set spec and covers the shot's render frames **including handles**; the plan's set block lists the same caches. The set spec has no frame rate of its own, so its frame numbers are read at the plan's rate |
-| `timebase.timecode` | shot boundaries convert to non-drop `HH:MM:SS:FF` and back (the label uses the nominal integer rate; the exact rate is recorded); every SRT stamp converts to the frame the caption and burn-in reports record; the WebVTT stamps stand for the same frames |
+| `timebase.timecode` | shot boundaries convert to non-drop `HH:MM:SS:FF` and back (the label uses the nominal integer rate; the exact rate is recorded); every SRT stamp converts to the frame the caption and burn-in reports record; the WebVTT stamps stand for the same frames and its text equals the SRT's |
 | `captions.inside_dialogue` | every cue lies inside one dialogue-active span of the **delivered WAV**, within `span_tolerance_frames` |
 | `captions.covers_dialogue` | every dialogue-active span, found by the placement detector and by the independent detector, is covered by cues to at least `independent_overlap_min` (0.75): a spoken line with its cue deleted fails, even when every hash, report and the burn-in are re-derived |
 | `captions.placement_independent` | every cue lies at least `independent_overlap_min` inside speech heard by the independent detector (below), with a fixed two-frame tolerance a spec cannot widen |
 | `captions.max_length` | no cue is longer than `max_cue_frames` |
 | `captions.reading_rate` | no cue reads faster than `max_cps` characters per second, measured from the SRT file (line breaks not counted) |
 | `captions.inside_edit` | cues are ordered, do not overlap and lie inside the edit |
-| `captions.burned_frames` | the frames whose pixels differ from a caption-less render of the same background are exactly the frames the cues name |
+| `captions.burned_frames` | the frames whose pixels differ from a caption-less render of the same background are exactly the frames the cues name, and every frame equals a re-render of the SRT's text (other text on the right frames fails; a caption the renderer cannot draw fails instead of raising) |
 | `audio.within_edit` | the delivered dialogue is not longer than the edit |
 | `loudness.spec` | the delivered WAV, measured again here (BS.1770-4), meets the spec recorded in the delivery report; deviation from target and true-peak headroom are reported |
 | `loudness.report_agreement` | the new measurement matches the delivery report's (`report_tolerance`, default 0.01) and the report describes the delivered file |
