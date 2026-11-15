@@ -75,5 +75,11 @@ def silent_launch(engine: Any, **kwargs: Any) -> Any:
 
 
 def silent_launch_persistent_context(engine: Any, user_data_dir: str, **kwargs: Any) -> Any:
+    """A persistent context is created with its first page already open, so that page's document is silenced by
+    running the init script in it now; every later document and navigation gets it from the context."""
     kwargs['args'] = silent_args(engine.name, kwargs.get('args'))
-    return silence_context(engine.launch_persistent_context(user_data_dir, **kwargs))
+    context = silence_context(engine.launch_persistent_context(user_data_dir, **kwargs))
+    script = init_script()
+    for page in context.pages:
+        page.evaluate(script)
+    return context

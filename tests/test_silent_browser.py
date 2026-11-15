@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import unittest
 import wave
 from pathlib import Path
@@ -53,12 +54,17 @@ class FakeEngine:
 
     def launch_persistent_context(self, user_data_dir, **kwargs):
         self.launched = {'user_data_dir': user_data_dir, **kwargs}
-        return FakeContext()
+        context = FakeContext()
+        context.pages.append(FakePage(context))  # a persistent context opens its first page itself
+        return context
 
 
 class FakePage:
     def __init__(self, context):
-        self.context, self.closed = context, False
+        self.context, self.closed, self.evaluated = context, False, []
+
+    def evaluate(self, script):
+        self.evaluated.append(script)
 
     def close(self, **kwargs):
         self.closed = True
@@ -130,6 +136,7 @@ class SilentLaunchContractTests(unittest.TestCase):
         context = silent_launch_persistent_context(engine, '/profile', args=['--no-sandbox'])
         self.assertEqual(engine.launched['args'], ['--no-sandbox', '--mute-audio'])
         self.assertEqual(len(context.scripts), 1)
+        self.assertEqual(context.pages[0].evaluated, [init_script()], 'the page already open gets the script run in it')
 
     def test_init_script_is_nonempty_and_has_no_device_output_path(self):
         script = init_script()
@@ -196,6 +203,19 @@ class SilentBrowserPageTests(unittest.TestCase):
         self.assertTrue(blank.evaluate('typeof window.__SILENT_BROWSER__ === "object"'))
         blank.set_content('<audio id="a"></audio>')
         self.assertTrue(blank.evaluate('window.__SILENT_BROWSER__.native(document.querySelector("#a")).muted === true'))
+
+    def test_the_first_page_of_a_persistent_context_is_silenced_before_the_caller_writes_into_it(self):
+        engine = getattr(self.pw, self.engine_name)
+        options = (browser_options() if self.engine_name == 'chromium' else {})
+        with tempfile.TemporaryDirectory() as profile:
+            context = silent_launch_persistent_context(engine, profile, headless=True, args=['--no-sandbox'], **options)
+            try:
+                first = context.pages[0]
+                self.assertTrue(first.evaluate('typeof window.__SILENT_BROWSER__ === "object"'))
+                first.set_content('<audio id="a" autoplay loop></audio>')
+                self.assertEqual(first.evaluate('window.__SILENT_BROWSER__.native(document.querySelector("#a"))'), {'muted': True, 'volume': 0})
+            finally:
+                context.close()
 
     def test_init_script_ran_in_the_page_and_in_a_nested_frame(self):
         self.assertTrue(self.page.evaluate('typeof window.__SILENT_BROWSER__ === "object"'))

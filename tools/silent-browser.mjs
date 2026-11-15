@@ -43,8 +43,12 @@ async function silentLaunch(engine, options = {}) {
   return silenceBrowser(await engine.launch({...options, args: silentArgs(engineName(engine), options.args)}));
 }
 
+// A persistent context is created with its first page already open, so that page's document is silenced by running
+// the init script in it now; every later document and navigation gets it from the context.
 async function silentLaunchPersistentContext(engine, userDataDir, options = {}) {
-  return silenceContext(await engine.launchPersistentContext(userDataDir, {...options, args: silentArgs(engineName(engine), options.args)}));
+  const context = await silenceContext(await engine.launchPersistentContext(userDataDir, {...options, args: silentArgs(engineName(engine), options.args)}));
+  for (const page of context.pages()) await page.evaluate(initScript());
+  return context;
 }
 
 export {INIT_SCRIPT_PATH, MUTE_ARGS, initScript, silentArgs, silenceContext, silenceBrowser, silentLaunch, silentLaunchPersistentContext};
