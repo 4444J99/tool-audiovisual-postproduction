@@ -59,7 +59,7 @@ python3 -m http.server 8765 --bind 127.0.0.1                 # terminal 2, repos
 node tools/fx-td-simulator.mjs outputs/bridge-e2e.json       # terminal 3: waits for the page to link
 ```
 
-Open `http://127.0.0.1:8765/web/fx/index.html`, then **Control > TouchDesigner (OSC) > Connect bridge**. The simulator
+Open `http://127.0.0.1:8765/web/fx/index.html?patch=closed-inbox` (a fresh page otherwise loads `message-impact`, whose processors differ from the network's), then **Control > TouchDesigner (OSC) > Connect bridge**. The simulator
 asks for the rack state until the page answers, then sends knob 0, switch 0 and transport loop (each to a value different from the one the rack reported, since a repeat is an echo, not an edit), then an unknown address, a wrong argument type and an unknown node id, and
 checks what the rack reports back. It exits 0 only when every check passes. The synthetic pack carries the source
 identity the factory patches bind to, so it is a local fixture: never publish or commit it.
@@ -337,12 +337,16 @@ no-TouchDesigner procedure above.
    `td_contract` Text DATs, and `video_out` / `audio_out` Nulls. Check no operator is red (error) or yellow (warning),
    and that `fx_source` shows the clip on its picture output.
 5. Confirm the menu tokens the network sets but that the parameter reference does not list (the only values not verified
-   against the application): `chopop` = `add` on the Math CHOPs (`mixin_*`, `blend_audio`, `dly_sum`, `fz_sum`);
-   `inputfiltertype` = `nearest` on the two operators set in `tools/td-network/effects.mjs` (lines 47 and 52);
-   and that the Delay and Lag CHOPs' unit menus read seconds by default (the expressions assume seconds). A wrong token
-   shows as a parameter error on that operator; note the token the menu actually offers.
+   against the application). In this `closed-inbox` network: `chopop` = `add` on `mixin_*` and `blend_audio`. The remaining
+   tokens live in other fixtures, so build each as a separate component, one at a time (rerun step 3 with the
+   `--out outputs/td-<name>` build file; a build replaces a component of the same name, so set `FX_PARENT` to a fresh
+   container or rename with `--root-name`): `web/fx/fixtures/demo-damage.json` for `inputfiltertype` = `nearest` on
+   `dmg_small` and `dmg_full` (Fit TOPs, `tools/td-network/effects.mjs` lines 46 to 51); `demo-delay.json` for `chopop` =
+   `add` on `dly_sum`; `demo-freeze.json` for `chopop` = `add` on `fz_sum`. Also confirm the Delay and Lag CHOPs' unit menus
+   read seconds by default (the expressions assume seconds). A wrong token shows as a parameter error on that operator;
+   note the token the menu actually offers.
 6. Start the bridge in a terminal: `node tools/fx-td-bridge.mjs`. In a browser open
-   `http://127.0.0.1:8765/web/fx/index.html`, then **Control > TouchDesigner (OSC) > Connect bridge**. The bridge prints
+   `http://127.0.0.1:8765/web/fx/index.html?patch=closed-inbox` (a fresh page otherwise loads `message-impact`, whose processors differ from the network's), then **Control > TouchDesigner (OSC) > Connect bridge**. The bridge prints
    only connection lines (`[fx-bridge]`), not OSC messages. In TouchDesigner, `osc_in` should listen on 7000 and
    `osc_out` target 7001 (see their parameters).
 7. Rack to TouchDesigner: the page reports its state on connect. Look for: rows arriving in the `osc_in` DAT
