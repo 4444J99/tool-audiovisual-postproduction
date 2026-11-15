@@ -121,5 +121,26 @@ class Mp4ContentTests(unittest.TestCase):
         self.verify_names(out, "mp4.chroma_flat")
 
 
+class AlignedSnrTests(unittest.TestCase):
+    """CodeRabbit on this PR: a decoded track that is a little longer than the dialogue but shorter than dialogue plus lag must fail, not raise."""
+
+    def test_a_shifted_track_cut_short_gives_a_number_not_an_exception(self):
+        reference = np.random.default_rng(3).standard_normal(8000)
+        heard = np.concatenate([np.zeros(100), reference[:7950]])  # best lag 100; heard[100:100 + n] would be 7950 long
+        snr = demo.aligned_snr_db(heard, reference)
+        self.assertTrue(np.isfinite(snr))
+        self.assertLess(snr, demo.AUDIO_MIN_SNR_DB)
+
+    def test_an_exact_copy_and_a_delayed_copy_align(self):
+        reference = np.random.default_rng(4).standard_normal(8000)
+        self.assertEqual(demo.aligned_snr_db(np.concatenate([reference, np.zeros(10)]), reference), float("inf"))
+        self.assertEqual(demo.aligned_snr_db(np.concatenate([np.zeros(300), reference, np.zeros(10)]), reference), float("inf"))
+
+    def test_noise_and_too_short_audio_fail(self):
+        reference = np.random.default_rng(5).standard_normal(8000)
+        self.assertLess(demo.aligned_snr_db(np.random.default_rng(6).standard_normal(9000), reference), demo.AUDIO_MIN_SNR_DB)
+        self.assertEqual(demo.aligned_snr_db(reference[:100], reference), float("-inf"))
+
+
 if __name__ == "__main__":
     unittest.main()
