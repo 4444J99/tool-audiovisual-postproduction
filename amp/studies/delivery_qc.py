@@ -233,7 +233,7 @@ def _derive(root: Path, locations: Mapping[str, str], spec: Mapping[str, Any] | 
         and shots[-1]["edit_out"] == total and all(s["edit_out"] > s["edit_in"] for s in shots)
     checks.append(_check("timebase.edit_contiguous", contiguous, "shots tile the edit from frame 0 to the ledger's total with no gap or overlap",
                          total_frames=total, shots=[[s["id"], s["edit_in"], s["edit_out"]] for s in shots]))
-    seconds_ok = Fraction(str(ledger["total_seconds"])).limit_denominator(1000) == Fraction(total) / fps
+    seconds_ok = abs(float(ledger["total_seconds"]) - float(Fraction(total) / fps)) <= 0.00005 + 1e-9   # the ledger rounds to four decimals
     width, height = burn_report["params"]["geometry"]["width"], burn_report["params"]["geometry"]["height"]
     lengths = {"final-ledger": total, "layer-plan": colour["comp"]["frames"], "burnin-report": burn_report["params"]["frames"],
                "burnin-frames": len(files["burnin-frames"]) // (width * height) if len(files["burnin-frames"]) % (width * height) == 0 else -1}

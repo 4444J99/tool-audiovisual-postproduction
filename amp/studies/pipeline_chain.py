@@ -169,6 +169,7 @@ def colour_plan(ledger: Mapping[str, Any], graph_sha256: str, audio_sha256: str,
 # The broadcast preset with a 0.4 s minimum: the invented dialogue's shortest speech span is under half a second.
 CAPTION_SPEC = {**cap.PRESETS["broadcast"], "name": "broadcast-short", "min_duration_s": 0.4}
 # One short invented sentence per dialogue-active span, in order; the QC stage judges them against the audio.
+CAPTION_VAD = dict(qc.DEFAULT_SPEC["vad"])
 CAPTION_SENTENCES = ("Hello now.", "Steady.", "Welcome back.", "Go on.")
 BURNIN_GEOMETRY = {"width": 240, "height": 48}
 
@@ -332,9 +333,10 @@ def run_chain(out: Path, *, seed: int = 0, delivery: str | Mapping[str, Any] = D
 
     # 7. captions laid out on the edit's frame grid, then burned into synthetic frames, one background segment per shot
     rate_d, heard_d = qc.read_wav16((out / LOCATIONS["dialogue-delivered"]).read_bytes())
-    spans = [(a / rate_d, b / rate_d) for a, b in qc.dialogue_spans(heard_d, rate_d, qc_spec["vad"])]
+    # Fixed detector and reading rate, not the QC spec's: a QC spec only changes the judgement, never the artefacts judged.
+    spans = [(a / rate_d, b / rate_d) for a, b in qc.dialogue_spans(heard_d, rate_d, CAPTION_VAD)]
     try:
-        words = cap.words_in_spans(CAPTION_SENTENCES, spans, qc_spec["max_cps"])
+        words = cap.words_in_spans(CAPTION_SENTENCES, spans, CAPTION_SPEC["max_cps"])
     except cap.CaptionError as error:
         raise ChainError([f"captions: {e}" for e in error.errors]) from error
     built = cap.build(words, ledger["fps"], CAPTION_SPEC)
@@ -349,7 +351,7 @@ def run_chain(out: Path, *, seed: int = 0, delivery: str | Mapping[str, Any] = D
     stage("captions", {"dialogue-delivered": delivered_h, "final-ledger": ledger_h},
           {"captions-srt": sha256_bytes(srt_bytes), "captions-vtt": sha256_bytes(vtt_bytes), "captions-report": caption_report_h},
           cues=len(built["cues"]), spec_name=built["spec"]["name"], fps=built["fps"], last_cue_end_frame=built["cues"][-1]["end"],
-          dialogue_spans=len(spans),
+          dialogue_spans=len(spans), vad=dict(CAPTION_VAD), max_cps=CAPTION_SPEC["max_cps"],
           source="invented sentences laid into the dialogue-active spans measured on the delivered WAV; not a transcript of the dialogue stand-in")
     payload, burn_report = cb.burn(built["srt"], ledger["fps"], ledger["total_frames"], BURNIN_GEOMETRY, burnin_segments(ledger, summary["graph_sha256"]))
     (out / LOCATIONS["burnin-frames"]).write_bytes(payload)
