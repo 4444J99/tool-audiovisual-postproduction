@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = """
 import {VisualEngine} from './web/fx/visual-engine.mjs';
 import {CATALOG_BY_TYPE} from './web/fx/catalog.mjs';
-const W = 640, H = 360, SEED = __SEED__;
+const W = __W__, H = __H__, SEED = __SEED__;
 const calls = [];
 const context = () => {
   let m = [1, 0, 0, 1, 0, 0]; const stack = [];
@@ -44,8 +44,8 @@ const canvas = () => { const c = context(); return {width: W, height: H, getCont
 const engine = new VisualEngine({duration: 12.166666667, fps: 12}, {}, {width: W, height: H, createCanvas: canvas});
 engine.patch = {seed: SEED, nodes: [], connections: []};
 const out = [];
-for (const tiles of [2, 5, 7, 14, 24]) for (const size of [0.015, 0.07, 0.5]) for (const scatter of [0, 0.7, 2]) for (const spatial of [0, 0.95, 1]) for (const order of [0, 1])
-  for (const t of [0, 0.31, 2.6, 7.4]) {
+for (const tiles of __TILES__) for (const size of __SIZES__) for (const scatter of [0, 0.7, 2]) for (const spatial of [0, 0.95, 1]) for (const order of [0, 1])
+  for (const t of __TIMES__) {
     const p = {size, density: 30, scatter, pitch: 7, spatial, tiles, order};
     calls.length = 0; engine.poolIndex = 0;
     engine.effect({id: 'fx-1', type: 'granular', params: p}, t, 'picture', time => ({time}));
@@ -68,10 +68,7 @@ class GranularTests(unittest.TestCase):
     def setUpClass(cls):
         cls.spec = spec_for(single_patch("granular"))
         # the engine adds the node id's character codes to the patch seed itself
-        result = subprocess.run(["node", "--input-type=module", "-e", SCRIPT.replace("__SEED__", str(cls.spec["patch"]["seed"]))], capture_output=True, text=True, cwd=ROOT, check=False)
-        if result.returncode != 0:
-            raise AssertionError(result.stderr)
-        cls.data = json.loads(result.stdout)
+        cls.data = cls.engine(640, 360, [2, 5, 7, 14, 24], [0.015, 0.07, 0.5], [0, 0.31, 2.6, 7.4])
         cls.chain = {o["name"]: o for o in cls.spec["operators"] if o["parent"] == "fx_fx_1" and o["name"].startswith("gr_")}
         cls.module = Module(cls.chain["gr_math"]["text"])
         original = effects.Comp.op
@@ -82,6 +79,14 @@ class GranularTests(unittest.TestCase):
                 return type("Op", (), {"module": cls.module})()
             return original(comp, name)
         effects.Comp.op = op
+
+    @classmethod
+    def engine(cls, width, height, tiles, sizes, times):
+        script = SCRIPT.replace("__SEED__", str(cls.spec["patch"]["seed"])).replace("__W__", str(width)).replace("__H__", str(height)).replace("__TILES__", json.dumps(tiles)).replace("__SIZES__", json.dumps(sizes)).replace("__TIMES__", json.dumps(times))
+        result = subprocess.run(["node", "--input-type=module", "-e", script], capture_output=True, text=True, cwd=ROOT, check=False)
+        if result.returncode != 0:
+            raise AssertionError(result.stderr)
+        return json.loads(result.stdout)
 
     @classmethod
     def tearDownClass(cls):
@@ -136,6 +141,45 @@ class GranularTests(unittest.TestCase):
         self.assertGreater(compared, 80000)
         self.assertGreater(scattered, 40000)
 
+    def test_a_square_picture_gets_a_tile_bank_that_holds_all_its_rows(self):
+        """Codex P2 on this pull request: the grid's rows follow the input's aspect, so the bank is sized for the declared picture."""
+        import tempfile
+        self.assertEqual(sum(1 for name in self.chain if name.startswith("gr_gain_")), 336)   # 16:9: 24 columns by 14 rows
+        directory = Path(tempfile.mkdtemp(prefix="td-gr-"))
+        banks = {}
+        for size, rows in (("1080x1080", 24), ("1080x1920", 43), ("1920x1080", 14)):
+            out = directory / size
+            result = subprocess.run(["node", str(ROOT / "tools" / "fx-td-network.mjs"), single_patch("granular"), "--out", str(out), "--picture-size", size], capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            spec = json.loads(next(out.glob("*.network.json")).read_text())
+            names = {o["name"] for o in spec["operators"] if o["name"].startswith("gr_gain_")}
+            banks[size] = (len(names), spec)
+            self.assertEqual(len(names), 24 * rows, size)
+        data = self.engine(360, 360, [3, 11, 24], [0.07], [0.31, 2.6])
+        spec = banks["1080x1080"][1]
+        chain = {o["name"]: o for o in spec["operators"] if o["parent"] == "fx_fx_1" and o["name"].startswith("gr_")}
+        original = effects.Sized.width, effects.Sized.height
+        effects.Sized.width = effects.Sized.height = 1080
+        try:
+            drawn = 0
+            for case in data["out"]:
+                p, t = case["p"], case["t"]
+                rows = self.rows(p, t)
+                cols = round(p["tiles"])
+                self.assertEqual(len(case["draws"]), cols * cols, case)   # square: as many rows as columns
+                for i, d in enumerate(case["draws"]):
+                    tile = chain["gr_tile_%d" % i]["pars"]
+                    self.assertAlmostEqual(evaluate(tile["tx"]["expr"], rows, t), d["cx"] / 360 - 0.5, places=9, msg=(i, case))
+                    self.assertAlmostEqual(evaluate(tile["ty"]["expr"], rows, t), -(d["cy"] / 360 - 0.5), places=9, msg=(i, case))
+                    self.assertEqual(evaluate(chain["gr_gain_%d" % i]["pars"]["opacity"]["expr"], rows, t), 1)
+                    drawn += 1
+                for i in range(cols * cols, 576):
+                    self.assertEqual(evaluate(chain["gr_gain_%d" % i]["pars"]["opacity"]["expr"], rows, t), 0)
+        finally:
+            effects.Sized.width, effects.Sized.height = original
+        self.assertGreater(drawn, 5000)
+        self.assertTrue(any("tile bank is 576 stages" in warning for warning in spec["warnings"]))
+
     def test_the_declared_look_ahead_covers_the_largest_scatter_and_every_bin_read(self):
         from tests.test_td_effects import catalog
         scatter = next(item for item in catalog("granular") if item["key"] == "scatter")["max"]
@@ -186,7 +230,7 @@ class GranularTests(unittest.TestCase):
     def test_the_spec_says_what_is_not_built(self):
         text = " ".join(self.spec["warnings"])
         self.assertIn("the voice grains are not built", text)
-        self.assertIn("336 tile stages", text)
+        self.assertIn("tile bank is 336 stages", text)
 
 
 if __name__ == "__main__":

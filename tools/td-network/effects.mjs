@@ -536,9 +536,10 @@ def tile(seed, i, time, table, width, height):
             'tx': cx / width - 0.5, 'ty': -(cy / height - 0.5), 'rotate': -math.degrees(turn)}
 `;
 
-/** The most tiles Granular draws: the catalog's largest Visual divisions across (24) by the rows that gives at the workbench's aspect (14 at 16:9), and its five time bins. */
+/** The most columns Granular draws (the catalog's largest Visual divisions) and its five time bins; the tile bank is that many columns by the rows the picture's aspect gives. */
 const MAX_COLS = 24;
-const MAX_TILES = MAX_COLS * 14;
+/** The rows the tile bank holds for a picture of the given size: the grid's own rule (`max(2, round(columns x H / W))`) at the most columns, 14 at 16:9. */
+export const granularBankRows = (width, height) => Math.max(2, Math.floor(MAX_COLS * height / width + 0.5));
 /** The catalog's largest Source time scatter, the most a bin can read ahead. */
 const MAX_SCATTER_SECONDS = 2;
 const BINS = 5;
@@ -557,6 +558,8 @@ function granular(add, ctx = {}) {
   const seed = ctx.seed ?? 1;
   const L = ctx.lookahead ?? 0;
   const history = L + Math.min(MAX_SCATTER_SECONDS, L);
+  const size = ctx.pictureSize ?? {width: 16, height: 9};
+  const bank = MAX_COLS * granularBankRows(size.width, size.height);
   const W = '{op:in_picture}.width', H = '{op:in_picture}.height';
   const M = '{op:gr_math}.module';
   const geometry = (i, key) => `${M}.tile(${seed}, ${i}, ${T}, {op:resolved}, ${W}, ${H})['${key}']`;
@@ -569,7 +572,7 @@ function granular(add, ctx = {}) {
     }
     add('gr_base', 'constantTOP', {pars: {colorr: 0, colorg: 0, colorb: 0, alpha: 0}});
     let below = 'gr_base';
-    for (let i = 0; i < MAX_TILES; i++) {
+    for (let i = 0; i < bank; i++) {
       add(`gr_crop_${i}`, 'cropTOP', {inputs: [`gr_bin_${i % BINS}`], pars: {
         cropleft: expr(geometry(i, 'left')), cropright: expr(`${geometry(i, 'left')} + ${geometry(i, 'w')}`),
         cropbottom: expr(`1 - ${geometry(i, 'top')} - ${geometry(i, 'h')}`), croptop: expr(`1 - ${geometry(i, 'top')}`),
@@ -584,7 +587,7 @@ function granular(add, ctx = {}) {
     }
     return below;
   };
-  return {picture, audioAlignedOnly: true, notes: ['granular: the voice grains are not built, and at 24 divisions the picture is 336 tile stages; a bin read before the start or after the end of the media shows the cache\'s oldest or newest frame (the workbench clamps the time); the Crop and Transform behaviours are the assumptions stated for Exchange.']};
+  return {picture, audioAlignedOnly: true, notes: [`granular: the voice grains are not built, and the tile bank is ${bank} stages (24 columns by the ${bank / MAX_COLS} rows a ${size.width}:${size.height} picture gives at 24 divisions; set it with --picture-size WxH, a taller picture than declared loses the rows beyond the bank); a bin read before the start or after the end of the media shows the cache\'s oldest or newest frame (the workbench clamps the time); the Crop and Transform behaviours are the assumptions stated for Exchange.`]};
 }
 
 /** The processors implemented by this version. A builder returns `shared` (optional, called first), `picture` and `audio`. */
