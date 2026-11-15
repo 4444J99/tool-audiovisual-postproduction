@@ -15,7 +15,7 @@ import unittest
 import wave
 from pathlib import Path
 
-from tools.silent_browser import (INIT_SCRIPT_PATH, MUTE_ARGS, init_script, silence_browser, silent_args, silent_launch,
+from tools.silent_browser import (INIT_SCRIPT_PATH, MUTE_ARGS, init_script, silence_browser, silence_context, silent_args, silent_launch,
                                   silent_launch_persistent_context)
 
 REPO = Path(__file__).resolve().parents[1]
@@ -171,7 +171,8 @@ class SilentBrowserPageTests(unittest.TestCase):
                                         **options)
         except Exception as error:
             cls.pw.stop()
-            if cls.engine_name == 'chromium' or os.environ.get('SILENT_BROWSER_REQUIRE_WEBKIT') == '1':
+            missing = "Executable doesn't exist" in str(error)
+            if cls.engine_name == 'chromium' or not missing or os.environ.get('SILENT_BROWSER_REQUIRE_WEBKIT') == '1':
                 raise  # a job that installs WebKit sets the variable: a missing WebKit there is a failure, never a skip
             raise unittest.SkipTest(f'{cls.engine_name} is not installed here: {str(error).splitlines()[0]}')
 
@@ -286,6 +287,59 @@ class SilentBrowserPageTests(unittest.TestCase):
         if result.get('skipped'):
             self.skipTest('speechSynthesis is not exposed by this engine')
         self.assertEqual(result['volume'], 0)
+
+    def test_realtime_connections_reach_the_native_connect_only_through_the_gain_zero_sink(self):
+        # A spy installed first sits underneath the silent init script, so it sees what the native connect is given.
+        spy = """(() => { const calls = []; window.__connectCalls = calls; const native = AudioNode.prototype.connect;
+          AudioNode.prototype.connect = function (target, ...rest) {
+            calls.push({from: this.constructor.name, to: target && target.constructor && target.constructor.name});
+            return native.call(this, target, ...rest);
+          }; })();"""
+        engine = getattr(self.pw, self.engine_name)
+        options = browser_options() if self.engine_name == 'chromium' else {}
+        raw = engine.launch(headless=True, args=silent_args(self.engine_name, ['--no-sandbox']), **options)
+        self.addCleanup(raw.close)
+        context = raw.new_context()
+        context.add_init_script(spy)
+        silence_context(context)
+        page = context.new_page()
+        page.goto('data:text/html,<title>x</title>')
+        seen = page.evaluate("""() => {
+          const Context = window.AudioContext || window.webkitAudioContext;
+          const ctx = new Context(), osc = ctx.createOscillator(), gain = ctx.createGain();
+          osc.connect(gain); gain.connect(ctx.destination);
+          const out = {calls: window.__connectCalls.slice(), sinkGain: window.__SILENT_BROWSER__.sink(ctx).gain.value};
+          ctx.close();
+          return out;
+        }""")
+        to_destination = [call for call in seen['calls'] if call['to'] == 'AudioDestinationNode']
+        self.assertEqual(to_destination, [{'from': 'GainNode', 'to': 'AudioDestinationNode'}], 'only the sink itself reaches the device node')
+        self.assertEqual(seen['sinkGain'], 0)
+        self.assertIn({'from': 'GainNode', 'to': 'GainNode'}, seen['calls'], 'the app node was routed into the sink')
+
+    def test_pinned_elements_announce_volume_changes_keep_the_range_check_and_shadow_roots_are_covered(self):
+        result = self.page.evaluate("""async () => {
+          const el = document.querySelector('#parsed');
+          const events = []; el.addEventListener('volumechange', () => events.push([el.muted, el.volume]));
+          el.volume = 0.5; el.volume = 0.5; el.muted = true; el.muted = true;
+          let thrown = null; try { el.volume = 3; } catch (error) { thrown = error.name; }
+          const afterThrow = {asked: el.volume, native: window.__SILENT_BROWSER__.native(el)};
+          const host = document.createElement('div'); document.body.append(host);
+          const open = host.attachShadow({mode: 'open'});
+          open.innerHTML = `<audio id="in_shadow" loop src="${el.src}"></audio>`;
+          await new Promise(resolve => setTimeout(resolve, 0));
+          const closedHost = document.createElement('div'); document.body.append(closedHost);
+          const closed = closedHost.attachShadow({mode: 'closed'});
+          closed.innerHTML = `<video id="in_closed" loop src="${el.src}"></video>`;
+          await new Promise(resolve => setTimeout(resolve, 0));
+          return {events, thrown, afterThrow, shadowNative: window.__SILENT_BROWSER__.native(open.querySelector('#in_shadow')),
+                  closedNative: window.__SILENT_BROWSER__.native(closed.querySelector('#in_closed'))};
+        }""")
+        self.assertEqual(result['events'], [[False, 0.5], [True, 0.5]], 'one event per change the app made, none for a repeated value')
+        self.assertEqual(result['thrown'], 'IndexSizeError')
+        self.assertEqual(result['afterThrow'], {'asked': 0.5, 'native': {'muted': True, 'volume': 0}})
+        self.assertEqual(result['shadowNative'], {'muted': True, 'volume': 0})
+        self.assertEqual(result['closedNative'], {'muted': True, 'volume': 0})
 
 
 class SilentBrowserWebKitTests(SilentBrowserPageTests):

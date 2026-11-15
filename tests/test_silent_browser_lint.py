@@ -15,14 +15,6 @@ ROOT = Path(__file__).resolve().parents[1]
 SKIP_DIRS = {'.git', 'node_modules', '.venv', 'venv', '__pycache__'}
 EXEMPT = {'tools/silent_browser.py', 'tools/silent-browser.mjs', 'tests/test_silent_browser.py',
           'tests/test_silent_browser_lint.py', 'tests/silent-browser.test.mjs'}
-LAUNCHERS = {'launch', 'launch_persistent_context', 'launch_server', 'connect_over_cdp',
-             'launchPersistentContext', 'launchServer', 'connectOverCDP'}
-ENGINES = {'chromium', 'webkit', 'firefox', 'browser_type', 'engine', 'browserType'}
-JS_CALL = re.compile(r'(?<![\w$])(?P<owner>[\w$.]*?)\b(?:launch|launchPersistentContext|launchServer|connectOverCDP)\s*\(')
-JS_OWNER = re.compile(r'(?:^|\.)(?:chromium|webkit|firefox|electron|_electron|browserType|browser_type|engine)$')
-JS_DIRECT = re.compile(r'\b(?:chromium|webkit|firefox)\s*\.\s*launch\b|\bpuppeteer\b\s*\.\s*launch|(?:require\(|from\s+)[\'"]puppeteer')
-
-
 def files(suffixes):
     for path in sorted(ROOT.rglob('*')):
         parts = set(path.relative_to(ROOT).parts)
@@ -33,28 +25,64 @@ def files(suffixes):
             yield path, relative
 
 
+ENGINE_NAMES = {'chromium', 'webkit', 'firefox', '_electron', 'electron', 'browserType', 'browser_type', 'engine'}
+PLAYWRIGHT_ENGINES = {'chromium', 'webkit', 'firefox'}
+PY_LAUNCHERS = {'launch', 'launch_persistent_context', 'launch_server', 'connect_over_cdp'}
+NAMES = 'launch|launchPersistentContext|launchServer|connectOverCDP'
+# obj.launch(, obj\n  .launch(, obj['launch'](, and a launch pulled out by destructuring or bound for later.
+JS_CALL = re.compile(rf"(?P<owner>[\w$.\]\[]*?[\w$\]])\s*\.\s*(?:{NAMES})\b|(?P<owner2>[\w$]+)\s*\[\s*['\"](?:{NAMES})['\"]\s*\]")
+JS_DESTRUCTURED = re.compile(rf"\{{[^}}]*\b(?:{NAMES})\b[^}}]*\}}\s*=\s*[\w$.\]\[]*?(?:chromium|webkit|firefox|browserType|engine)\b")
+# A Playwright engine under another name: const runner = chromium; const {chromium: runner} = require('playwright');
+JS_ALIAS_ASSIGN = re.compile(r"([\w$]+)\s*=\s*(?:[\w$.()'\"\[\]]*?\.)?(?:chromium|webkit|firefox)\b(?!\s*\.\s*launch)")
+JS_ALIAS_DESTRUCTURE = re.compile(r"\b(?:chromium|webkit|firefox)\s*:\s*([\w$]+)")
+# Names such as ``engine`` are Playwright browser types only in a file that deals with a browser driver; application code
+# has its own ``engine.launch(...)``.
+DRIVER_FILE = re.compile(r"playwright|puppeteer|chromium|firefox|browserType|browser_type|\bwebkit\s*[.,)]", re.I)
+JS_PUPPETEER = re.compile(r"\bpuppeteer\b\s*\.\s*launch|(?:require\(|from\s+)['\"]puppeteer")
+
+
 def python_launches(source: str, name: str):
+    """Playwright launches in Python: ``p.chromium.launch()``, an alias of an engine, ``getattr(p, name).launch()``."""
+    tree = ast.parse(source, name)
+    aliases = set(ENGINE_NAMES if DRIVER_FILE.search(source) else PLAYWRIGHT_ENGINES)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and isinstance(node.value, (ast.Attribute, ast.Name)):
+            label = node.value.attr if isinstance(node.value, ast.Attribute) else node.value.id
+            if label in PLAYWRIGHT_ENGINES:
+                aliases.update(target.id for target in node.targets if isinstance(target, ast.Name))
     found = []
-    for node in ast.walk(ast.parse(source, name)):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in LAUNCHERS):
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in PY_LAUNCHERS):
             continue
         owner = node.func.value
         label = owner.attr if isinstance(owner, ast.Attribute) else owner.id if isinstance(owner, ast.Name) else ''
-        if label in ENGINES:
+        if label in aliases or isinstance(owner, (ast.Call, ast.Subscript)):
             found.append(node.lineno)
-    return found
+    return sorted(found)
+
+
+def _blank_comments(source: str) -> str:
+    """Blank out comments but keep every newline, so a commented launch is ignored and line numbers stay true."""
+    source = re.sub(r"/\*.*?\*/", lambda m: re.sub(r"[^\n]", " ", m.group(0)), source, flags=re.S)
+    return re.sub(r"(?m)(^|[^:'\"`])//[^\n]*", lambda m: m.group(1) + " " * (len(m.group(0)) - len(m.group(1))), source)
 
 
 def node_launches(source: str):
-    found = []
-    for number, line in enumerate(source.splitlines(), 1):
-        if re.match(r'\s*(?://|\*|/\*)', line):
-            continue
-        hit = any(match.group('owner').rstrip('.') and JS_OWNER.search(match.group('owner').rstrip('.'))
-                  for match in JS_CALL.finditer(line))
-        if hit or JS_DIRECT.search(line):
-            found.append(number)
-    return found
+    code = _blank_comments(source)
+    driver = bool(DRIVER_FILE.search(code))
+    names = set(ENGINE_NAMES if driver else PLAYWRIGHT_ENGINES) | {m.group(1) for m in JS_ALIAS_ASSIGN.finditer(code)} | {m.group(1) for m in JS_ALIAS_DESTRUCTURE.finditer(code)}
+    found = set()
+    for match in JS_CALL.finditer(code):
+        owner = match.group('owner') or match.group('owner2')
+        tail = re.search(r"([\w$]+)$", owner)
+        if (driver and owner.endswith(']')) or (tail and tail.group(1) in names):
+            found.add(code.count('\n', 0, match.start() + len(match.group(0)) - len(re.search(rf"(?:{NAMES})\b.*$", match.group(0), re.S).group(0))) + 1)
+    for match in (JS_DESTRUCTURED.finditer(code) if driver else []):
+        found.add(code.count('\n', 0, match.start()) + 1)
+    puppeteer = JS_PUPPETEER.search(code)
+    if puppeteer:
+        found.add(code.count('\n', 0, puppeteer.start()) + 1)
+    return sorted(found)
 
 
 class SilentLaunchLintTests(unittest.TestCase):
@@ -74,6 +102,16 @@ class SilentLaunchLintTests(unittest.TestCase):
         self.assertEqual(bare, [], 'launch through tools/silent-browser.mjs silentLaunch so the run is silent')
 
     def test_the_lint_sees_a_bare_launch_and_accepts_the_helper(self):
+        self.assertEqual(python_launches('runner = pw.chromium\nrunner.launch()\n', 'x.py'), [2])
+        self.assertEqual(python_launches('getattr(pw, name).launch()\n', 'x.py'), [1])
+        self.assertEqual(node_launches('await chromium\n  .launch({headless:true});\n'), [2])
+        self.assertEqual(node_launches('const runner = chromium;\nawait runner.launch();\n'), [2])
+        self.assertEqual(node_launches("const {chromium: runner} = require('playwright');\nawait runner.launch();\n"), [2])
+        self.assertEqual(node_launches("await playwright[kind].launch();\n"), [1])
+        self.assertEqual(node_launches("await chromium['launch']();\n"), [1])
+        self.assertEqual(node_launches("const {launch} = chromium;\nawait launch();\n"), [1])
+        self.assertEqual(node_launches('/* webkit.launch() */ const x = 1;\n'), [])
+        self.assertEqual(node_launches('await engine.launch(id);\n'), [])
         self.assertEqual(python_launches('p.chromium.launch()\n', 'x.py'), [1])
         self.assertEqual(python_launches('pw.webkit.launch_persistent_context("/p")\n', 'x.py'), [1])
         self.assertEqual(python_launches('silent_launch(p.chromium)\n', 'x.py'), [])

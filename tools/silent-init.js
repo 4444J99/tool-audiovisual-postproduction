@@ -1,5 +1,5 @@
 /* Silence-at-the-source init script. Injected by silent_browser.py and silent-browser.mjs into every Playwright
- * context before any page script runs, in every engine (Chromium, WebKit, Firefox). It is never part of the artwork.
+ * context before any page script runs, in every engine (Chromium, WebKit, Firefox). It is never part of the published site.
  *
  *  - Media elements: the native muted and volume are pinned to true and 0 on every audio and video element,
  *    whenever it is created, parsed, loaded or played. The app keeps seeing the values it asked for (a shadow copy
@@ -33,23 +33,39 @@
   };
 
   if (media && nativeMuted && nativeVolume) {
+    // volumechange is what a native change fires. The native value never changes for a pinned element, so the event
+    // is fired here whenever the value the app sees changes, and the app's UI listeners keep working.
+    const announce = element => { try { element.dispatchEvent(new Event('volumechange')); } catch (error) { /* detached or sealed */ } };
+    // The volume range check runs on a detached probe, so a bad value throws exactly as natively and a good value
+    // never touches (or fires events on) the pinned element.
+    const NativeAudioCtor = typeof window.Audio === 'function' ? window.Audio : null;
+    const volumeProbe = NativeAudioCtor ? new NativeAudioCtor() : null;
+    const validated = (element, value) => {
+      if (!volumeProbe) { nativeVolume.set.call(element, value); return nativeVolume.get.call(element); }
+      nativeVolume.set.call(volumeProbe, value);
+      return nativeVolume.get.call(volumeProbe);
+    };
     Object.defineProperty(media, 'muted', {
       configurable: true, enumerable: nativeMuted.enumerable,
       get() { ensure(this); return shadow.get(this).muted; },
       set(value) {
-        ensure(this); shadow.get(this).muted = Boolean(value);
-        if (captured.has(this)) nativeMuted.set.call(this, value); else pin(this);
+        ensure(this);
+        const state = shadow.get(this), asked = Boolean(value), changed = state.muted !== asked;
+        state.muted = asked;
+        if (captured.has(this)) nativeMuted.set.call(this, value);
+        else { pin(this); if (changed) announce(this); }
       },
     });
     Object.defineProperty(media, 'volume', {
       configurable: true, enumerable: nativeVolume.enumerable,
       get() { ensure(this); return shadow.get(this).volume; },
       set(value) {
-        // The native setter validates the range and throws; run it first so the shadow never holds a bad value.
-        nativeVolume.set.call(this, value);
-        const asked = nativeVolume.get.call(this); ensure(this);
-        shadow.get(this).volume = asked;
-        if (!captured.has(this)) pin(this);
+        const asked = validated(this, value);
+        ensure(this);
+        const state = shadow.get(this), changed = state.volume !== asked;
+        state.volume = asked;
+        if (captured.has(this)) nativeVolume.set.call(this, value);
+        else { pin(this); if (changed) announce(this); }
       },
     });
     for (const name of ['play', 'load']) {
@@ -70,24 +86,43 @@
       SilentAudio.prototype = NativeAudio.prototype;
       Object.defineProperty(window, 'Audio', {configurable: true, writable: true, enumerable: false, value: SilentAudio});
     }
-    // Parser-created and attached elements: catch them as they enter the document and as their loading begins.
-    // document.open() (what setContent and document.write use on a blank page) drops window listeners and replaces
-    // the root element, so the watch is armed again after every open.
+    // Parser-created and attached elements: catch them as they enter the document (or a shadow root) and as their
+    // loading begins. document.open() (what setContent and document.write use on a blank page) drops window listeners
+    // and replaces the root element, so the document watch is armed again after every open.
+    const watched = new WeakSet(), observers = [];
+    const onMediaEvent = event => { if (event.target instanceof HTMLMediaElement) ensure(event.target); };
+    const MEDIA_EVENTS = ['loadstart', 'loadedmetadata', 'canplay', 'play', 'playing'];
     const sweep = root => {
       if (!root || root.nodeType !== 1) return;
       if (root instanceof HTMLMediaElement) ensure(root);
       for (const element of root.querySelectorAll('audio,video')) ensure(element);
+      // Declarative shadow roots are attached by the parser, not by attachShadow.
+      if (root.shadowRoot) watchRoot(root.shadowRoot);
+      for (const element of root.querySelectorAll('*')) if (element.shadowRoot) watchRoot(element.shadowRoot);
     };
-    const onMediaEvent = event => { if (event.target instanceof HTMLMediaElement) ensure(event.target); };
-    let observer = null;
+    function watchRoot(root) {
+      if (watched.has(root)) return;
+      watched.add(root);
+      for (const element of root.querySelectorAll('audio,video')) ensure(element);
+      const observer = new MutationObserver(records => { for (const record of records) for (const node of record.addedNodes) sweep(node); });
+      observer.observe(root, {childList: true, subtree: true});
+      observers.push(observer);
+      for (const type of MEDIA_EVENTS) root.addEventListener(type, onMediaEvent, true);
+    }
+    let documentObserver = null;
     const arm = () => {
       sweep(document.documentElement);
-      if (observer) observer.disconnect();
-      observer = new MutationObserver(records => { for (const record of records) for (const node of record.addedNodes) sweep(node); });
-      observer.observe(document, {childList: true, subtree: true});
-      for (const type of ['loadstart', 'loadedmetadata', 'canplay', 'play', 'playing']) window.addEventListener(type, onMediaEvent, true);
+      if (documentObserver) documentObserver.disconnect();
+      documentObserver = new MutationObserver(records => { for (const record of records) for (const node of record.addedNodes) sweep(node); });
+      documentObserver.observe(document, {childList: true, subtree: true});
+      for (const type of MEDIA_EVENTS) window.addEventListener(type, onMediaEvent, true);
     };
     arm();
+    const nativeAttachShadow = Element.prototype.attachShadow;
+    Object.defineProperty(Element.prototype, 'attachShadow', {
+      configurable: true, writable: true, enumerable: true,
+      value: function attachShadow(...args) { const root = nativeAttachShadow.apply(this, args); watchRoot(root); return root; },
+    });
     const nativeOpen = Document.prototype.open;
     Object.defineProperty(Document.prototype, 'open', {
       configurable: true, writable: true, enumerable: true,
