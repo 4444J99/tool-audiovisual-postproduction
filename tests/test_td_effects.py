@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "web" / "fx" / "fixtures"
-IMPLEMENTED = ["damage", "delay", "displacement", "feedback", "freeze", "gate"]
+IMPLEMENTED = ["damage", "delay", "displacement", "exchange", "feedback", "freeze", "gate"]
 
 
 def spec_for(patch_path):
@@ -146,7 +146,7 @@ class EffectTests(unittest.TestCase):
         cls.params = {t: catalog(t) for t in IMPLEMENTED}
 
     def chain(self, type_name):
-        return [o for o in self.specs[type_name]["operators"] if o["parent"].startswith("fx_") and o["parent"].count("/") == 0 and o["name"] not in ("resolved",) and o["path"].split("/")[1].startswith(("dmg_", "dly_", "gate_", "fb_", "dsp_", "fz_"))]
+        return [o for o in self.specs[type_name]["operators"] if o["parent"].startswith("fx_") and o["parent"].count("/") == 0 and o["name"] not in ("resolved",) and o["path"].split("/")[1].startswith(("dmg_", "dly_", "gate_", "fb_", "dsp_", "fz_", "xc_"))]
 
     def test_every_effect_expression_is_finite_at_the_catalog_minimum_default_and_maximum(self):
         evaluated = 0

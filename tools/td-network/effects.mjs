@@ -279,5 +279,44 @@ function routing(add, ctx = {}) {
   return {picture};
 }
 
+/** The strips Exchange cuts the picture into when the media pack names no labelled people (the workbench's own fallback, visual-engine.mjs `people.length||5`). */
+export const EXCHANGE_REGIONS = 5;
+
+/**
+ * Exchange (picture): the frame is cut into strips and the strips are dealt out again by a cyclic permutation. Every
+ * `Exchange interval` seconds the address advances by `Address offset`: with `n = floor(time / interval)` the strip
+ * `k` lands in slot `(k + (n x offset + 1) mod count) mod count`, so slot `d` shows strip `(d - shift) mod count`. The strips are
+ * read from `time - History offset` (a cache read back; before enough history exists the cache's oldest frame is shown, as the
+ * workbench clamps to the start of the media). Mode 1 (voice addresses) leaves the picture alone. A Crop TOP cuts each strip out,
+ * a Transform TOP on a full-size canvas puts it in its slot and an Over TOP lays the slots side by side. `Exchange transition`
+ * only shapes the voice in the workbench, so the picture changes at a hard cut. The voice is not built.
+ */
+function exchange(add, ctx = {}) {
+  const T = ctx.clock ?? '{rack.Time}';
+  const history = 3;   // the catalog's largest History offset
+  const shift = `((int(math.floor(${T} / max(0.001, {interval}))) * int(round({offset})) + 1) % ${EXCHANGE_REGIONS})`;
+  const strip = d => `((${d} - ${shift}) % ${EXCHANGE_REGIONS})`;
+  const picture = () => {
+    add('xc_cache', 'cacheTOP', {inputs: ['in_picture'], pars: {cachesize: expr(cacheSizeText(history)), active: 1}});
+    add('xc_frame', 'cacheselectTOP', {pars: {cachetop: {ref: 'xc_cache'}, index: expr(cacheIndexText('{timeOffset}', history))}});
+    let below = null;
+    for (let d = EXCHANGE_REGIONS - 1; d >= 0; d--) {
+      add(`xc_crop_${d}`, 'cropTOP', {inputs: ['xc_frame'], pars: {
+        cropleft: expr(`${strip(d)} / ${EXCHANGE_REGIONS}`), cropright: expr(`(${strip(d)} + 1) / ${EXCHANGE_REGIONS}`), cropbottom: 0, croptop: 1,
+      }});
+      add(`xc_slot_${d}`, 'transformTOP', {inputs: [`xc_crop_${d}`], pars: {
+        outputresolution: 'custom', resolutionw: expr('{op:in_picture}.width'), resolutionh: expr('{op:in_picture}.height'),
+        tx: (d + 0.5) / EXCHANGE_REGIONS - 0.5, extend: 'zero',
+      }});
+      if (below === null) below = `xc_slot_${d}`;
+      else { add(`xc_over_${d}`, 'overTOP', {inputs: [`xc_slot_${d}`, below]}); below = `xc_over_${d}`; }
+    }
+    // mode 1 (voice addresses) leaves the picture as it is
+    add('xc_pick', 'switchTOP', {inputs: ['in_picture', below], pars: {index: expr('0 if int(round({mode})) == 1 else 1')}});
+    return 'xc_pick';
+  };
+  return {picture, notes: [`exchange cuts the picture into ${EXCHANGE_REGIONS} strips (the workbench's fallback when the media pack names no people; the network cannot read the pack's regions); the Crop TOP's units and output-resolution behaviour are the reference defaults (the parameter reference lists no menu tokens), and the voice addresses are not built.`]};
+}
+
 /** The processors implemented by this version. A builder returns `shared` (optional, called first), `picture` and `audio`. */
-export const EFFECTS = Object.freeze({damage, delay, feedback, freeze, gate, displacement, reverse, stutter, routing});
+export const EFFECTS = Object.freeze({damage, delay, feedback, freeze, gate, displacement, reverse, stutter, routing, exchange});
