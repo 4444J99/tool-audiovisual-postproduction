@@ -25,11 +25,12 @@ Needs NumPy and SciPy (the chain's loudness stage) and an ffmpeg with `libx264` 
 
 ## Expected hashes
 
-These were observed on 2026-11-15 (macOS arm64, Python 3.14, NumPy/SciPy as installed, ffmpeg 9.0.2 Homebrew with libx264). The first group comes from Python and NumPy arithmetic and is what a stale-doc test in `tests/test_short_film_demo.py` compares against.
+These were observed on 2026-11-15 (macOS arm64, Python 3.14, NumPy/SciPy as installed, ffmpeg 9.0.2 Homebrew with libx264). The rows above the mp4 come from Python and NumPy arithmetic and are what a stale-doc test in `tests/test_short_film_demo.py` compares against. The frames, delivered dialogue, QC report and captions hashes were identical on both platforms; only the chain hash differs between them (the manifest records measured floating-point loudness fields), so both values are listed and the test accepts the platform it runs on.
 
 | Output | SHA-256 |
 |---|---|
-| chain (`pipeline-manifest.json` hash) | `71053aa9a10d7fdb97b556d38f19e9de34a20cfd0bf48666e063d7f9f8404321` |
+| chain (`pipeline-manifest.json` hash), macOS arm64 | `71053aa9a10d7fdb97b556d38f19e9de34a20cfd0bf48666e063d7f9f8404321` |
+| chain, Linux x86_64 Python 3.12 (CI runner) | `a445ad783117cf2bc6dc77484a93e0e1cb13678c5c66ca46aefe7c122c5fd142` |
 | burned-in frames (`captions/frames.y8`) | `3215d7b1177fdd06feba51d60cc7a0f9d85b32ce492dab368c519dd9fc411c83` |
 | delivered dialogue (`audio/dialogue-delivered.wav`) | `40bef4b2a87ecdd5d850b7c0687a848d873e160bf92210765c371b6c57043f0b` |
 | chain QC report (`qc/qc-report.json`) | `89bfbe59de8e2770bd601a52c7abc5bdc9aa3a108c53ef27b9ad63f0352358d7` |
