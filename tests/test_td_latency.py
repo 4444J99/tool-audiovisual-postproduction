@@ -340,10 +340,92 @@ class AnnounceTests(unittest.TestCase):
         link.pulse("", spec["contract"]["rack"]["sync"]["par"])
         self.assertEqual(backend.sent, [("/fx/sync", []), ("/fx/latency", [2.5])])
 
-    def test_a_rack_without_latency_stays_silent(self):
+    def test_a_rack_without_latency_announces_zero_so_a_replaced_network_clears_the_old_compensation(self):
         link, backend, spec = self.link("closed-inbox.json")
         link.receive(spec["contract"]["rack"]["count"]["address"], [3])
+        self.assertEqual(backend.sent, [("/fx/latency", [0.0])])
+
+    def test_a_contract_that_predates_the_latency_field_says_nothing(self):
+        link, backend, spec = self.link("closed-inbox.json")
+        del link.contract["latency"]
+        link.receive(spec["contract"]["rack"]["count"]["address"], [3])
         self.assertEqual(backend.sent, [])
+
+
+class UntargetedSignalTests(unittest.TestCase):
+    """Codex on #157: a signal a look-ahead processor does not target must still leave it late by the declared latency."""
+    def operators(self, type_name, targets):
+        from tests.test_td_effects import single_patch, spec_for
+        spec = spec_for(single_patch(type_name, targets))
+        return {o["name"]: o for o in spec["operators"] if o["parent"] == "fx_fx_1"}
+
+    def test_a_picture_only_reverse_delays_its_voice_by_the_latency_on_the_wet_branch_too(self):
+        by_name = self.operators("reverse", ["picture"])
+        self.assertEqual(by_name["proc_audio"]["inputs"], ["dry_audio_in"])
+        self.assertEqual(by_name["dry_audio_in"]["pars"]["delay"], 2.5)
+        self.assertEqual(by_name["proc_picture"]["inputs"], ["rv_move"])
+
+    def test_a_voice_only_stutter_delays_its_picture_on_the_wet_branch_too(self):
+        by_name = self.operators("stutter", ["voice"])
+        self.assertEqual(by_name["proc_picture"]["inputs"], ["dry_picture"])
+        self.assertEqual(by_name["proc_audio"]["inputs"], ["st_audio"])
+
+    def test_a_processor_that_targets_neither_still_delays_both(self):
+        by_name = self.operators("reverse", ["text"])
+        self.assertEqual((by_name["proc_picture"]["inputs"], by_name["proc_audio"]["inputs"]), (["dry_picture"], ["dry_audio_in"]))
+
+
+class FrozenEndpointTests(unittest.TestCase):
+    """Codex on #157: Stutter's cache holds what it held when it stopped; editing Window during the hold must not move its newest time."""
+    block = {"lookahead": 1.0, "duration": 12.0}
+
+    def rows(self, state, clock, **changes):
+        params = {"window": 0.24, "rate": 1.0, "gap": 0.035, "repeats": 8, "capture": 2.88, **changes}
+        return dict(resolve.derived_rows("stutter", self.block, params, clock, state))
+
+    def test_the_endpoint_is_kept_when_window_changes_during_the_hold(self):
+        state = {}
+        before = self.rows(state, 2.0)
+        self.assertEqual(before["record"], 1)
+        held = self.rows(state, 2.5)   # live edge 3.5, past the window end 3.12: frozen at 3.12
+        self.assertEqual(held["record"], 0)
+        # a repeat reads source time 2.88 + 0.1 = 2.98 (phase 0.1 of the first repeat) from a cache whose newest frame is 3.12
+        self.assertAlmostEqual(self.rows(state, 2.98)["depth"], 3.12 - 2.98 - 0.0, places=9)
+        wider = self.rows(state, 3.0, window=0.5)   # Window automated up while frozen
+        self.assertEqual(wider["record"], 0)
+        engine_source = 2.88 + (3.0 - 2.88)   # repeat 0, phase 0.12, rate 1
+        self.assertAlmostEqual(wider["depth"], 3.12 - engine_source, places=9, msg="newest is still 3.12, not 2.88 + 0.5")
+        self.assertEqual(state["endpoint"], 3.12)
+
+    def test_a_new_capture_time_forgets_the_endpoint_and_a_seek_back_before_the_window_releases_it(self):
+        state = {}
+        self.rows(state, 2.5)
+        self.assertEqual(state["endpoint"], 3.12)
+        self.rows(state, 2.5, capture=4.0)
+        self.assertNotIn("endpoint", state)
+        again = {}
+        self.rows(again, 2.5)
+        self.assertEqual(self.rows(again, 1.0)["record"], 1, "the playhead moved back to before the window arrived")
+        self.assertEqual(again, {})
+
+    def test_the_hold_ends_when_the_last_repeat_has_played(self):
+        state = {}
+        self.rows(state, 2.5)
+        run = 8 * (0.24 + 0.035)
+        self.assertEqual(self.rows(state, 2.88 + run + 0.5)["record"], 1)
+        self.assertEqual(state, {})
+
+    def test_the_resolver_keeps_one_state_per_processor(self):
+        contract = {"nodes": [{"id": "a", "type": "stutter", "resolve": {"order": ["window", "rate", "gap", "repeats", "capture"], "params": {key: {"min": -99, "max": 99, "step": 0.001} for key in ("window", "rate", "gap", "repeats", "capture")},
+                                                                      "macro": [], "automation": [], "events": [], "lag": 1.0, "lookahead": 1.0, "duration": 12.0}}]}
+        base = {"a": {"intensity": 1.0, "wet": 1.0, "params": {"window": 0.24, "rate": 1.0, "gap": 0.035, "repeats": 8.0, "capture": 2.88}, "bypass": False, "solo": False}}
+        held = {}
+        resolve.resolve_rack(contract, base, 3.6, None, held)   # rack time 3.6, lag 1.0: clock 2.6, live edge 3.6
+        self.assertEqual(held["a"]["endpoint"], 3.12)
+        base["a"]["params"]["window"] = 0.5
+        out = resolve.resolve_rack(contract, base, 4.0, None, held)
+        self.assertEqual(held["a"]["endpoint"], 3.12)
+        self.assertEqual(dict(out["a"]["derived"])["record"], 0)
 
 
 class WorkbenchCompensationTests(unittest.TestCase):

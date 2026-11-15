@@ -378,7 +378,7 @@ class OscModuleTests(unittest.TestCase):
         node, control = self.first_range()
         link.par_changed(node["comp"], control["par"], control["max"])
         link.pulse("", "Sync")
-        self.assertEqual(backend.sent[-1], ("/fx/sync", []))
+        self.assertEqual(backend.sent[-2:], [("/fx/sync", []), ("/fx/latency", [0.0])])   # the rack's declared latency follows the request
         self.assertIsNotNone(link.par_changed(node["comp"], control["par"], control["max"]), "after a resync the same value is news again")
 
     def test_time_and_selection_reports(self):

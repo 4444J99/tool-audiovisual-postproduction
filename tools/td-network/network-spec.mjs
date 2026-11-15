@@ -244,8 +244,8 @@ export function buildNetworkSpec(patch, options = {}) {
       const targetsVoice = !node.targets || node.targets.includes('voice');
       const targetsPicture = !node.targets || node.targets.some(target => ['picture', 'body', 'objects', 'room'].includes(target));
       effect?.shared?.();
-      const pictureTail = effect?.picture && targetsPicture ? effect.picture() : 'in_picture';
-      const audioTail = effect?.audio && targetsVoice ? effect.audio() : 'in_audio';
+      let pictureTail = effect?.picture && targetsPicture ? effect.picture() : 'in_picture';
+      let audioTail = effect?.audio && targetsVoice ? effect.audio() : 'in_audio';
       if (effect?.picture && !targetsPicture) warnings.push(`${node.id}: no picture target, so the ${node.type} picture effect is not built.`);
       if (effect?.audio && !targetsVoice) warnings.push(`${node.id}: no voice target, so the ${node.type} audio effect is not built.`);
       if (!effect) warnings.push(`${node.id}: the ${node.type} effect is not implemented in this network; it passes signal through unchanged.`);
@@ -262,6 +262,9 @@ export function buildNetworkSpec(patch, options = {}) {
         dryPicture = alignWire(comp, 'dry_picture', 'in_picture', 'TOP', latency.lookahead, warnings, node.id);
         dryAudio = alignWire(comp, 'dry_audio_in', 'in_audio', 'CHOP', latency.lookahead, warnings, node.id);
         warnings.push(`${node.id}: its matte and text wires are not delayed by its ${latency.lookahead} s latency.`);
+        // a signal this processor does not target still leaves it L seconds late, like the one it processes, so the wet branch is delayed too
+        if (pictureTail === 'in_picture') pictureTail = dryPicture;
+        if (audioTail === 'in_audio') audioTail = dryAudio;
       }
       add(comp, 'proc_picture', 'nullTOP', {inputs: [pictureTail], slot: 'picture'});
       add(comp, 'blend_picture', 'crossTOP', {inputs: [dryPicture, 'proc_picture'], pars: {cross: wet}});

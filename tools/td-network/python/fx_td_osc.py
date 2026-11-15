@@ -226,13 +226,13 @@ class RackLink:
 
     def announce_latency(self):
         """Tell the workbench the rack's declared latency (contract `latency`), so it reports its playhead that many seconds ahead and the
-        output lines up with it. A rack with no latency says nothing."""
-        latency = self.contract.get('latency') or {}
-        seconds = latency.get('seconds', 0)
-        if not (_number(seconds) and seconds > 0):
+        output lines up with it. A rack without latency says 0, which clears what an earlier rack on the same link declared (a patch
+        replaced without reconnecting the bridge). A contract that predates the field says nothing."""
+        latency = self.contract.get('latency')
+        if not latency or not _number(latency.get('seconds')) or latency['seconds'] < 0:
             return None
-        self.backend.send(latency['address'], [float(seconds)])
-        return (latency['address'], [float(seconds)])
+        self.backend.send(latency['address'], [float(latency['seconds'])])
+        return (latency['address'], [float(latency['seconds'])])
 
     def pulse(self, comp, par):
         item = self.pulses.get(par) if comp == '' else None
