@@ -48,6 +48,10 @@ The eight-layout comparison's placement rules are a pure module (`web/fx/layout-
 
 `tools/fx-td-network.mjs` generates the rack's TouchDesigner version from a patch: components with the catalog's own parameters, wired ports, a real wet/dry and bypass, per-frame automation/macro/modulation/Solo resolution, effect chains for five processors, and an OSC module that follows the bridge's address contract ([guide](docs/FX-TOUCHDESIGNER.md#the-touchdesigner-network-generated)). Not yet built in a real TouchDesigner.
 
+## Branch and push rules
+
+No force pushes (including `--force-with-lease`); update open branches with `git merge origin/main` and land with a rebase-merge: [docs/BRANCH-RULES.md](docs/BRANCH-RULES.md).
+
 ## Reverse-angle ledger
 
 `tools/reverse_angle.py` plans a same-side reverse camera and reports which reverse-view pixels the source recording genuinely shows ([guide](docs/REVERSE-ANGLE.md)).

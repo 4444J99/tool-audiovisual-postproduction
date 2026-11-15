@@ -288,7 +288,7 @@ export const EXCHANGE_REGIONS = 5;
  * `k` lands in slot `(k + (n x offset + 1) mod count) mod count`, so slot `d` shows strip `(d - shift) mod count`. The strips are
  * read from `time - History offset` (a cache read back; before enough history exists the cache's oldest frame is shown, as the
  * workbench clamps to the start of the media). Mode 1 (voice addresses) leaves the picture alone. A Crop TOP cuts each strip out,
- * a Transform TOP on a full-size canvas puts it in its slot and an Over TOP lays the slots side by side. `Exchange transition`
+ * a Transform TOP on a full-size canvas (which stretches the strip across the canvas, so the scale returns it to a fifth of the width) puts it in its slot and an Over TOP lays the slots side by side. `Exchange transition`
  * only shapes the voice in the workbench, so the picture changes at a hard cut. The voice is not built.
  */
 function exchange(add, ctx = {}) {
@@ -306,6 +306,8 @@ function exchange(add, ctx = {}) {
       }});
       add(`xc_slot_${d}`, 'transformTOP', {inputs: [`xc_crop_${d}`], pars: {
         outputresolution: 'custom', resolutionw: expr('{op:in_picture}.width'), resolutionh: expr('{op:in_picture}.height'),
+        // a custom output resolution resamples the strip across the whole canvas (it does not pad it), so the scale brings it back to one strip's width
+        sx: 1 / EXCHANGE_REGIONS, sy: 1,
         tx: (d + 0.5) / EXCHANGE_REGIONS - 0.5, extend: 'zero',
       }});
       if (below === null) below = `xc_slot_${d}`;
