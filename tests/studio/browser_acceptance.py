@@ -7,6 +7,8 @@ HTTP routing, origin-local storage, external media or physical Safari.
 from pathlib import Path
 import json,re,sys
 from playwright.sync_api import sync_playwright
+sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'tools'))  # silent launch helper: no run may make a sound
+from silent_browser import silent_launch
 ROOT=Path(sys.argv[1] if len(sys.argv)>1 else '/mnt/data/god-here-unified-site').resolve()
 OUT=Path(sys.argv[2] if len(sys.argv)>2 else '/mnt/data/god-here-consolidation/verification');OUT.mkdir(exist_ok=True)
 checks=[];exceptions=[]
@@ -49,7 +51,7 @@ def change(page,value):
     page.evaluate('(v)=>location.hash=v',value);page.wait_for_timeout(180)
 
 with sync_playwright() as p:
-    browser=p.chromium.launch(executable_path='/usr/bin/chromium',args=['--no-sandbox'])
+    browser=silent_launch(p.chromium,executable_path='/usr/bin/chromium',args=['--no-sandbox'])
     context,page=open_page(browser)
     review=frame(page,'review');review.locator('#video').wait_for()
     page.wait_for_function("document.querySelector('iframe').contentWindow.document.getElementById('video').readyState>=2")

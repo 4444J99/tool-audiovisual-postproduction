@@ -7,7 +7,10 @@ from urllib.parse import urljoin, urlsplit, unquote
 from urllib.request import Request, urlopen
 from html.parser import HTMLParser
 from collections import deque
-import hashlib, json, re, time
+import hashlib, json, re, sys, time
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # run as a script, tools/ is the import root
+from silent_browser import silent_launch
 
 OUT = Path('audit-output')
 MAIN = 'https://god-here-five-realities.ajpadavano.chatgpt.site/'
@@ -82,7 +85,7 @@ def capture_browser():
     from playwright.sync_api import sync_playwright
     reports = []
     with sync_playwright() as p:
-        browser = p.chromium.launch()
+        browser = silent_launch(p.chromium)
         for name, url in ROUTES:
             name = name or 'main'; page = browser.new_page(viewport={'width':1440,'height':1000})
             errors=[]; bad=[]
