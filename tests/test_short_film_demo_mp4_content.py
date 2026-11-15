@@ -120,6 +120,70 @@ class Mp4ContentTests(unittest.TestCase):
         self.reseal(out)
         self.verify_names(out, "mp4.chroma_flat")
 
+    # ---- Findings of the independent review of this PR's head 405dc66 ----
+
+    def swap_video(self, out, args, extra_inputs=()):
+        """Re-encode or re-flag the mp4's video through ffmpeg, keep its audio, re-seal."""
+        target = out / "swapped.mp4"
+        subprocess.run([self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *args, str(target)], check=True)
+        (out / demo.MP4).write_bytes(target.read_bytes())
+        target.unlink()
+        self.reseal(out)
+
+    def test_a_chroma_checkerboard_in_a_4_4_4_stream_is_named(self):
+        out = self.copy()
+        width, height = self.burnin["params"]["geometry"]["width"], self.burnin["params"]["geometry"]["height"]
+        luma = (out / "captions" / "frames.y8").read_bytes()
+        checker = ((np.indices((height, width)).sum(axis=0) % 2) * 2 - 1) * 30
+        u = np.clip(128 + checker, 0, 255).astype(np.uint8).tobytes()
+        v = np.clip(128 - checker, 0, 255).astype(np.uint8).tobytes()
+        size = width * height
+        stream = b"".join(luma[o:o + size] + u + v for o in range(0, len(luma), size))
+        target = out / "swapped.mp4"
+        subprocess.run([self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "yuv444p",
+                        "-s", f"{width}x{height}", "-r", str(self.ledger["fps"]), "-i", "pipe:0", "-i", str(out / demo.MP4),
+                        "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264", "-qp", "0", "-preset", "ultrafast", "-pix_fmt", "yuv444p",
+                        "-c:a", "copy", "-t", str(self.ledger["total_seconds"]), str(target)], input=stream, check=True, capture_output=True)
+        (out / demo.MP4).write_bytes(target.read_bytes())
+        target.unlink()
+        self.reseal(out)
+        self.verify_names(out, "mp4.video_pixel_format")
+
+    def test_a_full_range_flag_or_a_stretched_pixel_aspect_ratio_is_named(self):
+        for name, bsf in (("fullrange", "h264_metadata=video_full_range_flag=1"), ("sar", "h264_metadata=sample_aspect_ratio=2/1")):
+            out = Path(self.tmp.name) / f"copy-{name}"
+            shutil.copytree(self.first, out)
+            self.swap_video(out, ["-i", str(out / demo.MP4), "-c", "copy", "-bsf:v", bsf])
+            self.verify_names(out, "mp4.video_pixel_format")
+
+    def test_a_loud_beep_just_after_the_dialogue_is_named(self):
+        out = self.copy()
+        total = int(round(self.ledger["total_seconds"] * self.rate))
+        n = len(self.delivered)
+        samples = np.zeros(total)
+        samples[:n] = self.delivered
+        samples[n + 1100:n + 4090] += 0.9 * np.sin(2 * np.pi * 1000 * np.arange(2990) / self.rate)
+        self.swap_audio(out, samples)
+        self.verify_names(out, "mp4.audio_padding_silent")
+
+    def test_a_quiet_tone_across_the_padding_is_named(self):
+        out = self.copy()
+        total = int(round(self.ledger["total_seconds"] * self.rate))
+        n = len(self.delivered)
+        samples = np.zeros(total)
+        samples[:n] = self.delivered
+        samples[n:] += 0.009 * np.sin(2 * np.pi * 1000 * np.arange(total - n) / self.rate)
+        self.swap_audio(out, samples)
+        self.verify_names(out, "mp4.audio_padding_silent")
+
+    def test_dialogue_delayed_by_125_ms_is_named(self):
+        out = self.copy()
+        total = int(round(self.ledger["total_seconds"] * self.rate))
+        samples = np.zeros(total)
+        samples[2000:2000 + len(self.delivered)] = self.delivered
+        self.swap_audio(out, samples)
+        self.verify_names(out, "mp4.audio_matches_delivered")
+
 
 class AlignedSnrTests(unittest.TestCase):
     """CodeRabbit on this PR: a decoded track that is a little longer than the dialogue but shorter than dialogue plus lag must fail, not raise."""
@@ -143,6 +207,22 @@ class AlignedSnrTests(unittest.TestCase):
         reference = np.random.default_rng(5).standard_normal(8000)
         self.assertLess(demo.aligned_snr_db(np.random.default_rng(6).standard_normal(9000), reference), demo.AUDIO_MIN_SNR_DB)
         self.assertEqual(demo.aligned_snr_db(reference[:100], reference), float("-inf"))
+
+
+    def test_a_copy_at_lag_zero_is_not_confused_by_a_loud_tail_that_wraps_around_the_fft(self):
+        lag = demo.AUDIO_MAX_LAG
+        n = (1 << 14) - lag - 1  # n + lag just under a power of two: the FFT size is 2**14, less than n + 2 * lag
+        reference = np.random.default_rng(8).standard_normal(n)
+        heard = np.concatenate([reference, np.zeros(1), 10 * reference[:lag]])
+        self.assertEqual(demo.aligned_snr_db(heard, reference), float("inf"))
+
+    def test_short_references_and_long_tails_never_raise(self):
+        rng = np.random.default_rng(0)
+        for _ in range(3000):
+            n = int(rng.integers(1, 60))
+            reference = rng.standard_normal(n)
+            heard = rng.standard_normal(int(rng.integers(n, n + 3 * demo.AUDIO_MAX_LAG))) * float(rng.choice([0.0, 1.0, 10.0]))
+            self.assertIsInstance(demo.aligned_snr_db(heard, reference), float)
 
 
 if __name__ == "__main__":
