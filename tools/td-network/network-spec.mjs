@@ -25,6 +25,8 @@ import {VOCABULARY, PORT_FAMILY, SELECT, NULL, CUSTOM_PAR_NAME, OPERATOR_NAME} f
 
 export const SPEC_SCHEMA = 'amps.td-network.v1';
 export const CONTRACT_SCHEMA = 'amps.td-osc-contract.v1';
+/** The workbench's picture bank rate (docs/FX-WORKBENCH.md): the grid Feedback's reset epoch is latched on. */
+export const PICTURE_FPS = 12;
 const here = dirname(fileURLToPath(import.meta.url));
 export const pythonText = name => readFileSync(join(here, 'python', name), 'utf8');
 
@@ -115,6 +117,8 @@ export function buildNetworkSpec(patch, options = {}) {
   if (!verdict.valid) throw Error(`Patch ${patch?.id} is not valid: ${verdict.errors.slice(0, 3).join(' ')}`);
   const oscIn = options.oscInPort ?? 7000, oscOut = options.oscOutPort ?? 7001, host = options.host ?? '127.0.0.1';
   const rootName = options.rootName ?? 'fx_rack';
+  const pictureFps = options.pictureFps ?? PICTURE_FPS;
+  if (!(Number.isFinite(pictureFps) && pictureFps > 0)) throw Error('pictureFps must be a positive number.');
   const taken = new Set(['osc_in', 'osc_in_callbacks', 'osc_out', 'td_osc', 'td_contract', 'par_exec_nodes', 'par_exec_rack', 'td_resolve', 'frame_exec', 'video_out', 'audio_out']);
   const names = new Map(patch.nodes.map(node => [node.id, operatorName(node.id, taken)]));
   const warnings = [];
@@ -247,7 +251,7 @@ export function buildNetworkSpec(patch, options = {}) {
   };
   const processors = nodes.filter(node => !node.structural);
   const contract = {
-    schema: CONTRACT_SCHEMA, root: `/${OSC_ROOT}`, echoTolerance: ECHO_TOLERANCE, rack: rackContract,
+    schema: CONTRACT_SCHEMA, root: `/${OSC_ROOT}`, echoTolerance: ECHO_TOLERANCE, pictureFps, rack: rackContract,
     nodes: processors, // structural nodes carry no OSC address
     selectedSlots: processors.flatMap(node => node.controls.map(control => ({id: node.id, path: control.path, address: `/${OSC_ROOT}/selected/${control.slot.replace(':', '/')}`, slot: control.slot}))),
   };
@@ -430,6 +434,7 @@ export function validateNetworkSpec(spec) {
     const expected = ['intensity', 'wet', 'bypass', 'solo', 'active', ...definition.params.map(item => `param.${item.key}`), ...(definition.params.some(item => item.key === 'reset') ? ['epoch'] : [])];
     if (!rows || expected.length !== rows.size || !expected.every(key => rows.has(key))) fail(`contract: ${node.comp}/resolved does not hold the resolved rows`);
   }
+  if (!(Number.isFinite(spec.contract.pictureFps) && spec.contract.pictureFps > 0)) fail('contract: pictureFps must be a positive number');
   const rack = spec.contract.rack;
   for (const item of [rack.selected, rack.count, rack.time, rack.status, ...rack.transport, ...rack.pulses]) if (!customOf.get('').has(item.par)) fail(`contract: rack lacks ${item.par}`);
   for (const item of [rack.selected, rack.selectedType, rack.count, rack.time, ...rack.transport, ...rack.pulses.filter(p => p.par !== rack.sync.par)]) claim(item.address, 'rack');

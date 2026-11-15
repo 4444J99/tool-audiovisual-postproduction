@@ -107,7 +107,7 @@ node tools/fx-td-network.mjs web/fx/fixtures/closed-inbox.json --out outputs/td 
 ```
 
 This writes `<id>.network.json` (the spec: operators, parameters, wiring, contract), `<id>.build.py` (self-contained,
-with the spec embedded) and `modules/` (the Python that ends up in Text DATs, for reading). Options: `--source-file`,
+with the spec embedded) and `modules/` (the Python that ends up in Text DATs, for reading). Options: `--picture-fps` (12, the workbench's picture bank rate: the grid Feedback's reset epoch is latched on), `--source-file`,
 `--osc-in-port` (7000), `--osc-out-port` (7001), `--host`, `--root-name` (`fx_rack`). Output is deterministic: the
 same patch gives the same bytes.
 
@@ -233,6 +233,8 @@ every parameter's extremes, and Damage's hold positions against the engine's hol
 Sample-wise expressions (Signal Damage's hold, the source's sidechain envelope) use the Expression CHOP's `me.sampleIndex`, `me.chanIndex` and `me.inputVal`, the members its class documents (an earlier `me.inputIndex` is not one; the test stand-in now has only the documented members) and read the channel they are evaluated for, so a stereo signal keeps its right channel.
 
 **Known limit, Freeze / Hold voice:** the grain weights, decay and 6 ms onset are Math CHOP gains and the grain positions Delay CHOP delays, each evaluated once per cook from the playhead, not per audio sample. At a 60 Hz cook the 6 ms onset and the 25 ms minimum grain crossfade step instead of ramping, so the voice hold is a block-rate approximation of the workbench's sample-accurate overlap (the test checks the model at each tested timestamp, not the cook-rate stepping). Sample-rate envelopes need a CHOP-generated ramp chain that can only be verified in TouchDesigner.
+
+**Known limits, stateful operations in a live network:** (1) Signal Damage's sample-rate hold is an Expression CHOP, which sees one time slice at a time: the hold phase and the held sample do not carry from one cook to the next, so a hold longer than a slice (reduction under about 3 kHz at a 60 Hz cook) restarts at each slice boundary; a faithful hold needs a stateful operator (a trigger at the reduced rate into a Hold CHOP). (2) Freeze / Hold's picture is the newest frame the Cache TOP held when it stopped taking frames, so the playhead moving into a hold from outside it (a seek) shows the cache's newest frame, not the frame at the capture time; the workbench re-samples the capture time. (3) The voice envelope is block-rate, above. All three are in issue 151.
 
 **Not applied by this network:** the effects of the other seven processors (Routing, Stutter, Granular, Reverse,
 Queue / Overflow, Exchange, Typography), which pass signal through unchanged and are named in the

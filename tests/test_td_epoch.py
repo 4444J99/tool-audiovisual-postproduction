@@ -27,6 +27,7 @@ const scenarios = {
   crossing: {params: {reset: 1}, lane: {interpolation: 'linear', keyframes: [{time: 0, value: 1}, {time: 3, value: 2}]}, times: [0, 0.9, 1.2, 2.75, 1, 2, 3, 0.4]},
   step: {params: {reset: 0}, lane: {interpolation: 'step', keyframes: [{time: 0, value: 0}, {time: 1, value: 3}, {time: 2, value: 2}]}, times: [2.5, 1.5, 0.5, 1, 2, 2.9, 0]},
   constant: {params: {reset: 2.4}, lane: null, times: [0, 1, 2.3, 2.4, 2.5, 3, 1, 3.5]},
+  blip: {params: {reset: 0}, lane: {interpolation: 'step', keyframes: [{time: 0, value: 0}, {time: 1.02, value: 3}, {time: 1.04, value: 0}]}, times: [0, 1.0, 1.1, 2, 0.5, 3]},
   never: {params: {reset: 11.5}, lane: null, times: [0, 5, 11, 3]},
 };
 const out = {};
@@ -40,7 +41,7 @@ for (const [name, item] of Object.entries(scenarios)) {
   const contract = buildNetworkSpec(patch).contract;
   const entry = contract.nodes.find(n => n.id === node.id);
   const base = {intensity: node.intensity, wet: node.wet, params: {...node.params}, bypass: false, solo: false};
-  out[name] = {resolve: entry.resolve, base, fps: FPS, steps: item.times.map(t => [t, engine.feedbackEpoch(node, t)])};
+  out[name] = {resolve: entry.resolve, base, fps: contract.pictureFps, steps: item.times.map(t => [t, engine.feedbackEpoch(node, t)])};
 }
 process.stdout.write(JSON.stringify(out));
 """
@@ -62,6 +63,21 @@ class EpochTests(unittest.TestCase):
                 self.assertAlmostEqual(latch.at(time), want, places=9, msg="%s at %r" % (name, time))
                 compared += 1
         self.assertGreater(compared, 30)
+
+    def test_production_uses_the_contracts_picture_rate_not_a_fixed_grid(self):
+        """Codex: the latch ran on a 60 Hz grid in production while the engine samples crossings at the media's frame rate; a 20 ms
+        blip of Reset time between two 12 fps frames is a crossing on one grid and not on the other."""
+        blip = self.data["blip"]
+        self.assertEqual(blip["fps"], 12)
+        self.assertEqual(resolve.picture_fps({"pictureFps": 12}), 12.0)
+        self.assertEqual(resolve.picture_fps({}), resolve.EPOCH_FPS)
+        self.assertEqual(resolve.picture_fps({"pictureFps": -3}), resolve.EPOCH_FPS)
+        engine_epochs = [epoch for _, epoch in blip["steps"]]
+        self.assertEqual(engine_epochs, [0, 0, 0, 0, 0, 0], "the engine never sees the blip")
+        production = resolve.EpochLatch(blip["resolve"], blip["base"], resolve.picture_fps({"pictureFps": blip["fps"]}))
+        self.assertEqual([production.at(t) for t, _ in blip["steps"]], engine_epochs)
+        sixty = resolve.EpochLatch(blip["resolve"], blip["base"], fps=60.0)
+        self.assertGreater(sixty.at(2.0), 1.0, "on a 60 Hz grid the blip is a crossing: the grid matters")
 
     def test_a_reset_that_tracks_the_playhead_never_suppresses_the_returns(self):
         """The failure Codex found: epoch = Reset time whenever time >= Reset time; for the ramp reset = time that is the playhead

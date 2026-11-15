@@ -171,7 +171,13 @@ def resolved_rows(spec, resolved, epoch=0.0):
     return rows
 
 
-EPOCH_FPS = 60.0   # the frame grid the latch walks; the workbench walks its media's frame rate
+EPOCH_FPS = 12.0   # the workbench's picture bank rate (docs/FX-WORKBENCH.md); the contract carries the generated network's own
+
+
+def picture_fps(contract):
+    """The picture frame rate the feedback epoch is latched on: the contract's `pictureFps`, else the workbench's 12."""
+    value = contract.get('pictureFps', EPOCH_FPS)
+    return float(value) if _finite(value) and value > 0 else EPOCH_FPS
 
 
 class EpochLatch:
@@ -338,7 +344,7 @@ def tick(rack):
             base = bases[node['id']]
             held = _LATCH.get(key)
             if held is None or held[0] != base:
-                held = _LATCH[key] = (json.loads(json.dumps(base)), EpochLatch(node['resolve'], base))
+                held = _LATCH[key] = (json.loads(json.dumps(base)), EpochLatch(node['resolve'], base, picture_fps(contract)))
             epoch = held[1].at(time, controls[node['id']])
         rows = resolved_rows(node['resolve'], resolved[node['id']], epoch)
         if _LAST.get(key) == rows:
