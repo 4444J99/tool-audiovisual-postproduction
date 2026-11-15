@@ -25,6 +25,22 @@ export function frame(opcode, payload = Buffer.alloc(0)) {
   return Buffer.concat([head, payload]);
 }
 
+const KNOWN_OPCODES = new Set([0, 1, 2, 8, 9, 10]);  // RFC 6455 section 5.2; 3 to 7 and 11 to 15 are reserved
+const MAX_CLOSE_REASON_BYTES = 123;  // a control frame carries at most 125 bytes, two of them the status code
+
+/** Body of a close frame. The reason is cut on a character boundary so the frame stays a legal control frame. */
+export function closeBody(code, reason = '') {
+  let text = '', bytes = 0;
+  for (const character of reason) {
+    const size = Buffer.byteLength(character);
+    if (bytes + size > MAX_CLOSE_REASON_BYTES) break;
+    text += character; bytes += size;
+  }
+  const body = Buffer.alloc(2 + bytes);
+  body.writeUInt16BE(code); body.write(text, 2);
+  return body;
+}
+
 /** Incremental parser for client frames. `push(chunk)` returns decoded events or throws {code, reason}. */
 export class FrameParser {
   constructor(maxBytes = MAX_MESSAGE_BYTES) {this.buffer = Buffer.alloc(0); this.maxBytes = maxBytes; this.fragments = []; this.fragmentBytes = 0; this.fragmentOpcode = 0;}
@@ -37,6 +53,7 @@ export class FrameParser {
       const fin = Boolean(buffer[0] & 0x80), reserved = buffer[0] & 0x70, opcode = buffer[0] & 0x0F, masked = Boolean(buffer[1] & 0x80);
       let length = buffer[1] & 0x7F, offset = 2;
       if (reserved) throw {code: 1002, reason: 'Reserved bits are not supported.'};
+      if (!KNOWN_OPCODES.has(opcode)) throw {code: 1002, reason: 'Unknown opcode.'};
       if (!masked) throw {code: 1002, reason: 'Client frames must be masked.'};
       if (length === 126) {if (buffer.length < 4) break; length = buffer.readUInt16BE(2); offset = 4;}
       else if (length === 127) {
@@ -113,8 +130,7 @@ export async function listen({host = '127.0.0.1', port = 0, allowedOrigins = [],
       close(code = 1000, reason = '') {
         if (client.closed) return;
         client.closed = true;
-        const body = Buffer.alloc(2 + Buffer.byteLength(reason)); body.writeUInt16BE(code); body.write(reason, 2);
-        socket.end(frame(8, body));
+        socket.end(frame(8, closeBody(code, reason)));
       }};
     clients.add(client);
     onOpen(client);

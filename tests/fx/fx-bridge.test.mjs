@@ -4,7 +4,7 @@ import {createSocket} from 'node:dgram';
 import {connect as tcpConnect} from 'node:net';
 import {randomBytes} from 'node:crypto';
 import {startBridge, parseWireMessage, toWireMessage} from '../../tools/fx-bridge/bridge.mjs';
-import {FrameParser, frame, acceptKey, originAllowed, MAX_CLIENTS} from '../../tools/fx-bridge/ws-server.mjs';
+import {FrameParser, frame, closeBody, listen, acceptKey, originAllowed, MAX_CLIENTS} from '../../tools/fx-bridge/ws-server.mjs';
 import {encodeMessage, encodeBundle, decodePacket} from '../../tools/fx-bridge/osc-codec.mjs';
 import {oscSession, oscControl, freshPatch, CATALOG_BY_TYPE} from './runtime.mjs';
 
@@ -198,6 +198,39 @@ test('the frame parser refuses protocol violations and oversized messages', () =
   assert.equal(code(Buffer.concat([masked(1, 'x'.repeat(600), {fin: false}), masked(0, 'x'.repeat(600))])), 1009, 'fragments add up');
   const hugeClaim = Buffer.alloc(10); hugeClaim[0] = 0x81; hugeClaim[1] = 0xFF; hugeClaim.writeBigUInt64BE(2n ** 40n, 2);
   assert.equal(code(hugeClaim), 1009, 'a 1 TB length claim is refused before any buffering');
+});
+
+test('the frame parser refuses reserved opcodes instead of dropping their frames', () => {
+  const code = bytes => {try {new FrameParser(1000).push(bytes); return null;} catch (error) {return error.code;}};
+  for (const opcode of [3, 4, 5, 6, 7]) assert.equal(code(masked(opcode, 'hi')), 1002, `reserved data opcode ${opcode}`);
+  for (const opcode of [11, 12, 13, 14, 15]) assert.equal(code(masked(opcode, 'hi')), 1002, `reserved control opcode ${opcode}`);
+  for (const opcode of [1, 2, 8, 9, 10]) assert.equal(code(masked(opcode, 'hi')), null, `defined opcode ${opcode}`);
+});
+
+test('a close frame stays a legal control frame whatever reason the application gives', async () => {
+  const payloadLength = reason => frame(8, closeBody(1000, reason))[1];
+  assert.equal(payloadLength('x'.repeat(200)), 125, 'a long ASCII reason is cut to 123 bytes plus the status code');
+  assert.equal(payloadLength('short'), 2 + 5);
+  const accented = closeBody(1000, 'é'.repeat(100));  // 200 bytes of UTF-8
+  assert.ok(accented.length <= 125);
+  assert.doesNotThrow(() => new TextDecoder('utf-8', {fatal: true}).decode(accented.subarray(2)), 'cut on a character boundary');
+  const emoji = closeBody(1000, '\u{1F600}'.repeat(40));  // 4 bytes each
+  assert.ok(emoji.length <= 125);
+  assert.doesNotThrow(() => new TextDecoder('utf-8', {fatal: true}).decode(emoji.subarray(2)));
+  const server = await listen({onOpen: client => client.close(1000, 'x'.repeat(200))});
+  try {
+    const received = await new Promise((resolve, reject) => {
+      const socket = tcpConnect(server.port, '127.0.0.1');
+      let text = Buffer.alloc(0);
+      socket.on('data', chunk => {text = Buffer.concat([text, chunk]);});
+      socket.on('close', () => resolve(text));
+      socket.on('connect', () => socket.write(`GET / HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\n\r\n`));
+      setTimeout(() => {socket.destroy(); reject(Error('server did not close'));}, 2000);
+    });
+    const at = received.indexOf(Buffer.from('\r\n\r\n')) + 4;
+    assert.equal(received[at], 0x88, 'a close frame follows the handshake');
+    assert.ok(received[at + 1] <= 125, `control frame payload ${received[at + 1]} bytes`);
+  } finally {await server.close();}
 });
 
 test('the server frame encoder and accept key follow RFC 6455', () => {
