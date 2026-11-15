@@ -39,7 +39,7 @@ from . import caption_burnin as cb
 from . import captions as cap
 from . import loudness as ld
 
-SCHEMA = "amps.delivery_qc.v1"
+SCHEMA = "amps.delivery_qc.v2"      # v2: per-check independence, cannot_fail_independently, the coverage and independent-placement checks
 
 DEFAULT_SPEC: dict[str, Any] = {
     "name": "chain-default",
@@ -131,8 +131,8 @@ def normalize_spec(spec: Mapping[str, Any] | None = None) -> dict[str, Any]:
         raise QcError("span_tolerance_frames must be a non-negative integer")
     if not _number(merged["report_tolerance"]) or merged["report_tolerance"] < 0:
         raise QcError("report_tolerance must be a non-negative number")
-    if not _number(merged["independent_overlap_min"]) or not 0 < merged["independent_overlap_min"] <= 1:
-        raise QcError("independent_overlap_min must be a number above 0 and at most 1")
+    if not _number(merged["independent_overlap_min"]) or not 0.5 <= merged["independent_overlap_min"] <= 1:
+        raise QcError("independent_overlap_min must be a number from 0.5 to 1: a cue or span that is mostly outside the speech cannot be accepted")
     for key, value in merged["vad"].items():
         if not _number(value) or value <= 0:
             raise QcError(f"vad.{key} must be a positive number")
@@ -189,26 +189,27 @@ def independent_spans(audio: np.ndarray, rate: int) -> list[tuple[int, int]]:
     Frame RMS over a 30 ms window every 10 ms; digital-silence frames are ignored; the live frame levels (dB) are
     split into two classes at the Otsu threshold of a 64-bin histogram and the upper class is active.  Runs under
     0.1 s apart join and runs under 0.2 s drop.  No percentile, no margin, no value from the QC spec.  A recording with
-    levels less than ``min_separation_db`` apart (flat noise, a pure tone) has no two classes and yields nothing."""
+    a 5th-to-95th percentile spread under ``min_separation_db`` (flat noise, a pure tone) has no two classes and yields nothing."""
     cfg = INDEPENDENT_DETECTOR
     window, hop = max(1, int(round(cfg["window_s"] * rate))), max(1, int(round(cfg["hop_s"] * rate)))
     if len(audio) < window:
         return []
     count = (len(audio) - window) // hop + 1
-    index = np.arange(count)[:, None] * hop + np.arange(window)[None, :]
-    levels = np.sqrt(np.mean(np.square(audio[index]), axis=1))
+    frames = np.lib.stride_tricks.sliding_window_view(audio, window)[::hop][:count]       # a view: no copy of the overlapping windows
+    levels = np.sqrt(np.einsum("ij,ij->i", frames, frames) / window)
     live = levels > 1e-9
     if not live.any():
         return []
     db = 20.0 * np.log10(np.maximum(levels, 1e-12))
-    if db[live].max() - db[live].min() < cfg["min_separation_db"]:
+    low, high = np.percentile(db[live], [5, 95])
+    if high - low < cfg["min_separation_db"]:        # percentiles, not extremes: one outlier frame is not a second class
         return []
     hist, edges = np.histogram(db[live], bins=cfg["bins"])
     weight = hist / hist.sum()
     centre = (edges[:-1] + edges[1:]) / 2.0
     below, mass = np.cumsum(weight), np.cumsum(weight * centre)
     between = (mass[-1] * below - mass) ** 2 / np.maximum(below * (1.0 - below), 1e-12)
-    threshold = centre[int(np.argmax(between))]
+    threshold = edges[int(np.argmax(between)) + 1]     # the lower class owns all of its bin, so the cut is the bin's upper edge
     active = live & (db > threshold)
     padded = np.concatenate(([False], active, [False]))
     edge = np.flatnonzero(padded[1:] != padded[:-1])
@@ -220,7 +221,8 @@ def independent_spans(audio: np.ndarray, rate: int) -> list[tuple[int, int]]:
             merged[-1][1] = run[1]
         else:
             merged.append(run)
-    return [(max(0, a), min(len(audio), b)) for a, b in merged if b - a >= cfg["min_span_s"] * rate]
+    clipped = [(max(0, a), min(len(audio), b)) for a, b in merged]
+    return [(a, b) for a, b in clipped if b - a >= cfg["min_span_s"] * rate]
 
 
 def _covered(lo: Fraction, hi: Fraction, intervals: list[tuple[Fraction, Fraction]]) -> Fraction:
