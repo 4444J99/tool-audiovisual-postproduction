@@ -209,7 +209,9 @@ def _derive(root: Path, locations: Mapping[str, str], spec: Mapping[str, Any] | 
         fps_values = {"shot-plan": plan["fps"], "final-ledger": ledger["fps"], "layer-plan": colour["comp"]["fps"],
                       "captions-report": cap_report["fps"], "burnin-report": burn_report["params"]["fps"]}
         fps = cap.parse_fps(ledger["fps"])
-        total = int(ledger["total_frames"])
+        total = ledger["total_frames"]
+        if not isinstance(total, int) or isinstance(total, bool) or total < 1:
+            raise ValueError(f"final-ledger total_frames must be a positive whole number, not {total!r}")
         cues = cap.parse(srt, fps)
         vtt_cues = cap.parse(vtt, fps)
     except (KeyError, TypeError, ValueError, UnicodeDecodeError, cap.CaptionError) as error:
@@ -356,9 +358,11 @@ def _derive(root: Path, locations: Mapping[str, str], spec: Mapping[str, Any] | 
         after = delivery["after"]
         tol = spec["report_tolerance"]
         drift = []
-        if measured["integrated_lufs"] is None or abs(measured["integrated_lufs"] - after["integrated_lufs"]) > tol:
+        finite = {key: _number(after[key]) for key in ("integrated_lufs", "true_peak_dbtp")}
+        drift += [f"the delivery report's {key} is {after[key]!r}, not a finite number, so it cannot agree with a measurement" for key, ok in finite.items() if not ok]
+        if finite["integrated_lufs"] and (measured["integrated_lufs"] is None or abs(measured["integrated_lufs"] - after["integrated_lufs"]) > tol):
             drift.append(f"integrated loudness {measured['integrated_lufs']} differs from the delivery report's {after['integrated_lufs']}")
-        if abs(measured["true_peak_dbtp"] - after["true_peak_dbtp"]) > tol:
+        if finite["true_peak_dbtp"] and abs(measured["true_peak_dbtp"] - after["true_peak_dbtp"]) > tol:
             drift.append(f"true peak {measured['true_peak_dbtp']} differs from the delivery report's {after['true_peak_dbtp']}")
         if delivery.get("output_sha256") != sha256_bytes(files["dialogue-delivered"]):
             drift.append("the delivery report does not describe the delivered file")
