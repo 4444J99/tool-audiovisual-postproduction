@@ -32,6 +32,11 @@ SCHEMA = "amps.short_film_demo.v1"
 MARKER = ".short-film-demo"  # written first, so a failed run can still be replaced; its text is the schema name
 LOUDNESS_TOLERANCE_LU = 1.0  # AAC is lossy: the mp4's audio must stay within this of the delivered WAV
 DURATION_TOLERANCE_S = 0.05
+AUDIO_MIN_SNR_DB = 15.0  # the mp4's sound against the delivered dialogue, after AAC; a re-encode measures about 33 dB, noise at the same loudness about -3 dB
+AUDIO_MAX_LAG = 2048  # samples the decoded audio may sit from the delivered WAV (AAC priming)
+PADDING_GUARD = 4096  # samples after the dialogue that AAC may still ring into
+PADDING_PEAK = 0.01  # after the dialogue the padding must stay below this (about -40 dBFS); the clean demo is exactly zero
+CHROMA_TOLERANCE = 1  # the chain writes flat 128 chroma, and the video is lossless
 
 
 class DemoError(Exception):
@@ -109,6 +114,21 @@ def decode(ffmpeg, path, *args):
     return run.stdout
 
 
+def aligned_snr_db(heard, reference):
+    """SNR of ``heard`` against ``reference`` at the best lag within AUDIO_MAX_LAG samples (cross-correlation by FFT)."""
+    n = len(reference)
+    if len(heard) < n or not np.any(reference):
+        return float("-inf")
+    size = 1 << (n + AUDIO_MAX_LAG).bit_length()
+    window = heard[:n + AUDIO_MAX_LAG]
+    cross = np.fft.irfft(np.fft.rfft(window, size) * np.conj(np.fft.rfft(reference, size)), size)
+    lags = np.concatenate([np.arange(0, AUDIO_MAX_LAG + 1), np.arange(-AUDIO_MAX_LAG, 0)])
+    lag = int(lags[np.argmax(np.concatenate([cross[:AUDIO_MAX_LAG + 1], cross[size - AUDIO_MAX_LAG:]]))])
+    shifted = heard[lag:lag + n] if lag >= 0 else np.concatenate([np.zeros(-lag), heard[:n + lag]])
+    error = float(np.sum((shifted - reference) ** 2))
+    return float("inf") if error == 0 else float(10 * np.log10(np.sum(reference ** 2) / error))
+
+
 def judge_mp4(out, ledger, burnin, tools):
     """Checks that tie the mp4 back to the sealed chain.  Each entry names what it compared."""
     ffmpeg, ffprobe = tools
@@ -142,6 +162,9 @@ def judge_mp4(out, ledger, burnin, tools):
     luma_hash = hashlib.sha256(luma).hexdigest()
     add("mp4.luma_equals_burnin", luma_hash == burnin["frames_sha256"], "the decoded luma plane equals captions/frames.y8, byte for byte (lossless video)",
         decoded_luma_sha256=luma_hash, frames_sha256=burnin["frames_sha256"])
+    planes = np.frombuffer(decoded[:count * plane], dtype=np.uint8).reshape(count, plane)[:, size:] if count else np.zeros((0, 0), dtype=np.uint8)
+    deviation = int(np.abs(planes.astype(np.int16) - 128).max()) if planes.size else 255
+    add("mp4.chroma_flat", deviation <= CHROMA_TOLERANCE, f"the chroma planes are flat grey (the chain writes 128; video is lossless), within {CHROMA_TOLERANCE}", max_deviation=deviation)
 
     pcm = np.frombuffer(decode(ffmpeg, path, "-map", "0:a:0", "-ar", "16000", "-ac", "1"), dtype="<i2").astype(np.float64) / 32768.0
     rate, delivered = pc.read_pcm16(out / "audio" / "dialogue-delivered.wav")
@@ -149,6 +172,12 @@ def judge_mp4(out, ledger, burnin, tools):
     heard = ld.measure(pcm[:len(delivered)], rate)["integrated_lufs"]
     add("mp4.audio_loudness", abs(heard - reference) <= LOUDNESS_TOLERANCE_LU, f"the mp4's audio measures within {LOUDNESS_TOLERANCE_LU} LU of the delivered dialogue (AAC is lossy)",
         delivered_lufs=round(reference, 2), mp4_lufs=round(heard, 2))
+    snr = aligned_snr_db(pcm, delivered)
+    add("mp4.audio_matches_delivered", snr >= AUDIO_MIN_SNR_DB, f"the mp4's sound is the delivered dialogue: at least {AUDIO_MIN_SNR_DB} dB SNR against dialogue-delivered.wav (AAC is lossy)",
+        snr_db=None if snr in (float("inf"), float("-inf")) else round(snr, 1))
+    padding = pcm[len(delivered) + PADDING_GUARD:]
+    peak = float(np.abs(padding).max()) if padding.size else 0.0
+    add("mp4.audio_padding_silent", peak <= PADDING_PEAK, "after the dialogue the mp4's padding is silent", padding_peak=round(peak, 4))
     return checks
 
 

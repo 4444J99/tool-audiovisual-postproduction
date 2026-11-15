@@ -21,7 +21,7 @@ Needs NumPy and SciPy (the chain's loudness stage) and an ffmpeg with `libx264` 
 | `qc/qc-report.json` | the chain's own delivery QC ([DELIVERY-QC](DELIVERY-QC.md)) |
 | everything else | the chain's artefacts, listed in [PIPELINE-CHAIN](PIPELINE-CHAIN.md) |
 
-`demo-qc.json` checks: one video and one audio stream; H.264 at the burn-in geometry and the ledger's exact frame rate; AAC 16 kHz mono; container duration equals the final ledger's seconds; frame count equals the ledger's; **the decoded luma plane equals `captions/frames.y8` byte for byte** (the video is lossless, and the chroma planes are flat grey); and the mp4's audio measures within 1 LU of the delivered dialogue (AAC is lossy, so this is a tolerance, observed -22.93 against -23.00 LUFS).
+`demo-qc.json` checks: one video and one audio stream; H.264 at the burn-in geometry and the ledger's exact frame rate; AAC 16 kHz mono; container duration equals the final ledger's seconds; frame count equals the ledger's; **the decoded luma plane equals `captions/frames.y8` byte for byte** (the video is lossless); the decoded chroma planes are flat grey (every U and V value within 1 of 128); the mp4's audio measures within 1 LU of the delivered dialogue (AAC is lossy, so this is a tolerance, observed -22.93 against -23.00 LUFS); the mp4's sound is the delivered dialogue, at least 15 dB SNR against `dialogue-delivered.wav` after alignment (a clean encode measures about 33 dB, noise at the same loudness about -3 dB); and the padding after the dialogue stays below 0.01 full scale (the clean demo is exactly zero). A tone or noise added where the dialogue is not, or sound that is not the dialogue at the right loudness, fails here even when `demo-hashes.json` has been re-sealed.
 
 ## Expected hashes
 
