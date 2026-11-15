@@ -21,6 +21,7 @@ import {describeControls} from '../../web/fx/controller-map.mjs';
 import {validatePatch} from '../../web/fx/core.mjs';
 import {OSC_ROOT, ECHO_TOLERANCE, RULE_KINDS, encodeSegment, nodeAddress, ruleAddress} from '../../web/fx/osc-control.mjs';
 import {EFFECTS, expr} from './effects.mjs';
+import {planLatency, cacheSizeText, cacheIndexText, LIMITED, LOOKAHEAD, DEFAULT_MAX_LATENCY} from './latency.mjs';
 import {VOCABULARY, PORT_FAMILY, SELECT, NULL, CUSTOM_PAR_NAME, OPERATOR_NAME} from './vocabulary.mjs';
 
 export const SPEC_SCHEMA = 'amps.td-network.v1';
@@ -89,19 +90,31 @@ const parDefinition = (control, page) => control.kind === 'toggle'
   });
 
 /** The initial `resolved` table: the base values, before the first frame is resolved. */
-function resolvedTable(node, controls) {
+function resolvedTable(node, controls, lag = 0, lookahead = 0) {
   const definition = CATALOG_BY_TYPE[node.type];
   return [
     ['intensity', fixed(node.intensity)], ['wet', fixed(node.wet)], ['bypass', node.bypass ? 1 : 0], ['solo', node.solo ? 1 : 0], ['active', 1],
     ...definition.params.map(item => [`param.${item.key}`, fixed(node.params[item.key])]),
     ...(definition.params.some(item => item.key === 'reset') ? [['epoch', 0]] : []),   // the latched reset crossing (td_resolve EpochLatch)
+    ...extraRows(node.type, lag, lookahead).map(key => [key, key === 'pick' ? 0 : key === 'record' ? 1 : key === 'depth' ? lookahead : 0]),
   ];
 }
 
+/** The rows beyond the common ones that a processor behind a look-ahead buffer resolves (see latency.mjs): its own `clock`, and the
+ *  reads of Reverse and Stutter. Empty when nothing in the rack has a latency on this processor's path, so a rack without look-ahead is unchanged. */
+export function extraRows(type, lag, lookahead) {
+  if (!(lag > 0)) return [];
+  if (lookahead > 0 && type === 'reverse') return ['clock', 'depth', 'shift'];
+  if (lookahead > 0 && type === 'stutter') return ['clock', 'pick', 'depth', 'record'];
+  return ['clock'];
+}
+
 /** Everything the resolver needs to reproduce the workbench's evaluatedNode for one processor. */
-function resolveBlock(node, patch) {
+function resolveBlock(node, patch, entry = {lag: 0, lookahead: 0}) {
   const definition = CATALOG_BY_TYPE[node.type];
+  const limits = entry.lookahead > 0 ? Object.fromEntries((LIMITED[node.type] ?? []).map(key => [key, entry.lookahead])) : {};
   return {
+    ...(entry.lag > 0 ? {lag: entry.lag, lookahead: entry.lookahead, duration: patch.duration, ...(Object.keys(limits).length ? {limits} : {})} : {}),
     order: definition.params.map(item => item.key),
     params: Object.fromEntries(definition.params.map(item => [item.key, {min: item.min, max: item.max, step: item.step}])),
     macro: (node.macro ?? []).map(item => ({parameter: item.parameter, min: item.min, max: item.max, curve: item.curve})),
@@ -119,6 +132,9 @@ export function buildNetworkSpec(patch, options = {}) {
   const rootName = options.rootName ?? 'fx_rack';
   const pictureFps = options.pictureFps ?? PICTURE_FPS;
   if (!(Number.isFinite(pictureFps) && pictureFps > 0)) throw Error('pictureFps must be a positive number.');
+  const maxLatency = options.maxLatency ?? DEFAULT_MAX_LATENCY;
+  const plan = planLatency(patch, maxLatency);
+  const edgeDelay = new Map(patch.connections.map((edge, index) => [edge, plan.wires[index].delay]));   // seconds each wire is delayed to meet its destination's lag
   const taken = new Set(['osc_in', 'osc_in_callbacks', 'osc_out', 'td_osc', 'td_contract', 'par_exec_nodes', 'par_exec_rack', 'td_resolve', 'frame_exec', 'video_out', 'audio_out']);
   const names = new Map(patch.nodes.map(node => [node.id, operatorName(node.id, taken)]));
   const warnings = [];
@@ -132,6 +148,16 @@ export function buildNetworkSpec(patch, options = {}) {
   const incoming = new Map(patch.nodes.map(node => [node.id, Object.fromEntries(PORTS.map(port => [port, []]))]));
   for (const edge of patch.connections) incoming.get(edge.to)[edge.port].push(edge);
   const wires = [];
+  /** Delay a wire by `seconds` so it meets wires of greater lag (picture: a cache read back; audio and control: a Delay CHOP). Text has no delay. */
+  const alignWire = (comp, name, tail, family, seconds, warn, label) => {
+    if (family === 'TOP') {
+      add(comp, `${name}_cache`, 'cacheTOP', {inputs: [tail], pars: {cachesize: expr(cacheSizeText(seconds)), active: 1}});
+      return add(comp, name, 'cacheselectTOP', {pars: {cachetop: {ref: `${comp}/${name}_cache`}, index: expr(cacheIndexText(seconds, seconds))}}).name;
+    }
+    if (family === 'CHOP') return add(comp, name, 'delayCHOP', {inputs: [tail], pars: {delay: seconds}}).name;
+    warn.push(`${label}: a text wire is not delayed, so it runs ${seconds} s ahead of the signals it meets.`);
+    return tail;
+  };
 
   const nodes = [];
   for (const node of patch.nodes) {
@@ -167,6 +193,8 @@ export function buildNetworkSpec(patch, options = {}) {
               : add(comp, `gain_${port}_${index}`, 'mathCHOP', {inputs: [tail], pars: {gain: edge.gain}});
             tail = gain.name;
           } else if (edge.gain !== 1) warnings.push(`${edge.from} -> ${edge.to} (${port}): text wires carry no gain.`);
+          const late = edgeDelay.get(edge);
+          if (late > 1e-9) tail = alignWire(comp, `align_${port}_${index}`, tail, family, late, warnings, `${edge.from} -> ${edge.to} (${port})`);
           tails.push(tail);
         });
         let source = tails[0];
@@ -204,16 +232,19 @@ export function buildNetworkSpec(patch, options = {}) {
       add(comp, 'out_audio', 'nullCHOP', {inputs: ['gain_audio']});
       for (const port of ['matte', 'control', 'text']) add(comp, `out_${port}`, NULL[PORT_FAMILY[port]], {inputs: [`in_${port}`]});
     } else {
-      add(comp, 'resolved', 'tableDAT', {table: resolvedTable(node, controls)});
+      const latency = plan.nodes.get(node.id);
+      add(comp, 'resolved', 'tableDAT', {table: resolvedTable(node, controls, latency.lag, latency.lookahead)});
       const wet = expr('{wet}'), bypass = expr('int({bypass})');
-      const effect = EFFECTS[node.type]?.((name, type, extra = {}) => add(comp, name, type, {...extra, pars: Object.fromEntries(Object.entries(extra.pars ?? {}).map(([key, value]) => [key, value && typeof value === 'object' && 'ref' in value ? {ref: `${comp}/${value.ref}`} : value]))}));
+      if (latency.lookahead > 0 && LOOKAHEAD[node.type]() > latency.lookahead + 1e-9) warnings.push(`${node.id}: ${node.type} can read ${LOOKAHEAD[node.type]()} s ahead but the latency is capped at ${maxLatency} s${LIMITED[node.type] ? `, so ${LIMITED[node.type].join(', ')} is limited to ${latency.lookahead} s` : '; a read beyond the cap shows the newest frame'}.`);
+      const effectContext = {lookahead: latency.lookahead, lag: latency.lag, ...(latency.lag > 0 ? {clock: '{clock}'} : {})};
+      const effect = EFFECTS[node.type]?.((name, type, extra = {}) => add(comp, name, type, {...extra, pars: Object.fromEntries(Object.entries(extra.pars ?? {}).map(([key, value]) => [key, value && typeof value === 'object' && 'ref' in value ? {ref: `${comp}/${value.ref}`} : value]))}), effectContext);
       // Like the workbench, a processor only touches the shared voice when it targets `voice`, and the picture when it
       // targets any visual stream; otherwise that signal passes through untouched.
       const targetsVoice = !node.targets || node.targets.includes('voice');
       const targetsPicture = !node.targets || node.targets.some(target => ['picture', 'body', 'objects', 'room'].includes(target));
       effect?.shared?.();
-      const pictureTail = effect?.picture && targetsPicture ? effect.picture() : 'in_picture';
-      const audioTail = effect?.audio && targetsVoice ? effect.audio() : 'in_audio';
+      let pictureTail = effect?.picture && targetsPicture ? effect.picture() : 'in_picture';
+      let audioTail = effect?.audio && targetsVoice ? effect.audio() : 'in_audio';
       if (effect?.picture && !targetsPicture) warnings.push(`${node.id}: no picture target, so the ${node.type} picture effect is not built.`);
       if (effect?.audio && !targetsVoice) warnings.push(`${node.id}: no voice target, so the ${node.type} audio effect is not built.`);
       if (!effect) warnings.push(`${node.id}: the ${node.type} effect is not implemented in this network; it passes signal through unchanged.`);
@@ -222,20 +253,35 @@ export function buildNetworkSpec(patch, options = {}) {
         if (!effect.picture) warnings.push(`${node.id}: ${node.type} has no picture effect in this network.`);
         if (!effect.audio) warnings.push(`${node.id}: ${node.type} has no audio effect in this network.`);
       }
+      if (effect?.audioAlignedOnly && targetsVoice) warnings.push(`${node.id}: the ${node.type} voice is delayed by its ${latency.lookahead} s latency and otherwise passes; its audio effect needs a per-sample history reader this network does not build.`);
+      // behind a look-ahead buffer the dry branch is delayed by the same latency, so wet / dry and bypass stay aligned
+      const delayed = latency.lookahead > 0;
+      let dryPicture = 'in_picture', dryAudio = 'in_audio';
+      if (delayed) {
+        dryPicture = alignWire(comp, 'dry_picture', 'in_picture', 'TOP', latency.lookahead, warnings, node.id);
+        dryAudio = alignWire(comp, 'dry_audio_in', 'in_audio', 'CHOP', latency.lookahead, warnings, node.id);
+        warnings.push(`${node.id}: its matte and text wires are not delayed by its ${latency.lookahead} s latency.`);
+        // a signal this processor does not target still leaves it L seconds late, like the one it processes, so the wet branch is delayed too
+        if (pictureTail === 'in_picture') pictureTail = dryPicture;
+        if (audioTail === 'in_audio') audioTail = dryAudio;
+      }
       add(comp, 'proc_picture', 'nullTOP', {inputs: [pictureTail], slot: 'picture'});
-      add(comp, 'blend_picture', 'crossTOP', {inputs: ['in_picture', 'proc_picture'], pars: {cross: wet}});
-      add(comp, 'bypass_picture', 'switchTOP', {inputs: ['blend_picture', 'in_picture'], pars: {index: bypass}});
+      add(comp, 'blend_picture', 'crossTOP', {inputs: [dryPicture, 'proc_picture'], pars: {cross: wet}});
+      add(comp, 'bypass_picture', 'switchTOP', {inputs: ['blend_picture', dryPicture], pars: {index: bypass}});
       add(comp, 'out_picture', 'nullTOP', {inputs: ['bypass_picture']});
       add(comp, 'proc_audio', 'nullCHOP', {inputs: [audioTail], slot: 'audio'});
       add(comp, 'wet_audio', 'mathCHOP', {inputs: ['proc_audio'], pars: {gain: wet}});
-      add(comp, 'dry_audio', 'mathCHOP', {inputs: ['in_audio'], pars: {gain: expr('1 - {wet}')}});
+      add(comp, 'dry_audio', 'mathCHOP', {inputs: [dryAudio], pars: {gain: expr('1 - {wet}')}});
       add(comp, 'blend_audio', 'mathCHOP', {inputs: ['wet_audio', 'dry_audio'], pars: {chopop: 'add'}});
-      add(comp, 'bypass_audio', 'switchCHOP', {inputs: ['blend_audio', 'in_audio'], pars: {index: bypass}});
+      add(comp, 'bypass_audio', 'switchCHOP', {inputs: ['blend_audio', dryAudio], pars: {index: bypass}});
       add(comp, 'out_audio', 'nullCHOP', {inputs: ['bypass_audio']});
-      for (const port of ['matte', 'control', 'text']) add(comp, `out_${port}`, NULL[PORT_FAMILY[port]], {inputs: [`in_${port}`]});
+      for (const port of ['matte', 'control', 'text']) {
+        const through = delayed && port === 'control' ? alignWire(comp, 'dry_control', 'in_control', 'CHOP', latency.lookahead, warnings, node.id) : `in_${port}`;
+        add(comp, `out_${port}`, NULL[PORT_FAMILY[port]], {inputs: [through]});
+      }
       if (node.modulation) warnings.push(`${node.id}: sidechain modulation (${node.modulation.parameter}, ${node.modulation.mode}) is carried in the contract but not applied by this network.`);
     }
-    nodes.push({id: node.id, comp, type: node.type, structural: !isFx, typeAddress: `/${OSC_ROOT}/node/${encodeSegment(node.id)}/type`, controls, ...(node.modulation ? {modulation: node.modulation} : {}), ...(isFx ? {resolve: resolveBlock(node, patch)} : {})});
+    nodes.push({id: node.id, comp, type: node.type, structural: !isFx, typeAddress: `/${OSC_ROOT}/node/${encodeSegment(node.id)}/type`, controls, ...(node.modulation ? {modulation: node.modulation} : {}), ...(isFx ? {resolve: resolveBlock(node, patch, plan.nodes.get(node.id))} : {})});
   }
 
   const output = patch.nodes.find(node => node.type === 'output');
@@ -252,6 +298,11 @@ export function buildNetworkSpec(patch, options = {}) {
   const processors = nodes.filter(node => !node.structural);
   const contract = {
     schema: CONTRACT_SCHEMA, root: `/${OSC_ROOT}`, echoTolerance: ECHO_TOLERANCE, pictureFps, rack: rackContract,
+    latency: {
+      seconds: fixed(plan.seconds), maxLatency, address: `/${OSC_ROOT}/latency`,
+      compensation: 'the output at rack Time T shows workbench time T - seconds, so the rack reports its playhead to the network as the playhead + seconds',
+      nodes: [...plan.nodes].map(([id, entry]) => ({id, lagIn: fixed(entry.lagIn), lookahead: fixed(entry.lookahead), lag: fixed(entry.lag)})).filter(entry => entry.lag > 0),
+    },
     nodes: processors, // structural nodes carry no OSC address
     selectedSlots: processors.flatMap(node => node.controls.map(control => ({id: node.id, path: control.path, address: `/${OSC_ROOT}/selected/${control.slot.replace(':', '/')}`, slot: control.slot}))),
   };
@@ -431,10 +482,21 @@ export function validateNetworkSpec(spec) {
       if (!range || range.min !== item.min || range.max !== item.max || range.step !== item.step) fail(`contract: ${node.id}.${item.key} resolve range differs from the catalog`);
     }
     const rows = tableKeys.get(`${node.comp}/resolved`);
-    const expected = ['intensity', 'wet', 'bypass', 'solo', 'active', ...definition.params.map(item => `param.${item.key}`), ...(definition.params.some(item => item.key === 'reset') ? ['epoch'] : [])];
+    const expected = ['intensity', 'wet', 'bypass', 'solo', 'active', ...definition.params.map(item => `param.${item.key}`), ...(definition.params.some(item => item.key === 'reset') ? ['epoch'] : []), ...extraRows(node.type, block.lag ?? 0, block.lookahead ?? 0)];
     if (!rows || expected.length !== rows.size || !expected.every(key => rows.has(key))) fail(`contract: ${node.comp}/resolved does not hold the resolved rows`);
   }
   if (!(Number.isFinite(spec.contract.pictureFps) && spec.contract.pictureFps > 0)) fail('contract: pictureFps must be a positive number');
+  const latency = spec.contract.latency;
+  if (!latency || !(Number.isFinite(latency.seconds) && latency.seconds >= 0)) fail('contract: latency.seconds must be a non-negative number');
+  else {
+    claim(latency.address, 'latency');
+    const lagOf = new Map(latency.nodes.map(entry => [entry.id, entry]));
+    for (const node of spec.contract.nodes) {
+      const entry = lagOf.get(node.id), block = node.resolve ?? {};
+      if ((block.lag ?? 0) !== (entry?.lag ?? 0) || (block.lookahead ?? 0) !== (entry?.lookahead ?? 0)) fail(`contract: ${node.id} resolves at lag ${block.lag ?? 0} but the latency table says ${entry?.lag ?? 0}`);
+    }
+    for (const entry of latency.nodes) if (Math.abs(entry.lag - entry.lagIn - entry.lookahead) > 1e-9) fail(`contract: ${entry.id} lag is not its input lag plus its look-ahead`);
+  }
   const rack = spec.contract.rack;
   for (const item of [rack.selected, rack.count, rack.time, rack.status, ...rack.transport, ...rack.pulses]) if (!customOf.get('').has(item.par)) fail(`contract: rack lacks ${item.par}`);
   for (const item of [rack.selected, rack.selectedType, rack.count, rack.time, ...rack.transport, ...rack.pulses.filter(p => p.par !== rack.sync.par)]) claim(item.address, 'rack');

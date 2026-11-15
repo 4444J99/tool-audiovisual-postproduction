@@ -123,6 +123,7 @@ class RackLink:
             self.count = int(args[0])
             self.backend.set('', rack['count']['par'], self.count)
             self._status()
+            self.announce_latency()   # the first thing a (re)connected rack reports is its count: tell it what the playhead must be advanced by
             return True
         if address == rack['selected']['address']:
             if not args or not isinstance(args[0], str):
@@ -223,12 +224,25 @@ class RackLink:
             return (item['address'], args)
         return None
 
+    def announce_latency(self):
+        """Tell the workbench the rack's declared latency (contract `latency`), so it reports its playhead that many seconds ahead and the
+        output lines up with it. A rack without latency says 0, which clears what an earlier rack on the same link declared (a patch
+        replaced without reconnecting the bridge). A contract that predates the field says nothing."""
+        latency = self.contract.get('latency')
+        if not latency or not _number(latency.get('seconds')) or latency['seconds'] < 0:
+            return None
+        self.backend.send(latency['address'], [float(latency['seconds'])])
+        return (latency['address'], [float(latency['seconds'])])
+
     def pulse(self, comp, par):
         item = self.pulses.get(par) if comp == '' else None
         if not item:
             return None
         if item['address'] == self.contract['rack']['sync']['address']:
             self.last.clear()   # the rack is about to resend everything; none of it is an echo
+            self.backend.send(item['address'], [])
+            self.announce_latency()
+            return (item['address'], [])
         self.backend.send(item['address'], [])
         return (item['address'], [])
 

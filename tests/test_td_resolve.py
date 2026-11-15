@@ -66,7 +66,9 @@ class ParityTests(unittest.TestCase):
                     self.assertTrue(math.isclose(have["intensity"], want["intensity"], abs_tol=1e-9), where + " intensity")
                     self.assertTrue(math.isclose(have["wet"], want["wet"], abs_tol=1e-9), where + " wet")
                     self.assertEqual(set(have["params"]), set(want["params"]), where)
+                    limits = next(n for n in data["contract"]["nodes"] if n["id"] == node_id)["resolve"].get("limits", {})
                     for key, value in want["params"].items():
+                        value = min(value, limits.get(key, value))   # a parameter a look-ahead buffer cannot cover is limited to its latency
                         self.assertTrue(math.isclose(have["params"][key], value, abs_tol=1e-9), "%s %s: %r != %r" % (where, key, have["params"][key], value))
                     self.assertEqual((have["solo"], have["bypass"], have["active"]), (want["solo"], want["bypass"], want["active"]), where)
                     compared += 1

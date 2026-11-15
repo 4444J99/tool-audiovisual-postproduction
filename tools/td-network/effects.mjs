@@ -15,7 +15,11 @@
  * `expr(template)` turns a template into {expr, resolved, rack, siblings} so the validator can check that every row,
  * rack parameter and sibling the expression reads exists.
  */
-const COMMON = new Set(['intensity', 'wet', 'bypass', 'solo', 'active', 'epoch']);
+import {HISTORY, cacheSizeText, cacheIndexText} from './latency.mjs';
+
+/** Rows every processor's `resolved` table can carry besides `param.<key>`: `epoch` (Feedback), and for a processor behind a
+ *  look-ahead buffer `clock` (its own time) plus the derived reads of Reverse (`depth`, `shift`) and Stutter (`pick`, `depth`, `record`). */
+const COMMON = new Set(['intensity', 'wet', 'bypass', 'solo', 'active', 'epoch', 'clock', 'depth', 'shift', 'pick', 'record']);
 export const rowName = key => (COMMON.has(key) ? key : `param.${key}`);
 const RESOLVED = key => `float(parent().op('resolved')['${rowName(key)}',1].val)`;
 
@@ -92,8 +96,9 @@ function delay(add) {
 }
 
 /** Gate / Erase: a periodic (or sidechain-threshold) opening, edge-smoothed, closed state held at Closed-state residue. */
-function gate(add) {
-  const open = '(1 if (({rack.Time} / max(0.1, {period}) + {phase}) % 1) < {duty} else 0) if {detector} < 0.5 else (1 if (float({op:in_control}[0].eval()) if {op:in_control}.numChans else 0) > {threshold} else 0)';
+function gate(add, ctx = {}) {
+  const T = ctx.clock ?? '{rack.Time}';
+  const open = `(1 if ((${T} / max(0.1, {period}) + {phase}) % 1) < {duty} else 0) if {detector} < 0.5 else (1 if (float({op:in_control}[0].eval()) if {op:in_control}.numChans else 0) > {threshold} else 0)`;
   const shared = () => {
     add('gate_raw', 'constantCHOP', {pars: {const0name: 'open', const0value: expr(`{retain} + (1 - {retain}) * (${open})`)}});
     add('gate_ctrl', 'lagCHOP', {inputs: ['gate_raw'], pars: {lag1: expr('max(0.002, {edge})'), lag2: expr('max(0.002, {edge})')}});
@@ -115,10 +120,11 @@ const MAX_RECURRENCES = 16;
  * history, not its own output, so it is a finite set of Cache Select taps, not a Feedback TOP loop. A tap that would reach
  * further back than the cache holds is switched off (as in Delay / Echo), never collapsed onto the oldest frame.
  */
-function feedback(add) {
+function feedback(add, ctx = {}) {
+  const T = ctx.clock ?? '{rack.Time}';
   const frames = k => `int(round({time} * ${k} * project.cookRate))`;
   // `epoch` is the latched reset crossing the resolver keeps (td_resolve EpochLatch): 0 until Reset time is reached, then that time
-  const passes = `min(int(round({repeats})), int(({rack.Time} - {epoch}) / max(0.001, {time})))`;
+  const passes = `min(int(round({repeats})), int((${T} - {epoch}) / max(0.001, {time})))`;
   const picture = () => {
     add('fb_cache', 'cacheTOP', {inputs: ['in_picture'], pars: {cachesize: CACHE_FRAMES, active: 1}});
     let below = 'in_picture';
@@ -138,9 +144,10 @@ function feedback(add) {
 }
 
 /** Displacement: a moving noise field (Field scale, Field movement) pulls the picture by Visual displacement along Direction. */
-function displacement(add) {
+function displacement(add, ctx = {}) {
+  const T = ctx.clock ?? '{rack.Time}';
   const picture = () => {
-    add('dsp_field', 'noiseTOP', {pars: {period: expr('1 / max(0.05, {scale})'), tz: expr('{rack.Time} * {speed}'), mono: 1, seed: 1, amp: 1}});
+    add('dsp_field', 'noiseTOP', {pars: {period: expr('1 / max(0.05, {scale})'), tz: expr(`${T} * {speed}`), mono: 1, seed: 1, amp: 1}});
     add('dsp_pull', 'displaceTOP', {inputs: ['in_picture', 'dsp_field'], pars: {
       displaceweightx: expr('{amount} * 0.2 * (0 if {direction} == 1 else 1)'),
       displaceweighty: expr('{amount} * 0.2 * (0 if {direction} == 0 else 1)'),
@@ -158,9 +165,10 @@ function displacement(add) {
  * reads the history through two Delay CHOPs whose delay is the age of the grain being repeated. A grain that would start
  * after the live signal (the second grain, in the first half grain of the hold) reads the live signal instead.
  */
-function freeze(add) {
-  const held = '({rack.Time} >= {capture} and {rack.Time} < {capture} + {duration})';
-  const elapsed = '({rack.Time} - {capture})';
+function freeze(add, ctx = {}) {
+  const T = ctx.clock ?? '{rack.Time}';
+  const held = `(${T} >= {capture} and ${T} < {capture} + {duration})`;
+  const elapsed = `(${T} - {capture})`;
   const size = 'max(0.001, {grain})';
   const phase = `(${elapsed} % ${size})`;
   const phase2 = `((${phase} + ${size} / 2) % ${size})`;
@@ -171,7 +179,7 @@ function freeze(add) {
     add('fz_cache', 'cacheTOP', {inputs: ['in_picture'], pars: {cachesize: 2, active: expr(`0 if ${held} else 1`)}});
     add('fz_frame', 'cacheselectTOP', {pars: {cachetop: {ref: 'fz_cache'}, index: 0}});
     add('fz_pick', 'switchTOP', {inputs: ['in_picture', 'fz_frame'], pars: {index: expr(`1 if ${held} else 0`)}});
-    add('fz_shake', 'transformTOP', {inputs: ['fz_pick'], pars: {tx: expr(`(math.sin({rack.Time} * 7) * {motion}) if ${held} else 0`)}});
+    add('fz_shake', 'transformTOP', {inputs: ['fz_pick'], pars: {tx: expr(`(math.sin(${T} * 7) * {motion}) if ${held} else 0`)}});
     add('fz_fade', 'levelTOP', {inputs: ['fz_shake'], pars: {opacity: expr(`max(0.2, 1 - {decay} * ${elapsed} / max(0.001, {duration})) if ${held} else 1`)}});
     return 'fz_fade';
   };
@@ -187,5 +195,52 @@ function freeze(add) {
   return {picture, audio};
 }
 
+/**
+ * Reverse (playback mode): the interval is read backward from a cache of the input, at a depth the resolver computes
+ * (`depth`: seconds behind the input's live edge, from the workbench's own reverseSourceTime at the processor's output
+ * time; see td_resolve). The input runs `lookahead` seconds ahead of the output, so the interval end, which is up to
+ * `span` ahead, is already in the cache. Route mode reads the picture at its own time and slides it by `shift`
+ * (a fraction of the width). The voice is only delayed by the same latency (kept in step with the picture): reversing
+ * it needs a per-sample read of a history buffer that this version does not build.
+ */
+function reverse(add, ctx) {
+  const history = HISTORY.reverse(ctx.lookahead);
+  const picture = () => {
+    add('rv_cache', 'cacheTOP', {inputs: ['in_picture'], pars: {cachesize: expr(cacheSizeText(history)), active: 1}});
+    add('rv_frame', 'cacheselectTOP', {pars: {cachetop: {ref: 'rv_cache'}, index: expr(cacheIndexText('{depth}', history))}});
+    add('rv_move', 'transformTOP', {inputs: ['rv_frame'], pars: {tx: expr('{shift}'), extend: 'zero'}});
+    return 'rv_move';
+  };
+  const audio = () => {
+    add('rv_audio', 'delayCHOP', {inputs: ['in_audio'], pars: {delay: ctx.lookahead}});
+    return 'rv_audio';
+  };
+  return {picture, audio, audioAlignedOnly: true};
+}
+
+/**
+ * Stutter: three picture sources, chosen by the resolver's `pick` (0 the running picture, 1 a repeat, 2 the gap
+ * between repeats, which the workbench draws as nothing): the input delayed by the latency; a cache that stops taking
+ * frames (`record` 0) once the captured window has arrived, read at the resolver's `depth`; and a transparent frame.
+ * The voice is delayed only (as in Reverse).
+ */
+function stutter(add, ctx) {
+  const L = ctx.lookahead, held = HISTORY.stutter();
+  const picture = () => {
+    add('st_live_cache', 'cacheTOP', {inputs: ['in_picture'], pars: {cachesize: expr(cacheSizeText(L)), active: 1}});
+    add('st_live', 'cacheselectTOP', {pars: {cachetop: {ref: 'st_live_cache'}, index: expr(cacheIndexText(L, L))}});
+    add('st_cache', 'cacheTOP', {inputs: ['in_picture'], pars: {cachesize: expr(cacheSizeText(held)), active: expr('int({record})')}});
+    add('st_frame', 'cacheselectTOP', {pars: {cachetop: {ref: 'st_cache'}, index: expr(cacheIndexText('{depth}', held))}});
+    add('st_blank', 'constantTOP', {pars: {colorr: 0, colorg: 0, colorb: 0, alpha: 0}});
+    add('st_pick', 'switchTOP', {inputs: ['st_live', 'st_frame', 'st_blank'], pars: {index: expr('int({pick})')}});
+    return 'st_pick';
+  };
+  const audio = () => {
+    add('st_audio', 'delayCHOP', {inputs: ['in_audio'], pars: {delay: ctx.lookahead}});
+    return 'st_audio';
+  };
+  return {picture, audio, audioAlignedOnly: true};
+}
+
 /** The processors implemented by this version. A builder returns `shared` (optional, called first), `picture` and `audio`. */
-export const EFFECTS = Object.freeze({damage, delay, feedback, freeze, gate, displacement});
+export const EFFECTS = Object.freeze({damage, delay, feedback, freeze, gate, displacement, reverse, stutter});

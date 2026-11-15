@@ -205,7 +205,7 @@ is released in the network and stays so.
 Editing a base parameter in TouchDesigner never sends the resolved value back over OSC: only edits made to the custom
 parameters are exchanged.
 
-**Effects (six of thirteen).** Between `in_<port>` and `proc_<port>` a processor now holds the effect chain
+**Effects (eight of thirteen).** Between `in_<port>` and `proc_<port>` a processor now holds the effect chain
 (`tools/td-network/effects.mjs`). Every effect parameter is an expression over the processor's resolved values, so
 macros, automation, events and sidechain drive it; the chain stays inside the processor, keeps the input's resolution,
 and the network stays static (a count parameter is a fixed maximum of stages switched by its resolved value).
@@ -218,6 +218,35 @@ and the network stays static (a count parameter is a fixed maximum of stages swi
 | Signal Damage | Level TOP stepping (`1 / Picture tone levels`), then Fit TOP down to the requested mosaic cells and back up to the input size, both nearest | drive (Math CHOP), sample-rate hold (Expression CHOP: a new sample every `sample rate / Audio sample-rate reduction` samples, taken where the workbench's hold phase reaches 1, within one sample), bit-depth quantise (Expression CHOP), bandwidth limit (Lag CHOP, `1 / (2 pi band)`), independent output level |
 | Feedback | up to 16 returns, each a Cache Select tap `k x Feedback delay` back, a Transform TOP (`Scale per recurrence^k`, `Rotation per recurrence x k`, `extend` zero so the area outside the scaled picture is transparent), a Level TOP whose opacity is `Return gain^k`, and an Over TOP laying it over the picture so far (source-over, as the workbench draws it); return k exists while `k <= min(Maximum recurrences, floor((time - epoch) / delay))`, `Return gain^k >= Tail threshold`, and the tap is inside the 240-frame cache; `epoch` is the playhead time at which `Reset time` was last reached (0 before), a resolved row the resolver latches frame by frame as the workbench does, so a Reset time that tracks the playhead never cuts the returns off | none |
 | Displacement | moving Noise TOP (`Field scale`, `Field movement`) pulling the picture through a Displace TOP along `Direction` | none |
+| Reverse | a Cache TOP of the input read at the resolver's `depth` (see Latency below), then a Transform TOP sliding it by `shift` in route mode; mode, span, speed and pivot come from the workbench's own `reverseSourceTime` | only delayed by the processor's latency (the reversal itself needs a per-sample history reader, not built) |
+| Stutter | three sources chosen by the resolver's `pick`: the input delayed by the latency, a Cache TOP that stops taking frames once the captured window has arrived (read at `depth`), and a transparent frame for the gap between repeats | only delayed by the processor's latency |
+
+**Latency (look-ahead buffers).** Reverse and Stutter read source time ahead of their playhead, which a live network cannot read.
+Each is given a fixed, declared latency instead (`tools/td-network/latency.mjs`): the stream it receives runs `lookahead` seconds
+ahead of the stream it emits, and it reads a Cache TOP of its input at depths up to that far ahead. The bounds come from the workbench's own
+functions at the catalog's extremes, and `tests/test_td_latency.py` sweeps `reverseSourceTime` and `stutterSourceTime` to check that no read goes further
+ahead than the bound and that the bound is reached: Reverse reads at most `span` ahead (5 s at the catalog maximum), Stutter at most `window x (1 - 1 / rate)` (1 s).
+
+- **Capped.** The default cap is 2.5 s (`maxLatency` option of the generator): at 60 frames per second the Reverse cache holds 5 s, 302 frames, which is already
+  gigabytes at 1080p. Every latency cache is sized by an expression of `project.cookRate` (the rate its read indices use), so it covers the delay at any cook rate, at a proportional memory cost. A Reverse whose Span the cap cannot cover has its resolved Span limited to the latency (`limits` in the resolve block, and a warning in the spec);
+  Stutter's 1 s is under the cap. A Stutter whose bound the cap cannot cover reads the newest frame instead of one it has not got.
+- **A path sum.** Every stream has a lag, the seconds its newest frame is behind the live edge (the source: 0). A processor without look-ahead keeps its inputs' lag;
+  one with look-ahead adds its own. Where wires of different lag meet (a mix, a processor with several inputs) the shorter ones are delayed to the longest: picture through a Cache TOP read back,
+  audio and control through a Delay CHOP. A processor with look-ahead delays its own dry branch by the same amount, so wet / dry and bypass stay aligned.
+  Two Reverses in series therefore declare 5 s. The rack's latency is the lag of the output node, `contract.latency.seconds`, with each node's `lagIn`, `lookahead` and `lag` beside it.
+- **Its own clock.** Everything a processor evaluates (automation, events, macros, the clip scope, Solo, Feedback's reset epoch, Gate's period, Displacement's field, Freeze's capture)
+  reads the rack Time minus its output lag: the resolver evaluates at that time and writes it as the `clock` row, and the effects read `{clock}` where they would read the rack Time.
+  Solo is judged at that clock too, as `evaluatedNode` asks. A rack with no look-ahead is unchanged: no `clock` row, no extra operators, byte-identical apart from the new `latency` field of the contract.
+- **How the workbench compensates.** The output at rack Time T shows workbench time T minus the latency. When the rack reports its count (and on every `/fx/sync`) the network
+  sends `/fx/latency <seconds>`; the workbench then reports `/fx/time` as the playhead plus that many seconds, immediately and from then on, and forgets it on reconnect.
+  A latency outside 0 to 60 s is ignored. A rack with no latency sends 0, which clears what an earlier rack on the same link declared (a patch replaced without reconnecting).
+- **Sidechain.** A look-ahead processor resolves at its own clock, so it reads the sidechain level delayed by the same look-ahead (`dry_control`), not the one arriving now.
+- **What a processor does not target.** A signal a look-ahead processor does not process (the voice of a picture-only Reverse, the picture of a voice-only Stutter) is delayed by the same latency on its wet branch, so it leaves the processor as late as the one that is processed.
+- **Stutter's frozen endpoint.** The repeat cache stops at the end of the captured window and holds what it held; the resolver remembers that endpoint (per processor) so a Window edited or automated during the hold does not move it. A repeat that reaches past what was captured shows the last captured frame.
+- **What the resolver names.** For Reverse, `depth` (seconds behind the input's live edge) and `shift`; for Stutter, `pick`, `depth` and `record`. The tests compare them with the engine's source time over grids of
+  every parameter's extremes (`tests/test_td_latency.py`), and the resolved values of every fixture with `evaluatedNode` at the processor's clock (`tests/test_td_resolve.py`).
+- **Limits.** A seek reads a cache that was not filled in order (the same limit as Freeze, issue 151). The matte and text wires are not delayed by a look-ahead processor (a warning says so; the matte is constant in this network and text is empty). Reverse's route mode needs the same latency as playback mode because the mode is an editable parameter.
+  Nothing here has been run in TouchDesigner; the operator and parameter names are checked against its reference (`check-vocabulary.mjs`), and the Cache Select `index` sign convention is the one Delay and Feedback already use.
 
 Like the workbench, a processor builds its audio chain only when it targets `voice` and its picture chain only when it targets `picture`, `body`, `objects` or `room`; otherwise that signal passes through and the spec's `warnings` say so.
 
@@ -238,9 +267,9 @@ Sample-wise expressions (Signal Damage's hold, the source's sidechain envelope) 
 
 **Scrubbing backward through Feedback's reset epoch.** `EpochLatch` keeps its state every 64 picture frames as the walk passes, so a backward seek replays at most 64 frames from the nearest saved state instead of the whole history; measured on a 2,000-frame walk, 200 backward single-frame seeks took 1.40 s before and 0.023 s after, with identical answers (`tests/test_td_epoch.py`).
 
-**Not applied by this network:** the effects of the other seven processors (Routing, Stutter, Granular, Reverse,
+**Not applied by this network:** the effects of the other five processors (Routing, Granular,
 Queue / Overflow, Exchange, Typography), which pass signal through unchanged and are named in the
-spec's `warnings` (Reverse and part of Stutter read source time ahead of the playhead, which a live network cannot);
+spec's `warnings`; the voice of Reverse and Stutter (delayed only, see Latency);
 the audio of Feedback and Displacement; Signal Damage's picture `Signal drive`; Displacement's `Boundary spill`, audio warp and ring
 blend; the source excerpt offset (`Offset`, read-only); and audio device output. Text wires carry no gain, and several
 text wires at one mix read only the first. The menu values these chains set (`custom` resolution, `nearest` filtering,

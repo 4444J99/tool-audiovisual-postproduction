@@ -196,7 +196,9 @@ test('round trip: the rack reports its state, the Python module sets the paramet
     const reports = new OscFeedback().collect(view, {full: true});
     const out = probe({module: moduleSource, contract: spec.contract, reports, edits: []});
     assert.ok(out.understood.every(Boolean), `${label}: some rack report was not understood`);
-    assert.deepEqual(out.echoed, [], `${label}: applying the rack's own report must not send anything back`);
+    // the only thing a rack may say back is its declared latency, once, when it hears the count
+    const latency = [{address: spec.contract.latency.address, args: [spec.contract.latency.seconds]}];   // zero too: it clears an earlier rack's
+    assert.deepEqual(out.echoed, latency, `${label}: applying the rack's own report must not send anything back but its latency`);
     for (const node of spec.contract.nodes) for (const control of node.controls) {
       const got = out.params[`${node.comp}|${control.par}`], want = view.current(node.id, control.path);
       if (control.kind === 'toggle') assert.equal(Boolean(got), Boolean(want), `${label} ${node.id}.${control.path}`);
@@ -476,7 +478,7 @@ test('an off-grid value on the rack (a preset, or an automation sample) is not s
   view.values.set(`${node.id}|params.time`, 0.483);      // step is 0.01
   const reports = new OscFeedback().collect(view, {full: true});
   const out = probe({module: moduleSource, contract: spec.contract, reports, edits: []});
-  assert.deepEqual(out.echoed, []);
+  assert.deepEqual(out.echoed, [{address: '/fx/latency', args: [0]}], 'only the declared latency goes back, never the value that was reported');
   const written = out.params[`${node.comp}|${time.par}`];
   assert.ok(Math.abs(written - 0.483) < 1e-3, `written ${written}`);
   // Feeding TouchDesigner's own value back as an edit is a no-op, so the rack's 0.483 is never replaced by 0.48.

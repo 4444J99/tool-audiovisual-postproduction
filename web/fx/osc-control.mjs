@@ -16,6 +16,7 @@
  *   /fx/selected  <id>               select a processor by id
  *   /fx/select/next | /fx/select/prev
  *   /fx/sync                         ask for the full state to be sent again
+ *   /fx/latency <seconds>            the network's declared latency; /fx/time is then reported that far ahead of the playhead
  * Outbound (rack -> TouchDesigner) uses /fx/node/<id>/..., /fx/transport/..., plus
  * /fx/selected <id>, /fx/selected/type, /fx/time and /fx/count, and the rule messages
  *   /fx/node/<id>/released/<path>    the control's events, automation lane and macro mapping are gone
@@ -30,6 +31,8 @@
 import {describeControls, findControl, normToValue, valueToNorm, GLOBAL_ACTIONS} from './controller-map.mjs';
 
 export const OSC_ROOT = 'fx';
+/** The longest latency the rack accepts from a network (seconds); anything else is ignored. */
+export const MAX_LATENCY = 60;
 const SAFE = /[A-Za-z0-9_.-]/;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder('utf-8', {fatal: true});
@@ -122,6 +125,12 @@ export function interpretOsc(message, view) {
   };
 
   if (area === 'sync' && !rest.length) {result.sync = true; return result;}
+  // The network's declared latency: its output at rack time T shows workbench time T - latency, so the rack reports its playhead that far ahead.
+  if (area === 'latency' && !rest.length) {
+    if (args.length !== 1 || !isNumber(args[0]) || args[0] < 0 || args[0] > MAX_LATENCY) return ignore();
+    result.latency = args[0];
+    return result;
+  }
   if (area === 'select' && rest.length === 1 && (rest[0] === 'next' || rest[0] === 'prev')) {
     if (truthy(args) !== true) return result;
     result.select = {delta: rest[0] === 'next' ? 1 : -1};
@@ -164,8 +173,10 @@ const round = (value, places) => Math.round(value * 10 ** places) / 10 ** places
  * `{address, args}`; `full` resends everything (on connect, or when TouchDesigner asks /fx/sync).
  */
 export class OscFeedback {
-  constructor() {this.last = new Map(); this.time = null; this.rules = new Map();}
-  reset() {this.last.clear(); this.time = null; this.rules.clear();}
+  constructor() {this.last = new Map(); this.time = null; this.rules = new Map(); this.latency = 0;}
+  reset() {this.last.clear(); this.time = null; this.rules.clear(); this.latency = 0;}
+  /** The network declared its latency: the playhead is reported that many seconds ahead from now on. */
+  setLatency(seconds) {this.latency = seconds; this.time = null;}
 
   /**
    * The rule messages for one processor: what the mirroring network must do to match the workbench's rules now.
@@ -233,9 +244,9 @@ export class OscFeedback {
     emit(`/${OSC_ROOT}/selected`, [selected ? selected.id : '']);
     emit(`/${OSC_ROOT}/selected/type`, [selected ? String(selected.type) : '']);
     for (const name of GLOBAL_ACTIONS) emit(`/${OSC_ROOT}/transport/${name}`, [view.global?.(name) ? 1 : 0]);
-    if (isNumber(view.time) && (this.time === null || Math.abs(view.time - this.time) >= .04)) {
-      this.time = view.time;
-      out.push({address: `/${OSC_ROOT}/time`, args: [round(view.time, 3)]});
+    if (isNumber(view.time) && (this.time === null || Math.abs(view.time + this.latency - this.time) >= .04)) {
+      this.time = view.time + this.latency;
+      out.push({address: `/${OSC_ROOT}/time`, args: [round(this.time, 3)]});
     }
     return out;
   }

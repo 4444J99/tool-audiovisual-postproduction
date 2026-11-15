@@ -134,6 +134,7 @@ export class OscSession {
     const view = this.host.getView();
     const result = interpretOsc(parsed.message, view);
     if (result.sync) {this.pump({full: true}); return;}
+    if (result.latency !== undefined) {this.feedback.setLatency(result.latency); this.pump(); return;}
     if (result.select) {
       if (result.select.nodeId) this.host.selectNode(result.select.nodeId); else this.host.select(result.select.delta);
     }
