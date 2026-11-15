@@ -7,6 +7,8 @@
 ``--blender`` also builds the set spec in headless Blender through ``tools/set_scene.py`` and requires
 Blender's graph hash to equal the set stage's.  ``verify`` recomputes every hash on disk, checks that every
 stage input is an earlier stage's output, and checks the content links (same plan, graph and audio).
+The final ``qc`` stage re-derives caption timing, frame-rate/timecode and loudness checks from the sealed artefacts into
+``qc/qc-report.json``; ``--qc-spec`` overrides its limits and ``verify`` re-derives the report (see docs/DELIVERY-QC.md).
 The ``delivery`` stage measures the filled dialogue, applies one linear gain to the declared spec (default EBU R128),
 and reads the written file back; ``verify --delivery X`` also requires the chain to have been delivered to X and
 re-derives the delivered WAV from the filled one.  Every failure prints as JSON and exits 2.  Nothing here reads private media; every input is invented.
@@ -45,6 +47,7 @@ def main(argv=None):
     parser.add_argument("--output", default="outputs/av-pipeline")
     parser.add_argument("--blender", action="store_true")
     parser.add_argument("--delivery", help="loudness preset or spec JSON file (run default ebu_r128; verify: require this spec)")
+    parser.add_argument("--qc-spec", help="delivery QC spec JSON file overriding keys of delivery_qc.DEFAULT_SPEC (run and verify; verify defaults to the default spec)")
     args = parser.parse_args(argv)
     out = Path(args.output)
     try:
@@ -52,9 +55,15 @@ def main(argv=None):
     except (ValueError, OSError) as error:
         print(json.dumps({"errors": [f"delivery spec: {error}"]}, indent=2))
         return 2
+    try:
+        qc_spec = json.loads(Path(args.qc_spec).read_text()) if args.qc_spec else None
+        pc.qc.normalize_spec(qc_spec)
+    except (pc.qc.QcError, OSError, json.JSONDecodeError) as error:
+        print(json.dumps({"errors": [f"qc spec: {error}"]}, indent=2))
+        return 2
     if args.command == "run":
         try:
-            manifest = pc.run_chain(out, delivery=delivery or pc.DEFAULT_DELIVERY)
+            manifest = pc.run_chain(out, delivery=delivery or pc.DEFAULT_DELIVERY, qc_spec=qc_spec)
         except pc.ChainError as error:
             print(json.dumps({"errors": error.errors}, indent=2))
             return 2
@@ -73,7 +82,7 @@ def main(argv=None):
                 return 2
             result["blender_graph_sha256"] = built["graph_sha256"]
             result["stages"].append("blender")
-        problems = pc.verify_chain(out) + pc.cross_checks(out, delivery)
+        problems = pc.verify_chain(out) + pc.cross_checks(out, delivery, qc_spec)
         if problems:
             print(json.dumps({"errors": problems}, indent=2))
             return 2
@@ -81,7 +90,7 @@ def main(argv=None):
         return 0
     try:
         problems = pc.verify_chain(out)
-        problems += pc.cross_checks(out, delivery) if not problems else []
+        problems += pc.cross_checks(out, delivery, qc_spec) if not problems else []
     except (OSError, KeyError, json.JSONDecodeError) as error:
         problems = [f"cannot verify: {error}"]
     if problems:
