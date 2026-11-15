@@ -504,3 +504,21 @@ test('the picture rate the feedback epoch is latched on defaults to the workbenc
   assert.equal(buildNetworkSpec(patch, {pictureFps: 24}).contract.pictureFps, 24);
   for (const bad of [0, -1, Number.NaN, Infinity]) assert.throws(() => buildNetworkSpec(patch, {pictureFps: bad}), /pictureFps/, String(bad));
 });
+
+test('the simulator creates the report directory and still writes a failing report when the link never opens', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'td-sim-report-'));
+  const resultPath = join(dir, 'outputs', 'nested', 'bridge-e2e.json');
+  const freePort = () => new Promise(resolve => { const s = createSocket('udp4'); s.bind(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); }); });
+  const run = spawnSync(process.execPath, [join(here, '../../tools/fx-td-simulator.mjs'), resultPath, '--td-port', String(await freePort()), '--osc-port', String(await freePort()), '--wait-seconds', '1'], {encoding: 'utf8'});
+  assert.equal(run.status, 1, run.stderr);
+  const result = JSON.parse(readFileSync(resultPath, 'utf8'));
+  assert.equal(result.linked, false);
+  assert.equal(result.passed, false);
+});
+
+test('feedback addresses for a node id with reserved characters match what the rack encodes', () => {
+  const id = 'fx 1/a b';
+  const address = oscControl.nodeAddress(id, 'intensity');
+  assert.ok(!address.slice('/fx/node/'.length).split('/')[0].includes(' '));
+  assert.notEqual(address, `/fx/node/${id}/intensity`);
+});

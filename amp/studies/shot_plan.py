@@ -199,6 +199,9 @@ def validate_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
         if not 8.0 <= camera["lens_mm"] <= 400.0:
             errors.append(f"{label}: lens_mm {camera['lens_mm']} outside 8 to 400")
             continue
+        if "sensor_width_mm" in camera and not (_is_num(camera["sensor_width_mm"]) and camera["sensor_width_mm"] > 0):
+            errors.append(f"{label}: sensor_width_mm must be a finite number greater than 0")
+            continue
         half = hfov_deg(camera["lens_mm"], camera.get("sensor_width_mm", 36.0)) / 2.0
         listed = _list(shot.get("performers"), f"{label}: performers", errors)
         for pid in listed:

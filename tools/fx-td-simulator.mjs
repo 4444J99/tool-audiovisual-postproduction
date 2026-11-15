@@ -15,7 +15,9 @@
  */
 import dgram from 'node:dgram';
 import fs from 'node:fs';
+import path from 'node:path';
 import {encodeMessage, decodePacket} from './fx-bridge/osc-codec.mjs';
+import {nodeAddress} from '../web/fx/osc-control.mjs';
 
 const option = (name, fallback) => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : fallback; };
 const resultPath = process.argv[2];
@@ -66,20 +68,21 @@ if (linked && spec) {
   const last = address => log.filter(m => m.address === address).at(-1)?.args?.[0];
   const selected = last('/fx/selected');
   // Targets differ from the reported state, because a value that repeats the rack's own report is an echo, not an edit.
-  const intensity = (last(`/fx/node/${selected}/intensity`) ?? 1) < 0.5 ? 0.75 : 0.25, bypass = last(`/fx/node/${selected}/bypass`) ? 0 : 1, loop = last('/fx/transport/loop') ? 0 : 1;
+  const intensity = (last(nodeAddress(selected, 'intensity')) ?? 1) < 0.5 ? 0.75 : 0.25, bypass = last(nodeAddress(selected, 'bypass')) ? 0 : 1, loop = last('/fx/transport/loop') ? 0 : 1;
   let mark = log.length;
   await send('/fx/selected/knob/0', [intensity]); await wait(1500);
-  note(`knob 0 sets Intensity of the selected processor and the rack reports ${intensity}`, reported(mark, `/fx/node/${selected}/intensity`, a => Math.abs(a[0] - intensity) < 2e-4));
+  note(`knob 0 sets Intensity of the selected processor and the rack reports ${intensity}`, reported(mark, nodeAddress(selected, 'intensity'), a => Math.abs(a[0] - intensity) < 2e-4));
   mark = log.length; await send('/fx/selected/switch/0', [bypass]); await wait(1500);
-  note(`switch 0 sets Bypass to ${bypass}`, reported(mark, `/fx/node/${selected}/bypass`, a => a[0] === bypass));
+  note(`switch 0 sets Bypass to ${bypass}`, reported(mark, nodeAddress(selected, 'bypass'), a => a[0] === bypass));
   mark = log.length; await send('/fx/transport/loop', [loop]); await wait(1500);
   note(`transport loop becomes ${loop}`, reported(mark, '/fx/transport/loop', a => a[0] === loop));
   await send('/fx/bogus/address', [0.5]); await send('/fx/selected/knob/0', ['wrong-type']); await send('/fx/node/no-such-node/intensity', [0.5]); await wait(1000);
   mark = log.length; await send('/fx/sync', []); await wait(1500);
   note('link survives unknown address, wrong type and unknown id (rack still answers /fx/sync)', reported(mark, '/fx/count'));
-  note('ignored messages did not change Intensity', last(`/fx/node/${selected}/intensity`) === undefined || Math.abs(last(`/fx/node/${selected}/intensity`) - intensity) < 2e-4);
+  note('ignored messages did not change Intensity', last(nodeAddress(selected, 'intensity')) === undefined || Math.abs(last(nodeAddress(selected, 'intensity')) - intensity) < 2e-4);
 }
 const result = {schema: 'amps.fx-bridge-e2e.v1', linked, checks, passed: checks.length > 0 && checks.every(c => c.pass), reported: log.length, sample: log.slice(-10)};
+fs.mkdirSync(path.dirname(path.resolve(resultPath)), {recursive: true});
 fs.writeFileSync(resultPath, JSON.stringify(result, null, 2) + '\n');
 console.log(JSON.stringify({passed: result.passed, checks}, null, 2));
 socket.close();
