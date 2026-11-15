@@ -158,6 +158,33 @@ class LoudnessCliTests(unittest.TestCase):
             self.assertEqual(report["problems"], [])
             self.assertEqual(report["output_sha256"], sha(out))
 
+    def test_24_bit_files_keep_their_bit_depth_and_32_bit_does_not_pass_for_24(self):
+        import wave
+        with tempfile.TemporaryDirectory() as d:
+            sys.path.insert(0, str(ROOT / "tools"))
+            import loudness as tool
+            t = np.arange(10 * SR) / SR
+            x = 10 ** (-34 / 20) * np.sin(2 * np.pi * 1000 * t)
+            for channels in (2, 6):
+                src, out = f"{d}/in{channels}.wav", f"{d}/out{channels}.wav"
+                audio = np.stack([x] * channels, axis=1)
+                tool.write_wav(src, SR, audio, "pcm24")
+                self.assertEqual(tool.wav_format(src), (1, 24))
+                result = run("normalize", "--input", src, "--output", out, "--target-lufs", "-23", "--ceiling-dbtp", "-1")
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(tool.wav_format(out), (1, 24), channels)
+                self.assertEqual(Path(out).stat().st_size, Path(src).stat().st_size)
+                self.assertAlmostEqual(json.loads(run("measure", "--input", out).stdout)["integrated_lufs"], -23.0, delta=0.05)
+            with wave.open(f"{d}/out2.wav") as w:
+                self.assertEqual((w.getsampwidth(), w.getnchannels()), (3, 2))
+            wavfile.write(f"{d}/p32.wav", SR, np.round(np.stack([x, x], 1) * 2147483648.0).astype(np.int32))
+            run("normalize", "--input", f"{d}/p32.wav", "--output", f"{d}/p32o.wav", "--target-lufs", "-23", "--ceiling-dbtp", "-1")
+            self.assertEqual(tool.wav_format(f"{d}/p32o.wav"), (1, 32))
+            wavfile.write(f"{d}/f64.wav", SR, np.stack([x, x], 1))      # float64: unsupported, refused rather than mislabelled
+            refused = run("measure", "--input", f"{d}/f64.wav")
+            self.assertEqual(refused.returncode, 2)
+            self.assertIn("unsupported", json.loads(refused.stdout)["error"])
+
     def test_silent_measure_prints_strict_json(self):
         with tempfile.TemporaryDirectory() as d:
             wavfile.write(f"{d}/s.wav", SR, np.zeros((SR * 2, 2), dtype=np.int16))

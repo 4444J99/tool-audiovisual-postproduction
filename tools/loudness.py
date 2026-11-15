@@ -6,7 +6,7 @@
     python tools/loudness.py normalize --input mix.wav --output out.wav --spec ebu_r128 [--report r.json]
                                        [--target-lufs -23] [--ceiling-dbtp -1] [--on-ceiling refuse|cap]
 
-Reads PCM 16-bit, PCM 32-bit or float32 WAV and writes the same sample format.  ``normalize`` applies one
+Reads PCM 16-, 24- or 32-bit or float32 WAV (the bit depth comes from the file header) and writes the same sample format.  ``normalize`` applies one
 linear gain, writes the file, reads the written file back and measures that, so the report states what
 the bytes on disk measure.  If the gain needed to reach the target would put the true peak over the
 ceiling, ``--on-ceiling refuse`` (default) writes nothing and exits 2; ``cap`` lowers the gain to the
@@ -29,31 +29,72 @@ sys.path.insert(0, str(ROOT))
 from amp.studies import loudness as ld  # noqa: E402
 
 
+def wav_format(path):
+    """(format tag, bits per sample) from the RIFF fmt chunk; the extensible tag resolves to its sub-format."""
+    with open(path, "rb") as handle:
+        head = handle.read(12)
+        if head[:4] != b"RIFF" or head[8:12] != b"WAVE":
+            raise ValueError("not a RIFF/WAVE file")
+        while True:
+            chunk = handle.read(8)
+            if len(chunk) < 8:
+                raise ValueError("WAV file has no fmt chunk")
+            size = int.from_bytes(chunk[4:8], "little")
+            if chunk[:4] == b"fmt ":
+                body = handle.read(size)
+                tag, bits = int.from_bytes(body[0:2], "little"), int.from_bytes(body[14:16], "little")
+                if tag == 0xFFFE and len(body) >= 26:
+                    tag = int.from_bytes(body[24:26], "little")
+                return tag, bits
+            handle.seek(size + (size & 1), 1)
+
+
 def read_wav(path):
+    """(sample rate, float64 audio, kind) with kind one of pcm16, pcm24, pcm32, float32."""
+    tag, bits = wav_format(path)
     sr, data = wavfile.read(path)
-    kind = data.dtype
-    if kind == np.int16:
+    kind = {(1, 16): "pcm16", (1, 24): "pcm24", (1, 32): "pcm32", (3, 32): "float32"}.get((tag, bits))
+    if kind is None:
+        raise ValueError(f"unsupported WAV sample format (tag {tag}, {bits} bits); use PCM 16, PCM 24, PCM 32 or float32")
+    if kind == "pcm16":
         audio = data.astype(np.float64) / 32768.0
-    elif kind == np.int32:
+    elif kind in ("pcm24", "pcm32"):          # SciPy returns 24-bit samples left-justified in int32
         audio = data.astype(np.float64) / 2147483648.0
-    elif kind == np.float32:
-        audio = data.astype(np.float64)
     else:
-        raise ValueError(f"unsupported WAV sample format {kind}; use PCM 16, PCM 32 or float32")
+        audio = data.astype(np.float64)
     return sr, audio, kind
 
 
-def encode(audio, kind):
-    if kind == np.int16:
-        return np.clip(np.round(audio * 32768.0), -32768, 32767).astype(np.int16)
-    if kind == np.int32:
-        return np.clip(np.round(audio * 2147483648.0), -2147483648, 2147483647).astype(np.int32)
-    return audio.astype(np.float32)
+def pcm24_bytes(audio):
+    ints = np.clip(np.round(audio * 8388608.0), -8388608, 8388607).astype("<i4")
+    return ints.view(np.uint8).reshape(-1, 4)[:, :3].tobytes()
+
+
+def write_pcm24(path, sr, audio):
+    channels = audio.shape[1] if audio.ndim == 2 else 1
+    data = pcm24_bytes(audio)
+    block = 3 * channels
+    if channels > 2:       # WAVE_FORMAT_EXTENSIBLE, PCM sub-format, no speaker mask
+        fmt = (0xFFFE).to_bytes(2, "little") + channels.to_bytes(2, "little") + sr.to_bytes(4, "little") + (sr * block).to_bytes(4, "little") \
+            + block.to_bytes(2, "little") + (24).to_bytes(2, "little") + (22).to_bytes(2, "little") + (24).to_bytes(2, "little") \
+            + (0).to_bytes(4, "little") + bytes.fromhex("0100000000001000800000aa00389b71")
+    else:
+        fmt = (1).to_bytes(2, "little") + channels.to_bytes(2, "little") + sr.to_bytes(4, "little") + (sr * block).to_bytes(4, "little") \
+            + block.to_bytes(2, "little") + (24).to_bytes(2, "little")
+    body = b"WAVE" + b"fmt " + len(fmt).to_bytes(4, "little") + fmt + b"data" + len(data).to_bytes(4, "little") + data + (b"\0" if len(data) & 1 else b"")
+    Path(path).write_bytes(b"RIFF" + len(body).to_bytes(4, "little") + body)
 
 
 def write_wav(path, sr, audio, kind):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    wavfile.write(path, sr, encode(audio, kind))
+    if kind == "pcm24":
+        write_pcm24(path, sr, audio)
+    elif kind == "pcm16":
+        wavfile.write(path, sr, np.clip(np.round(audio * 32768.0), -32768, 32767).astype(np.int16))
+    elif kind == "pcm32":
+        wavfile.write(path, sr, np.clip(np.round(audio * 2147483648.0), -2147483648, 2147483647).astype(np.int32))
+    else:
+        wavfile.write(path, sr, audio.astype(np.float32))
 
 
 def sha256_file(path):
@@ -102,7 +143,7 @@ def main(argv=None):
         if args.command == "demo":
             out = Path(args.output)
             programme = ld.synthetic_programme() * 0.35        # 9 dB down, so the demo has real gain to apply
-            write_wav(out / "programme.wav", 48000, programme, np.int16)
+            write_wav(out / "programme.wav", 48000, programme, "pcm16")
             sr, audio, kind = read_wav(out / "programme.wav")
             before = ld.measure(audio, sr)
             gain = ld.plan_gain(before, -23.0, -1.0)
@@ -141,7 +182,7 @@ def main(argv=None):
         gain = plan["gain_db"]
         for attempt in range(1, 5):
             scaled = ld.apply_gain(audio, gain)
-            if kind != np.float32 and float(np.abs(scaled).max()) >= 1.0:
+            if kind != "float32" and float(np.abs(scaled).max()) >= 1.0:
                 report["problems"] = ["the gain would clip the sample format; nothing was written"]
                 write_report(args.report, report)
                 emit({"problems": report["problems"]})

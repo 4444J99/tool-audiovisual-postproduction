@@ -294,6 +294,32 @@ class PlanGainTests(unittest.TestCase):
         peak = ld.measure(ld.apply_gain(x, capped["gain_db"]), SR)["true_peak_dbtp"]
         self.assertAlmostEqual(peak, -1.0, delta=0.01)
 
+    def test_solve_gain_does_not_refuse_on_a_summary_estimate_the_gates_overturn(self):
+        # About -30 and -34 LUFS, target -68, ceiling -67: the summary says the peak lands near -66.4 (refuse), but
+        # about -38 dB of gain drops the quiet half under the absolute gate and the real answer clears the ceiling.
+        x = np.vstack([sine(1000, -30, 10), sine(1000, -34, 10)])
+        summary = ld.plan_gain(ld.measure(x, SR), -68.0, -67.0)
+        self.assertFalse(summary["ok"])
+        plan = ld.solve_gain(x, SR, -68.0, -67.0)
+        self.assertTrue(plan["ok"], plan)
+        after = ld.measure(ld.apply_gain(x, plan["gain_db"]), SR)
+        self.assertAlmostEqual(after["integrated_lufs"], -68.0, delta=0.012)
+        self.assertLessEqual(after["true_peak_dbtp"], -67.0)
+        self.assertFalse(plan["capped"])
+
+    def test_solve_gain_does_not_cap_when_the_converged_gain_needs_no_cap(self):
+        x = np.vstack([sine(1000, -30, 10), sine(1000, -34, 10)])
+        plan = ld.solve_gain(x, SR, -68.0, -67.0, "cap")
+        self.assertFalse(plan["capped"])
+        self.assertEqual(plan["shortfall_lu"], 0.0)
+
+    def test_solve_gain_validates_its_inputs(self):
+        x = sine(1000, -30, 5)
+        for args in ((float("nan"), -1.0, "refuse"), (-23.0, float("nan"), "refuse"), (-23.0, -1.0, "clip")):
+            with self.assertRaises(ld.LoudnessError):
+                ld.solve_gain(x, SR, *args)
+        self.assertFalse(ld.solve_gain(np.zeros((SR * 2, 2)), SR, -23.0, -1.0)["ok"])
+
     def test_solve_gain_is_the_plain_plan_when_nothing_crosses_a_gate(self):
         x = sine(1000, -34.0, 10)
         plan = ld.solve_gain(x, SR, -23.0, -1.0)

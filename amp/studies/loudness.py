@@ -287,39 +287,53 @@ def solve_gain(audio: np.ndarray, sample_rate: float, target_lufs: float, ceilin
                max_iterations: int = 16) -> dict[str, Any]:
     """``plan_gain`` made exact for the audio itself.  A gain moves every block by the same amount, but it
     can also move blocks across the -70 LUFS absolute gate or the 10 LU relative gate, so the integrated
-    loudness after the gain is not always the loudness before plus the gain.  This re-measures the scaled
-    audio and corrects the gain until the measured result is within ``tolerance`` LU of the target; if the
-    gates make the target unreachable with one gain it says so instead of reporting success."""
+    loudness after a gain is not always the loudness before plus the gain.  This re-measures the scaled
+    audio and corrects the gain until the measured result is within ``tolerance`` LU of the target, and only
+    then applies the ceiling: a gain the summary measurement would refuse can be the wrong gain once the
+    gates are accounted for.  If the ceiling forbids the converged gain, ``refuse`` says so and ``cap`` lowers
+    it to the ceiling and reports the measured shortfall.  If the gates make the target unreachable with one
+    gain (and ``cap`` has no ceiling to fall back on) it says so instead of reporting success."""
+    if on_ceiling not in ("refuse", "cap"):
+        raise LoudnessError("on_ceiling must be 'refuse' or 'cap'")
+    if not _number(target_lufs) or (ceiling_dbtp is not None and not _number(ceiling_dbtp)):
+        raise LoudnessError("target loudness and ceiling must be finite numbers")
     before = measure(audio, sample_rate, layout)
-    plan = plan_gain(before, target_lufs, ceiling_dbtp, on_ceiling)
-    if not plan["ok"]:
-        return plan
-    gain = plan["gain_db"]
-    plan["first_gain_db"] = gain
-    reached = None
+    if before["integrated_lufs"] is None:
+        return plan_gain(before, target_lufs, ceiling_dbtp, on_ceiling)
+    peak = before["true_peak_dbtp"]
+    gain = target_lufs - before["integrated_lufs"]
+    plan: dict[str, Any] = {"target_lufs": target_lufs, "ceiling_dbtp": ceiling_dbtp, "wanted_gain_db": round(gain, 4),
+                            "first_gain_db": round(gain, 4), "on_ceiling": on_ceiling, "capped": False, "shortfall_lu": 0.0}
+
+    def loudness_at(g: float) -> float | None:
+        return measure(apply_gain(audio, g), sample_rate, layout)["integrated_lufs"]
+
+    converged, reached = False, None
     for iteration in range(1, max_iterations + 1):
-        reached = measure(apply_gain(audio, gain), sample_rate, layout)["integrated_lufs"]
+        reached = loudness_at(gain)
         plan["iterations"] = iteration
-        plan["predicted_lufs"] = reached
         if reached is None:
             break
-        error = target_lufs - reached
-        if abs(error) <= tolerance or plan.get("capped"):
+        if abs(target_lufs - reached) <= tolerance:
+            converged = True
             break
-        gain += error
-        if ceiling_dbtp is not None and before["true_peak_dbtp"] + gain > ceiling_dbtp + 1e-9:
-            if on_ceiling == "refuse":
-                plan.update(ok=False, gain_db=0.0, reason=f"reaching {target_lufs} LUFS needs {gain:+.2f} dB once the gates are accounted for, "
-                            f"which would put the true peak at {before['true_peak_dbtp'] + gain:.2f} dBTP, over the {ceiling_dbtp} dBTP ceiling")
-                return plan
-            gain = ceiling_dbtp - before["true_peak_dbtp"]
-            plan["capped"] = True
-    plan["gain_db"] = round(gain, 4)
-    if reached is None or (not plan.get("capped") and abs(target_lufs - reached) > tolerance):
-        plan.update(ok=False, reason=f"no single gain reaches {target_lufs} LUFS: the nearest measured result is {reached} LUFS "
-                    "(blocks cross the -70 LUFS or relative gate as the level changes)")
-    elif plan.get("capped"):
-        plan["shortfall_lu"] = round(target_lufs - reached, 4)
+        gain += target_lufs - reached
+    if converged and (ceiling_dbtp is None or peak + gain <= ceiling_dbtp + 1e-9):
+        plan.update(ok=True, gain_db=round(gain, 4), predicted_lufs=reached)
+        return plan
+    if ceiling_dbtp is not None and (converged or on_ceiling == "cap"):
+        if on_ceiling == "refuse":
+            plan.update(ok=False, gain_db=0.0, reason=f"gain {gain:+.2f} dB would put the true peak at {peak + gain:.2f} dBTP, "
+                        f"over the {ceiling_dbtp} dBTP ceiling")
+            return plan
+        capped = ceiling_dbtp - peak
+        reached = loudness_at(capped)
+        plan.update(ok=True, gain_db=round(capped, 4), capped=True, predicted_lufs=reached,
+                    shortfall_lu=None if reached is None else round(target_lufs - reached, 4))
+        return plan
+    plan.update(ok=False, gain_db=0.0, predicted_lufs=reached,
+                reason=f"no single gain reaches {target_lufs} LUFS: the nearest measured result is {reached} LUFS "
+                       "(blocks cross the -70 LUFS or relative gate as the level changes)")
     return plan
 
 
