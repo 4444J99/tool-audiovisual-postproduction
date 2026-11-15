@@ -380,6 +380,10 @@ def verify_chain(out: Path) -> list[str]:
         return [f"manifest: schema must be {SCHEMA}"]
     if manifest.get("chain_sha256") != chain_hash(manifest):
         problems.append("manifest: chain_sha256 does not match its stages")
+    named = [e.get("stage") for e in manifest.get("stages", []) if e.get("stage") != "blender"]
+    if named != list(STAGES):
+        missing = [n for n in STAGES if n not in named]
+        problems.append(f"manifest: stages are {named}, expected {list(STAGES)}" + (f" (missing {', '.join(missing)})" if missing else ""))
     produced: dict[str, str] = {}
     for entry in manifest.get("stages", []):
         name = entry["stage"]
@@ -430,7 +434,7 @@ def burnin_checks(out: Path) -> list[str]:
     problems: list[str] = []
     try:
         report = json.loads((out / LOCATIONS["burnin-report"]).read_text())
-        srt = (out / LOCATIONS["captions-srt"]).read_text(encoding="utf-8")
+        srt = cb.read_captions(out / LOCATIONS["captions-srt"])
         ledger = json.loads((out / LOCATIONS["final-ledger"]).read_text())
         summary = json.loads((out / LOCATIONS["scene-graph-summary"]).read_text())
         params = report["params"]
@@ -448,7 +452,7 @@ def burnin_checks(out: Path) -> list[str]:
             problems.append("captions report was not made from the caption file on disk")
         if cap.sha256_text(srt) != params["srt_sha256"]:
             problems.append("burn-in report was not made from the caption file on disk")
-        if cap.render_vtt(cues) != (out / LOCATIONS["captions-vtt"]).read_text(encoding="utf-8"):
+        if cap.render_vtt(cues) != cb.read_captions(out / LOCATIONS["captions-vtt"]):
             problems.append("the WebVTT file does not carry the same cues as the SRT file")
     except (OSError, KeyError, ValueError, TypeError, IndexError, json.JSONDecodeError) as error:
         problems.append(f"burn-in: cannot check ({error})")
