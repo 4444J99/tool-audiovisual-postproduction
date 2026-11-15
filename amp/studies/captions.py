@@ -344,3 +344,26 @@ def synthetic_words() -> list[dict[str, Any]]:
         if spoken == "Yes.":
             t += 2.4
     return words
+
+
+def words_in_spans(sentences: Sequence[str], spans: Sequence[tuple[float, float]], max_cps: float, margin_s: float = 0.04) -> list[dict[str, Any]]:
+    """Word timing for one sentence per speech span: the words fill ``[start + margin, end - margin]`` in proportion to their length.
+
+    Used where the speech timing comes from audio the caller measured (an energy detector, an aligner) instead of the
+    invented ``synthetic_words``.  A sentence that cannot be read inside its span at ``max_cps`` raises ``CaptionError``,
+    so the caller finds out before any file is written."""
+    if len(sentences) < len(spans):
+        raise CaptionError(f"{len(spans)} speech spans but only {len(sentences)} sentences")
+    words: list[dict[str, Any]] = []
+    for sentence, (start, end) in zip(sentences, spans):
+        tokens = sentence.split()
+        usable = end - start - 2 * margin_s
+        if not tokens or usable <= 0 or len(sentence) / usable > max_cps:
+            raise CaptionError(f"{sentence!r} ({len(sentence)} characters) does not fit {end - start:.2f} s of speech at {max_cps} characters per second")
+        weight = sum(len(t) for t in tokens)
+        t = start + margin_s
+        for token in tokens:
+            width = usable * len(token) / weight
+            words.append({"text": token, "start": round(t, 3), "end": round(t + width, 3)})
+            t += width
+    return words

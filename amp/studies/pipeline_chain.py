@@ -32,6 +32,7 @@ from . import caption_burnin as cb
 from . import captions as cap
 from . import colour_grade as cg
 from . import coverage_matrix as cm
+from . import delivery_qc as qc
 from . import layer_plan as lp
 from . import loudness as ld
 from . import room_tone_fill as rt
@@ -41,7 +42,7 @@ from . import shot_plan as sp
 SCHEMA = "amps.pipeline_chain.v1"
 SAMPLE_RATE = 16000
 DEFAULT_DELIVERY = "ebu_r128"
-STAGES = ("set", "shot_plan", "dialogue", "requirement", "coverage", "room_tone", "delivery", "final_ledger", "colour", "captions", "burnin")
+STAGES = ("set", "shot_plan", "dialogue", "requirement", "coverage", "room_tone", "delivery", "final_ledger", "colour", "captions", "burnin", "qc")
 # The labels each required stage must list, so a re-sealed manifest cannot make a stage commit to less than it should.
 STAGE_LABELS = {
     "set": ((), ("scene-graph-summary", "set-spec", "shot-plan-set")),
@@ -53,8 +54,9 @@ STAGE_LABELS = {
     "delivery": (("dialogue-filled",), ("delivery-report", "dialogue-delivered")),
     "final_ledger": (("dialogue-delivered", "suggested-plan"), ("final-ledger",)),
     "colour": (("dialogue-delivered", "final-ledger", "scene-graph-summary", "suggested-plan"), ("layer-ledger", "layer-plan")),
-    "captions": (("final-ledger",), ("captions-report", "captions-srt", "captions-vtt")),
+    "captions": (("dialogue-delivered", "final-ledger"), ("captions-report", "captions-srt", "captions-vtt")),
     "burnin": (("captions-srt", "final-ledger", "scene-graph-summary"), ("burnin-frames", "burnin-report")),
+    "qc": (tuple(sorted(qc.INPUT_LABELS)), ("qc-report",)),
 }
 
 
@@ -164,7 +166,10 @@ def colour_plan(ledger: Mapping[str, Any], graph_sha256: str, audio_sha256: str,
             "layers": layers}
 
 
-CAPTION_SPEC = "broadcast"
+# The broadcast preset with a 0.4 s minimum: the invented dialogue's shortest speech span is under half a second.
+CAPTION_SPEC = {**cap.PRESETS["broadcast"], "name": "broadcast-short", "min_duration_s": 0.4}
+# One short invented sentence per dialogue-active span, in order; the QC stage judges them against the audio.
+CAPTION_SENTENCES = ("Hello now.", "Steady.", "Welcome back.", "Go on.")
 BURNIN_GEOMETRY = {"width": 240, "height": 48}
 
 
@@ -211,15 +216,21 @@ def redeliver(filled_path: Path, gain_db: float) -> bytes:
     return pcm16_bytes(ld.apply_gain(audio, gain_db), sr)
 
 
-def run_chain(out: Path, *, seed: int = 0, delivery: str | Mapping[str, Any] = DEFAULT_DELIVERY) -> dict[str, Any]:
+def run_chain(out: Path, *, seed: int = 0, delivery: str | Mapping[str, Any] = DEFAULT_DELIVERY,
+              qc_spec: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Run every stage into ``out`` and write ``pipeline-manifest.json``; returns the manifest.
 
-    ``delivery`` is a loudness preset name (``ebu_r128``, ``atsc_a85``, ``streaming``, ``podcast``) or a spec mapping."""
+    ``delivery`` is a loudness preset name (``ebu_r128``, ``atsc_a85``, ``streaming``, ``podcast``) or a spec mapping;
+    ``qc_spec`` overrides keys of ``delivery_qc.DEFAULT_SPEC``."""
     out = Path(out)
     try:
         delivery_spec = ld.normalize_spec(delivery)
     except ld.LoudnessError as error:
         raise ChainError([f"delivery spec: {error}"]) from error
+    try:
+        qc_spec = qc.normalize_spec(qc_spec)
+    except qc.QcError as error:
+        raise ChainError([f"qc spec: {error}"]) from error
     stages: list[dict[str, Any]] = []
 
     def stage(name: str, inputs: dict[str, str], outputs: dict[str, str], **facts: Any) -> None:
@@ -320,7 +331,13 @@ def run_chain(out: Path, *, seed: int = 0, delivery: str | Mapping[str, Any] = D
           plate_identity="declared: sha256 of the set graph hash and the shot ledger row; no render exists in this chain")
 
     # 7. captions laid out on the edit's frame grid, then burned into synthetic frames, one background segment per shot
-    built = cap.build(cap.synthetic_words(), ledger["fps"], CAPTION_SPEC)
+    rate_d, heard_d = qc.read_wav16((out / LOCATIONS["dialogue-delivered"]).read_bytes())
+    spans = [(a / rate_d, b / rate_d) for a, b in qc.dialogue_spans(heard_d, rate_d, qc_spec["vad"])]
+    try:
+        words = cap.words_in_spans(CAPTION_SENTENCES, spans, qc_spec["max_cps"])
+    except cap.CaptionError as error:
+        raise ChainError([f"captions: {e}" for e in error.errors]) from error
+    built = cap.build(words, ledger["fps"], CAPTION_SPEC)
     if built["problems"]:
         raise ChainError([f"captions: {p}" for p in built["problems"]])
     srt_bytes, vtt_bytes = built["srt"].encode("utf-8"), built["vtt"].encode("utf-8")
@@ -329,10 +346,11 @@ def run_chain(out: Path, *, seed: int = 0, delivery: str | Mapping[str, Any] = D
     (out / LOCATIONS["captions-vtt"]).write_bytes(vtt_bytes)
     caption_report = {k: built[k] for k in ("schema", "spec", "fps", "cues", "problems", "words", "warnings", "srt_sha256", "vtt_sha256")}
     caption_report_h = write_json(out / LOCATIONS["captions-report"], caption_report)
-    stage("captions", {"final-ledger": ledger_h},
+    stage("captions", {"dialogue-delivered": delivered_h, "final-ledger": ledger_h},
           {"captions-srt": sha256_bytes(srt_bytes), "captions-vtt": sha256_bytes(vtt_bytes), "captions-report": caption_report_h},
           cues=len(built["cues"]), spec_name=built["spec"]["name"], fps=built["fps"], last_cue_end_frame=built["cues"][-1]["end"],
-          source="captions.synthetic_words: invented speech timing, not a transcript of the dialogue stand-in")
+          dialogue_spans=len(spans),
+          source="invented sentences laid into the dialogue-active spans measured on the delivered WAV; not a transcript of the dialogue stand-in")
     payload, burn_report = cb.burn(built["srt"], ledger["fps"], ledger["total_frames"], BURNIN_GEOMETRY, burnin_segments(ledger, summary["graph_sha256"]))
     (out / LOCATIONS["burnin-frames"]).write_bytes(payload)
     burn_h = write_json(out / LOCATIONS["burnin-report"], burn_report)
@@ -341,6 +359,17 @@ def run_chain(out: Path, *, seed: int = 0, delivery: str | Mapping[str, Any] = D
           frames=ledger["total_frames"], captioned_frames=burn_report["captioned_frames"], chain_head=burn_report["chain_head"],
           geometry=burn_report["params"]["geometry"],
           background="invented test pattern tinted per shot by the declared plate identity; no render exists in this chain")
+    # 8. delivery QC from the sealed artefacts only; a chain that fails its own QC is refused, not sealed
+    try:
+        qc_report = qc.derive(out, LOCATIONS, qc_spec)
+    except qc.QcError as error:
+        raise ChainError([f"qc: {error}"]) from error
+    qc_h = write_json(out / LOCATIONS["qc-report"], qc_report)
+    if qc_report["status"] != "pass":
+        raise ChainError([f"qc {c['id']}: {c['detail']}" + (f" ({'; '.join(c['problems'])})" if c.get("problems") else "")
+                          for c in qc_report["checks"] if not c["ok"]])
+    stage("qc", dict(qc_report["inputs"]), {"qc-report": qc_h}, status=qc_report["status"], checks=len(qc_report["checks"]),
+          spec_name=qc_spec["name"], spec_sha256=sha256_bytes(ss.canonical(qc_spec).encode()))
     manifest = {"schema": SCHEMA, "stages": stages}
     manifest["chain_sha256"] = chain_hash(manifest)
     write_json(out / "pipeline-manifest.json", manifest)
@@ -378,7 +407,7 @@ LOCATIONS = {"set-spec": "set/set-spec.json", "scene-graph-summary": "set/scene-
              "final-ledger": "plan/final-ledger.json", "layer-plan": "colour/layer-plan.json",
              "layer-ledger": "colour/layer-ledger.json", "captions-srt": "captions/captions.srt",
              "captions-vtt": "captions/captions.vtt", "captions-report": "captions/captions-report.json",
-             "burnin-frames": "captions/frames.y8", "burnin-report": "captions/burnin-report.json", "blender-report": "set/blender-report.json",
+             "burnin-frames": "captions/frames.y8", "burnin-report": "captions/burnin-report.json", "qc-report": "qc/qc-report.json", "blender-report": "set/blender-report.json",
              "scene-blend": "set/scene.blend"}
 
 
@@ -478,9 +507,21 @@ def burnin_checks(out: Path) -> list[str]:
     return problems
 
 
-def cross_checks(out: Path, delivery: str | Mapping[str, Any] | None = None) -> list[str]:
+def qc_checks(out: Path, qc_spec: Mapping[str, Any] | None = None) -> list[str]:
+    """What a re-sealed manifest cannot fake: ``qc-report.json`` is exactly what the artefacts on disk derive, under the
+    declared QC spec (the default when none is given), and every check in it passes."""
+    out = Path(out)
+    try:
+        spec = qc.normalize_spec(qc_spec)
+        return qc.verify(out, LOCATIONS, (out / LOCATIONS["qc-report"]).read_bytes(), spec)
+    except (qc.QcError, OSError) as error:
+        return [f"qc: cannot check ({error})"]
+
+
+def cross_checks(out: Path, delivery: str | Mapping[str, Any] | None = None, qc_spec: Mapping[str, Any] | None = None) -> list[str]:
     """Content links the hashes alone do not show: the same set id, plan hash, graph hash and audio hash.
-    ``delivery`` is the loudness spec the caller requires the chain to have been delivered to, if any."""
+    ``delivery`` is the loudness spec the caller requires the chain to have been delivered to, if any; ``qc_spec`` the
+    QC spec the report must have been derived under (``delivery_qc.DEFAULT_SPEC`` when omitted)."""
     out = Path(out)
     plan = json.loads((out / LOCATIONS["suggested-plan"]).read_text())
     cplan = json.loads((out / LOCATIONS["layer-plan"]).read_text())
@@ -496,6 +537,7 @@ def cross_checks(out: Path, delivery: str | Mapping[str, Any] | None = None) -> 
         problems.append("final ledger does not name the delivered dialogue")
     problems += delivery_checks(out, delivery)
     problems += burnin_checks(out)
+    problems += qc_checks(out, qc_spec)
     for row in ledger["shots"]:
         if cplan["sources"][f"plate-{row['id'].lower()}"]["sha256"] != plate_hash(summary["graph_sha256"], row):
             problems.append(f"plate for {row['id']} is not derived from the set graph and its ledger row")
