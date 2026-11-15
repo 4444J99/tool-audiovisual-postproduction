@@ -1,6 +1,7 @@
 """End-to-end synthetic chain across the post-production tools, with every hand-off pinned by a hash.
 
-    set spec -> shot plan -> coverage matrix (-> suggested shots) -> room-tone fill -> colour/compositing plan
+    set spec -> shot plan -> coverage matrix (-> suggested shots) -> room-tone fill -> loudness delivery
+    -> colour/compositing plan
 
 Each stage reads only artefacts an earlier stage wrote and records the SHA-256 of what it read and what it
 wrote.  ``verify`` recomputes every hash from the files on disk and checks that every input of every stage
@@ -10,6 +11,12 @@ the plates; no private media, names or set specifications are involved.
 
 The plate sources of the colour plan are *declared* identities (a hash of the set graph and the shot's
 ledger row), because no render exists in this chain; the manifest says so in ``plate_identity``.
+
+The ``delivery`` stage sits between the room-tone fill and the final ledger.  It measures the filled
+dialogue (BS.1770-4 / EBU R128), plans the one linear gain that reaches a declared delivery spec, writes the
+result, reads the written file back and checks *that* against the spec; a chain whose audio cannot meet the
+spec is refused rather than sealed.  The final ledger and the colour plan then name the delivered audio,
+not the pre-delivery fill.
 """
 from __future__ import annotations
 
@@ -24,13 +31,15 @@ import numpy as np
 from . import colour_grade as cg
 from . import coverage_matrix as cm
 from . import layer_plan as lp
+from . import loudness as ld
 from . import room_tone_fill as rt
 from . import set_spec as ss
 from . import shot_plan as sp
 
 SCHEMA = "amps.pipeline_chain.v1"
 SAMPLE_RATE = 16000
-STAGES = ("set", "shot_plan", "dialogue", "requirement", "coverage", "room_tone", "final_ledger", "colour")
+DEFAULT_DELIVERY = "ebu_r128"
+STAGES = ("set", "shot_plan", "dialogue", "requirement", "coverage", "room_tone", "delivery", "final_ledger", "colour")
 
 
 class ChainError(Exception):
@@ -125,7 +134,7 @@ def colour_plan(ledger: Mapping[str, Any], graph_sha256: str, audio_sha256: str,
                         "sha256": plate_hash(graph_sha256, row)}
         layers.append({"id": f"shot-{row['id'].lower()}", "kind": "plate", "source": sid,
                        "frames": {"start": row["edit_in"], "end": row["edit_out"]}})
-    sources["dialogue"] = {"kind": "audio", "path": "audio/dialogue-filled.wav", "sha256": audio_sha256}
+    sources["dialogue"] = {"kind": "audio", "path": "audio/dialogue-delivered.wav", "sha256": audio_sha256}
     sources["glow"] = {"kind": "render", "path": "renders/flame-glow.exr", "colourspace": "linear",
                        "sha256": sha256_bytes(f"glow:{graph_sha256}".encode())}
     layers.append({"id": "flame", "kind": "fx", "source": "glow", "blend": "screen", "chain": "warm",
@@ -139,9 +148,50 @@ def colour_plan(ledger: Mapping[str, Any], graph_sha256: str, audio_sha256: str,
             "layers": layers}
 
 
-def run_chain(out: Path, *, seed: int = 0) -> dict[str, Any]:
-    """Run every stage into ``out`` and write ``pipeline-manifest.json``; returns the manifest."""
+def deliver(filled_path: Path, delivered_path: Path, spec: Mapping[str, Any], on_ceiling: str = "refuse") -> dict[str, Any]:
+    """Measure the WAV at ``filled_path``, apply the one gain that reaches ``spec`` and write ``delivered_path``.
+
+    The gain is rounded to four decimals before it is applied, so ``redeliver`` reproduces the bytes from
+    the report alone.  The written file is read back and measured, and the report's ``after`` is that
+    measurement.  Raises ``ChainError`` when the gain is refused, would clip, or the written file fails the spec."""
+    sr, audio = read_pcm16(filled_path)
+    try:
+        before = ld.measure(audio, sr)
+        plan = ld.solve_gain(audio, sr, spec["integrated_lufs"]["target"], spec.get("true_peak_dbtp_max"), on_ceiling)
+    except ld.LoudnessError as error:
+        raise ChainError([f"delivery: {error}"]) from error
+    if not plan["ok"]:
+        raise ChainError([f"delivery: {plan['reason']}"])
+    gain = plan["gain_db"]
+    scaled = ld.apply_gain(audio, gain)
+    if float(np.abs(scaled).max()) >= 1.0:
+        raise ChainError(["delivery: the gain would clip the 16-bit sample format"])
+    delivered_path.parent.mkdir(parents=True, exist_ok=True)
+    delivered_path.write_bytes(pcm16_bytes(scaled, sr))
+    after = ld.measure(read_pcm16(delivered_path)[1], sr)
+    problems = ld.check(after, spec)
+    if problems:
+        raise ChainError([f"delivery: {p}" for p in problems])
+    return {"schema": "amps.pipeline_delivery.v1", "spec": dict(spec), "gain_db": gain, "plan": plan, "before": before, "after": after,
+            "input_sha256": sha256_file(filled_path), "output_sha256": sha256_file(delivered_path), "problems": problems,
+            "no_limiter": "one linear gain; no dynamics processing is applied"}
+
+
+def redeliver(filled_path: Path, gain_db: float) -> bytes:
+    """The bytes ``deliver`` writes for a recorded gain, for checking a delivered file against its source."""
+    sr, audio = read_pcm16(filled_path)
+    return pcm16_bytes(ld.apply_gain(audio, gain_db), sr)
+
+
+def run_chain(out: Path, *, seed: int = 0, delivery: str | Mapping[str, Any] = DEFAULT_DELIVERY) -> dict[str, Any]:
+    """Run every stage into ``out`` and write ``pipeline-manifest.json``; returns the manifest.
+
+    ``delivery`` is a loudness preset name (``ebu_r128``, ``atsc_a85``, ``streaming``, ``podcast``) or a spec mapping."""
     out = Path(out)
+    try:
+        delivery_spec = ld.normalize_spec(delivery)
+    except ld.LoudnessError as error:
+        raise ChainError([f"delivery spec: {error}"]) from error
     stages: list[dict[str, Any]] = []
 
     def stage(name: str, inputs: dict[str, str], outputs: dict[str, str], **facts: Any) -> None:
@@ -214,11 +264,21 @@ def run_chain(out: Path, *, seed: int = 0) -> dict[str, Any]:
           holes_filled=fill_report["holes_filled"], remaining_digital_silence=fill_report["remaining_digital_silence"],
           untouched_identical=fill_report["untouched_identical"])
 
-    # 5. colour / compositing plan over the final plan's edit, the filled dialogue and the set graph
+    # 5. delivery: loudness measured, one gain to the declared spec, the written file measured again
+    report_d = deliver(out / LOCATIONS["dialogue-filled"], out / LOCATIONS["dialogue-delivered"], delivery_spec)
+    delivered_h = report_d["output_sha256"]
+    delivery_h = write_json(out / LOCATIONS["delivery-report"], report_d)
+    stage("delivery", {"dialogue-filled": filled_h}, {"dialogue-delivered": delivered_h, "delivery-report": delivery_h},
+          spec_name=delivery_spec["name"], spec_sha256=sha256_bytes(ss.canonical(delivery_spec).encode()), gain_db=report_d["gain_db"],
+          before_lufs=report_d["before"]["integrated_lufs"], after_lufs=report_d["after"]["integrated_lufs"],
+          after_true_peak_dbtp=report_d["after"]["true_peak_dbtp"])
+
+    # 6. colour / compositing plan over the final plan's edit, the delivered dialogue and the set graph
     ledger = sp.build_ledger(final_plan)
+    ledger["dialogue_sha256"] = delivered_h
     ledger_h = write_json(out / "plan" / "final-ledger.json", ledger)
-    stage("final_ledger", {"suggested-plan": final_h}, {"final-ledger": ledger_h}, total_frames=ledger["total_frames"])
-    cplan = colour_plan(ledger, summary["graph_sha256"], filled_h, final_plan["fps"])
+    stage("final_ledger", {"suggested-plan": final_h, "dialogue-delivered": delivered_h}, {"final-ledger": ledger_h}, total_frames=ledger["total_frames"])
+    cplan = colour_plan(ledger, summary["graph_sha256"], delivered_h, final_plan["fps"])
     creport = lp.validate_plan(cplan)
     if creport["errors"]:
         raise ChainError([f"colour plan: {e}" for e in creport["errors"]])
@@ -226,7 +286,7 @@ def run_chain(out: Path, *, seed: int = 0) -> dict[str, Any]:
     cledger = lp.layer_ledger(cplan)
     cledger_h = write_json(out / "colour" / "layer-ledger.json", cledger)
     stage("colour", {"suggested-plan": final_h, "final-ledger": ledger_h, "scene-graph-summary": graph_h,
-                     "dialogue-filled": filled_h},
+                     "dialogue-delivered": delivered_h},
           {"layer-plan": cplan_h, "layer-ledger": cledger_h},
           layer_plan_sha256=lp.plan_hash(cplan), edit_frames=ledger["total_frames"], warnings=creport["warnings"],
           plate_identity="declared: sha256 of the set graph hash and the shot ledger row; no render exists in this chain")
@@ -263,6 +323,7 @@ LOCATIONS = {"set-spec": "set/set-spec.json", "scene-graph-summary": "set/scene-
              "dialogue-with-holes": "audio/dialogue-with-holes.wav", "requirement": "coverage/requirement.json",
              "coverage-report": "coverage/coverage-report.json", "coverage-matrix": "coverage/coverage-matrix.md", "suggested-plan": "coverage/suggested-plan.json",
              "dialogue-filled": "audio/dialogue-filled.wav", "fill-report": "audio/fill-report.json",
+             "dialogue-delivered": "audio/dialogue-delivered.wav", "delivery-report": "audio/delivery-report.json",
              "final-ledger": "plan/final-ledger.json", "layer-plan": "colour/layer-plan.json",
              "layer-ledger": "colour/layer-ledger.json", "blender-report": "set/blender-report.json",
              "scene-blend": "set/scene.blend"}
@@ -296,8 +357,36 @@ def verify_chain(out: Path) -> list[str]:
     return problems
 
 
-def cross_checks(out: Path) -> list[str]:
-    """Content links the hashes alone do not show: the same set id, plan hash, graph hash and audio hash."""
+def delivery_checks(out: Path, expected: str | Mapping[str, Any] | None = None) -> list[str]:
+    """What a re-sealed manifest cannot fake: the delivered WAV is the filled WAV at the recorded gain, it
+    measures within the recorded spec, and (when ``expected`` is given) that spec is the one the caller declared."""
+    out = Path(out)
+    problems: list[str] = []
+    try:
+        report = json.loads((out / LOCATIONS["delivery-report"]).read_text())
+        filled, delivered = out / LOCATIONS["dialogue-filled"], out / LOCATIONS["dialogue-delivered"]
+        if report.get("input_sha256") != sha256_file(filled):
+            problems.append("delivery report was not made from the filled dialogue on disk")
+        if report.get("output_sha256") != sha256_file(delivered):
+            problems.append("delivery report does not describe the delivered dialogue on disk")
+        if redeliver(filled, report["gain_db"]) != delivered.read_bytes():
+            problems.append("delivered dialogue is not the filled dialogue at the recorded gain")
+        spec = ld.normalize_spec(report["spec"])
+        rate, heard = read_pcm16(delivered)
+        measured = ld.measure(heard, rate)
+        problems += [f"delivered dialogue measured now: {p}" for p in ld.check(measured, spec)]
+        if measured["audio_sha256"] != report["after"]["audio_sha256"]:
+            problems.append("delivered dialogue differs from the audio the report measured")
+        if expected is not None and ld.normalize_spec(expected) != spec:
+            problems.append(f"delivery spec recorded in the chain ({spec['name']}) is not the declared one")
+    except (OSError, KeyError, ValueError, TypeError, IndexError, json.JSONDecodeError) as error:
+        problems.append(f"delivery: cannot check ({error})")
+    return problems
+
+
+def cross_checks(out: Path, delivery: str | Mapping[str, Any] | None = None) -> list[str]:
+    """Content links the hashes alone do not show: the same set id, plan hash, graph hash and audio hash.
+    ``delivery`` is the loudness spec the caller requires the chain to have been delivered to, if any."""
     out = Path(out)
     plan = json.loads((out / LOCATIONS["suggested-plan"]).read_text())
     cplan = json.loads((out / LOCATIONS["layer-plan"]).read_text())
@@ -306,8 +395,12 @@ def cross_checks(out: Path) -> list[str]:
     problems = []
     if ledger["plan_sha256"] != sp.plan_hash(plan):
         problems.append("final ledger was not derived from the suggested plan")
-    if cplan["sources"]["dialogue"]["sha256"] != sha256_file(out / LOCATIONS["dialogue-filled"]):
-        problems.append("colour plan dialogue source is not the filled dialogue")
+    delivered = sha256_file(out / LOCATIONS["dialogue-delivered"])
+    if cplan["sources"]["dialogue"]["sha256"] != delivered:
+        problems.append("colour plan dialogue source is not the delivered dialogue")
+    if ledger.get("dialogue_sha256") != delivered:
+        problems.append("final ledger does not name the delivered dialogue")
+    problems += delivery_checks(out, delivery)
     for row in ledger["shots"]:
         if cplan["sources"][f"plate-{row['id'].lower()}"]["sha256"] != plate_hash(summary["graph_sha256"], row):
             problems.append(f"plate for {row['id']} is not derived from the set graph and its ledger row")

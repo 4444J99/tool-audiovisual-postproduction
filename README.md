@@ -62,7 +62,7 @@ No force pushes (including `--force-with-lease`); update open branches with `git
 
 ## End-to-end chain
 
-`tools/av_pipeline.py` runs set spec, shot plan, coverage matrix, room-tone fill and colour plan on synthetic inputs and pins each hand-off by hash ([guide](docs/PIPELINE-CHAIN.md)).
+`tools/av_pipeline.py` runs set spec, shot plan, coverage matrix, room-tone fill, a loudness delivery stage (measured, one gain to a declared EBU/streaming/podcast spec, re-measured from the written file) and colour plan on synthetic inputs and pins each hand-off by hash ([guide](docs/PIPELINE-CHAIN.md)).
 
 ## Loudness and true peak
 

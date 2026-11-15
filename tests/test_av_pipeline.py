@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from amp.studies import loudness as ld
 from amp.studies import pipeline_chain as pc
 from amp.studies import shot_plan as sp
 
@@ -75,7 +76,8 @@ class ChainTests(unittest.TestCase):
         self.assertEqual(colour["edit_frames"], ledger["total_frames"])
         cplan = json.loads((self.out / "colour" / "layer-plan.json").read_text())
         self.assertEqual(cplan["comp"]["frames"], ledger["total_frames"])
-        self.assertEqual(cplan["sources"]["dialogue"]["sha256"], self.stage("room_tone")["outputs"]["dialogue-filled"])
+        self.assertEqual(cplan["sources"]["dialogue"]["sha256"], self.stage("delivery")["outputs"]["dialogue-delivered"])
+        self.assertEqual(ledger["dialogue_sha256"], self.stage("delivery")["outputs"]["dialogue-delivered"])
         spans = {l["id"]: (l["frames"]["start"], l["frames"]["end"]) for l in cplan["layers"] if l["id"].startswith("shot-")}
         self.assertEqual(spans, {f"shot-{r['id'].lower()}": (r["edit_in"], r["edit_out"]) for r in ledger["shots"]})
 
@@ -88,6 +90,113 @@ class ChainTests(unittest.TestCase):
         self.assertEqual(fill["remaining_digital_silence"], [])
         self.assertTrue(fill["untouched_identical"])
         self.assertNotEqual(fill["outputs"]["dialogue-filled"], fill["inputs"]["dialogue-with-holes"])
+
+    def test_delivery_stage_sits_between_room_tone_and_the_final_ledger(self):
+        names = [s["stage"] for s in self.manifest["stages"]]
+        self.assertEqual(names[names.index("room_tone") + 1:names.index("final_ledger")], ["delivery"])
+        delivery = self.stage("delivery")
+        self.assertEqual(delivery["inputs"], {"dialogue-filled": self.stage("room_tone")["outputs"]["dialogue-filled"]})
+        self.assertEqual(self.stage("final_ledger")["inputs"]["dialogue-delivered"], delivery["outputs"]["dialogue-delivered"])
+
+    def test_delivered_audio_is_measured_and_meets_the_declared_spec(self):
+        report = json.loads((self.out / "audio" / "delivery-report.json").read_text())
+        delivery = self.stage("delivery")
+        self.assertEqual(delivery["spec_name"], "ebu_r128")
+        self.assertEqual(report["input_sha256"], self.stage("room_tone")["outputs"]["dialogue-filled"])
+        self.assertEqual(report["output_sha256"], delivery["outputs"]["dialogue-delivered"])
+        self.assertNotEqual(report["input_sha256"], report["output_sha256"])
+        sr, delivered = pc.read_pcm16(self.out / "audio" / "dialogue-delivered.wav")
+        measured = ld.measure(delivered, sr)       # measured here, from the bytes on disk, not from the report
+        self.assertEqual(ld.check(measured, "ebu_r128"), [])
+        self.assertAlmostEqual(measured["integrated_lufs"], -23.0, delta=0.05)
+        self.assertEqual(measured, report["after"])
+        sr, filled = pc.read_pcm16(self.out / "audio" / "dialogue-filled.wav")
+        self.assertAlmostEqual(measured["integrated_lufs"] - ld.measure(filled, sr)["integrated_lufs"], report["gain_db"], delta=0.02)
+        self.assertEqual(report["problems"], [])
+
+    def test_delivery_spec_is_selectable_and_recorded(self):
+        for preset in ("podcast", "atsc_a85"):
+            with tempfile.TemporaryDirectory() as d:
+                manifest = pc.run_chain(Path(d), delivery=preset)
+                stage = next(s for s in manifest["stages"] if s["stage"] == "delivery")
+                self.assertEqual(stage["spec_name"], preset)
+                self.assertAlmostEqual(stage["after_lufs"], ld.PRESETS[preset]["integrated_lufs"]["target"], delta=0.05)
+                self.assertEqual(pc.verify_chain(Path(d)) + pc.cross_checks(Path(d), preset), [])
+                self.assertNotEqual(manifest["chain_sha256"], self.manifest["chain_sha256"])
+
+    def test_a_spec_the_audio_cannot_meet_is_refused_not_sealed(self):
+        """The synthetic dialogue peaks at -13.3 dBTP; -3 LUFS would need +23 dB, far over a -1 dBTP ceiling."""
+        spec = {"name": "too-hot", "integrated_lufs": {"target": -3.0, "tolerance": 0.5}, "true_peak_dbtp_max": -1.0}
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(pc.ChainError) as raised:
+                pc.run_chain(Path(d), delivery=spec)
+            self.assertIn("true peak", raised.exception.errors[0])
+            self.assertFalse((Path(d) / "pipeline-manifest.json").exists())
+            self.assertFalse((Path(d) / "audio" / "dialogue-delivered.wav").exists())
+        with self.assertRaises(pc.ChainError) as streaming:      # the real streaming preset (-14 LUFS) needs +12.6 dB: peak -0.7 dBTP
+            pc.run_chain(Path(self.tmp.name) / "streaming", delivery="streaming")
+        self.assertIn("over the -1.0 dBTP ceiling", streaming.exception.errors[0])
+        with self.assertRaises(pc.ChainError):
+            pc.run_chain(Path(self.tmp.name) / "bad-spec", delivery={"integrated_lufs": "loud"})
+
+    def test_tampered_delivered_audio_is_named(self):
+        target = self.copy()
+        path = target / "audio" / "dialogue-delivered.wav"
+        path.write_bytes(path.read_bytes()[:-2] + b"\x7f\x7f")
+        problems = pc.verify_chain(target)
+        self.assertTrue(any("output dialogue-delivered on disk" in p for p in problems), problems)
+
+    def test_rehashed_swap_of_the_delivered_audio_is_caught_by_content_checks(self):
+        """Replace the delivered WAV with a louder file and rewrite the report, the manifest and the colour plan
+        so every hash agrees: only re-deriving the audio and re-measuring it can still object."""
+        target = self.copy()
+        sr, filled = pc.read_pcm16(target / "audio" / "dialogue-filled.wav")
+        loud = pc.pcm16_bytes(ld.apply_gain(filled, 12.0), sr)
+        (target / "audio" / "dialogue-delivered.wav").write_bytes(loud)
+        digest = pc.sha256_bytes(loud)
+        report_path = target / "audio" / "delivery-report.json"
+        report = json.loads(report_path.read_text())
+        report["output_sha256"] = digest
+        report_h = pc.write_json(report_path, report)
+        manifest = json.loads((target / "pipeline-manifest.json").read_text())
+        old = next(s for s in manifest["stages"] if s["stage"] == "delivery")["outputs"]["dialogue-delivered"]
+        for entry in manifest["stages"]:
+            for side in ("inputs", "outputs"):
+                for label, value in entry[side].items():
+                    if value == old:
+                        entry[side][label] = digest
+            if entry["stage"] == "delivery":
+                entry["outputs"]["delivery-report"] = report_h
+        manifest["chain_sha256"] = pc.chain_hash(manifest)
+        (target / "pipeline-manifest.json").write_text(json.dumps(manifest))
+        for rel, keys in (("colour/layer-plan.json", None), ("plan/final-ledger.json", None)):
+            text = (target / rel).read_text().replace(old, digest)
+            (target / rel).write_text(text)
+        for entry in manifest["stages"]:       # the two JSON files changed, so re-seal their hashes too
+            for label, rel in (("layer-plan", "colour/layer-plan.json"), ("final-ledger", "plan/final-ledger.json")):
+                if label in entry["outputs"]:
+                    entry["outputs"][label] = pc.sha256_file(target / rel)
+                if label in entry["inputs"]:
+                    entry["inputs"][label] = pc.sha256_file(target / rel)
+        manifest["chain_sha256"] = pc.chain_hash(manifest)
+        (target / "pipeline-manifest.json").write_text(json.dumps(manifest))
+        self.assertEqual(pc.verify_chain(target), [], "the forged chain is internally consistent")
+        problems = pc.cross_checks(target)
+        self.assertTrue(any("not the filled dialogue at the recorded gain" in p for p in problems), problems)
+        self.assertTrue(any("measured now" in p and "LUFS" in p for p in problems), problems)
+
+    def test_declared_spec_must_match_the_recorded_one(self):
+        self.assertEqual(pc.cross_checks(self.out, "ebu_r128"), [])
+        problems = pc.cross_checks(self.out, "podcast")
+        self.assertEqual(problems, ["delivery spec recorded in the chain (ebu_r128) is not the declared one"])
+
+    def test_delivery_report_edit_is_caught(self):
+        target = self.copy()
+        report_path = target / "audio" / "delivery-report.json"
+        report = json.loads(report_path.read_text())
+        report["gain_db"] += 1.0
+        report_path.write_text(json.dumps(report))
+        self.assertTrue(any("delivered dialogue is not the filled dialogue at the recorded gain" in p for p in pc.cross_checks(target)))
 
     def test_run_is_deterministic(self):
         with tempfile.TemporaryDirectory() as other:
@@ -147,6 +256,32 @@ class CliTests(unittest.TestCase):
             bad = cli("verify", "--output", str(out))
             self.assertEqual(bad.returncode, 2)
             self.assertIn("output shot-plan on disk", bad.stdout)
+
+    def test_delivery_option_runs_and_verify_pins_the_declared_spec(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "chain"
+            ran = cli("run", "--output", str(out), "--delivery", "podcast")
+            self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+            self.assertEqual(json.loads(ran.stdout)["delivery"]["spec_name"], "podcast")
+            self.assertEqual(cli("verify", "--output", str(out), "--delivery", "podcast").returncode, 0)
+            wrong = cli("verify", "--output", str(out), "--delivery", "ebu_r128")
+            self.assertEqual(wrong.returncode, 2)
+            self.assertIn("is not the declared one", wrong.stdout)
+            path = out / "audio" / "dialogue-delivered.wav"
+            path.write_bytes(path.read_bytes() + b"\0\0")
+            self.assertIn("output dialogue-delivered on disk", cli("verify", "--output", str(out)).stdout)
+
+    def test_unknown_delivery_spec_and_unreachable_spec_fail_cleanly(self):
+        with tempfile.TemporaryDirectory() as d:
+            bad = cli("run", "--output", str(Path(d) / "a"), "--delivery", "no-such-preset")
+            self.assertEqual(bad.returncode, 2)
+            self.assertIn("neither a preset", bad.stdout)
+            spec = Path(d) / "hot.json"
+            spec.write_text(json.dumps({"name": "hot", "integrated_lufs": {"target": -3, "tolerance": 0.5}, "true_peak_dbtp_max": -1}))
+            hot = cli("run", "--output", str(Path(d) / "b"), "--delivery", str(spec))
+            self.assertEqual(hot.returncode, 2)
+            self.assertIn("true peak", hot.stdout)
+            self.assertFalse((Path(d) / "b" / "pipeline-manifest.json").exists())
 
     def test_verify_of_an_empty_directory_fails_cleanly(self):
         with tempfile.TemporaryDirectory() as d:
