@@ -128,6 +128,9 @@ class AlignedSnrTests(unittest.TestCase):
         reference = np.random.default_rng(3).standard_normal(8000)
         heard = np.concatenate([np.zeros(100), reference[:7950]])  # best lag 100; heard[100:100 + n] would be 7950 long
         snr = demo.aligned_snr_db(heard, reference)
+        self.assertTrue(np.isfinite(snr))  # 50 of 8000 samples missing: still a high, finite SNR
+        heard = np.concatenate([np.zeros(2000), reference[:6000]])  # best lag 2000, a quarter of the dialogue never arrives
+        snr = demo.aligned_snr_db(heard, reference)
         self.assertTrue(np.isfinite(snr))
         self.assertLess(snr, demo.AUDIO_MIN_SNR_DB)
 
