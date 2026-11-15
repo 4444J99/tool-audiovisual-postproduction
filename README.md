@@ -54,7 +54,7 @@ The eight-layout comparison's placement rules are a pure module (`web/fx/layout-
 
 ## Set spec to Blender scene
 
-`tools/set_scene.py` validates a set spec (bounds, materials, boxes, cylinders, stepped arch bands, lights, cameras) and builds it in headless Blender, then compares Blender's measured scene with the spec's scene graph ([guide](docs/SET-SCENE.md)). `shot-set` exports the same environment as a shot plan's `set` block.
+`tools/set_scene.py` validates a set spec (bounds, materials, boxes, cylinders of any axis, cones, spheres, tori, stairs, stepped arch bands, lights, cameras; schema v1 or v1.1) and builds it in headless Blender, then compares Blender's measured scene with the spec's scene graph ([guide](docs/SET-SCENE.md)). `shot-set` exports the same environment as a shot plan's `set` block.
 
 ## End-to-end chain
 

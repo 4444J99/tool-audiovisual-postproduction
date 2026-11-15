@@ -5,7 +5,7 @@
         [--still out/still.png --width 320 --height 180 --samples 16]
     blender -b --factory-startup --python tools/blender_set_scene.py -- --demo-spec out/spec.json
 
-The spec (``amps.set_spec.v1``) is validated and expanded to a scene graph by ``amp.studies.set_spec``
+The spec (``amps.set_spec.v1`` or ``v1.1``) is validated and expanded to a scene graph by ``amp.studies.set_spec``
 (pure Python); this script only copies the graph into Blender and then measures what Blender
 actually holds, so the report states observed counts, dimensions, materials, lens and light
 energy rather than echoing the input.  Exit status 2 means the spec failed validation and nothing
@@ -19,6 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import bmesh  # noqa: E402  (available only inside Blender)
 import bpy  # noqa: E402  (available only inside Blender)
 from mathutils import Vector  # noqa: E402
 
@@ -30,6 +31,7 @@ def parse(argv):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--spec")
     parser.add_argument("--demo-spec", metavar="PATH", help="write the synthetic spec here and exit")
+    parser.add_argument("--demo-version", choices=("1", "1.1"), default="1")
     parser.add_argument("--blend")
     parser.add_argument("--report")
     parser.add_argument("--still")
@@ -130,6 +132,14 @@ def measure(scene, graph):
                "location": [round(v, 6) for v in obj.location],
                "collection": [c.name for c in obj.users_collection]}
         if obj.type == "MESH":
+            world = [obj.matrix_world @ v.co for v in obj.data.vertices]
+            held = bmesh.new()
+            held.from_mesh(obj.data)
+            row.update(world_bounds={"min": [round(min(p[i] for p in world), 6) for i in range(3)],
+                                     "max": [round(max(p[i] for p in world), 6) for i in range(3)]},
+                       volume=round(held.calc_volume(signed=True), 6),
+                       watertight=all(len(edge.link_faces) == 2 for edge in held.edges))
+            held.free()
             row.update(vertices=len(obj.data.vertices), faces=len(obj.data.polygons),
                        dimensions=[round(v, 6) for v in obj.dimensions],
                        materials=[m.name for m in obj.data.materials],
@@ -168,7 +178,7 @@ def main():
     args = parse(sys.argv)
     if args.demo_spec:
         Path(args.demo_spec).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.demo_spec).write_text(json.dumps(set_spec.synthetic_spec(), indent=2, sort_keys=True) + "\n")
+        Path(args.demo_spec).write_text(json.dumps(set_spec.synthetic_spec(args.demo_version), indent=2, sort_keys=True) + "\n")
         return 0
     if not args.spec:
         print(json.dumps({"error": "give --spec or --demo-spec"}))

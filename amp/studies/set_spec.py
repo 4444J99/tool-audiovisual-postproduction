@@ -22,6 +22,14 @@ Checks (each failure is reported, none stops the others):
 
 ``shot_plan_set`` exports the spec's bounds and elements as the ``set`` block of a shot plan, so
 the environment and the coverage plan describe one set.
+
+Versions.  ``amps.set_spec.v1`` is the original vocabulary: box, vertical cylinder, arch bands.
+``amps.set_spec.v1.1`` is a strict superset: a v1 spec is also a valid v1.1 spec and builds the same
+graph.  v1.1 adds an ``axis`` ("x", "y" or "z") on cylinders so they can lie along x or z, and the
+kinds ``cone`` (frustum or point), ``sphere``, ``torus`` and ``stairs``.  A spec that declares v1 but
+uses any of these is refused with the features named and the schema they need (``negotiate``); an
+unknown schema is refused with the supported list.  ``amp.studies.set_spec.required_schema`` says
+the lowest schema a spec needs.
 """
 from __future__ import annotations
 
@@ -31,11 +39,21 @@ import math
 import re
 from typing import Any, Mapping
 
-SCHEMA = "amps.set_spec.v1"
+SCHEMA_V1 = "amps.set_spec.v1"
+SCHEMA_V11 = "amps.set_spec.v1.1"
+SCHEMA = SCHEMA_V1                                  # the baseline schema; v1.1 is a strict superset
+SUPPORTED_SCHEMAS = (SCHEMA_V1, SCHEMA_V11)
 GRAPH_SCHEMA = "amps.set_scene_graph.v1"
 ELEMENT_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,47}$")
 HEX = re.compile(r"^[0-9A-Fa-f]{6}$")
-ELEMENT_KINDS = ("box", "cylinder", "arch_bands")
+V1_KINDS = ("box", "cylinder", "arch_bands")
+V11_KINDS = ("sphere", "cone", "torus", "stairs")
+ELEMENT_KINDS = V1_KINDS + V11_KINDS
+AXES = ("x", "y", "z")                              # spec axes: x right, y up, z depth
+AXIS_KINDS = ("cylinder", "cone", "torus")          # kinds that take an ``axis`` (v1.1)
+DEFAULT_RINGS = 16
+DEFAULT_TUBE_SEGMENTS = 16
+MAX_STEPS = 200
 LIGHT_KINDS = ("point", "sun", "area")
 DEFAULT_SEGMENTS = 48
 RESERVED_FLOOR = "FLOOR"
@@ -104,17 +122,11 @@ def hex_to_linear(value: str) -> list[float]:
 
 def element_extent(element: Mapping[str, Any]) -> tuple[float, float]:
     """Half-extent (x, z) of the element footprint around its centre, for bounds and plan use."""
-    kind = element["kind"]
-    if kind == "box":
-        width, _, depth = element["size"]
-        angle = math.radians(element.get("rotation_deg", 0.0))
-        c, s = abs(math.cos(angle)), abs(math.sin(angle))
-        return (width * c + depth * s) / 2.0, (width * s + depth * c) / 2.0
-    if kind == "cylinder":
-        return element["radius"], element["radius"]
+    width, _, depth = local_size(element)
+    if element["kind"] == "cylinder" and element.get("axis", "y") == "y":
+        return element["radius"], element["radius"]          # a vertical cylinder is round: rotation changes nothing
     angle = math.radians(element.get("rotation_deg", 0.0))
     c, s = abs(math.cos(angle)), abs(math.sin(angle))
-    width, depth = 2.0 * element["outer_radius"], element["depth"]
     return (width * c + depth * s) / 2.0, (width * s + depth * c) / 2.0
 
 
@@ -123,14 +135,61 @@ def element_radius(element: Mapping[str, Any]) -> float:
     return round(max(hx, hz), 6)
 
 
+def v11_features(spec: Mapping[str, Any]) -> list[str]:
+    """Every v1.1 feature a spec uses, one readable line each (empty for a plain v1 spec)."""
+    found: list[str] = []
+    elements = spec.get("elements") if isinstance(spec, Mapping) else None
+    for element in elements if isinstance(elements, list) else []:
+        if not isinstance(element, Mapping):
+            continue
+        eid = element.get("id")
+        if element.get("kind") in V11_KINDS:
+            found.append(f"element {eid}: kind {element['kind']!r}")
+        if "axis" in element:
+            found.append(f"element {eid}: axis")
+    return found
+
+
+def required_schema(spec: Mapping[str, Any]) -> str:
+    """The lowest supported schema that can express this spec."""
+    return SCHEMA_V11 if v11_features(spec) else SCHEMA_V1
+
+
+def negotiate(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Declared schema, the schema the content needs, and whether the declaration is enough."""
+    declared = spec.get("schema") if isinstance(spec, Mapping) else None
+    required = required_schema(spec) if isinstance(spec, Mapping) else SCHEMA_V1
+    ok = declared in SUPPORTED_SCHEMAS and (declared == SCHEMA_V11 or required == SCHEMA_V1)
+    return {"declared": declared, "required": required, "supported": list(SUPPORTED_SCHEMAS),
+            "features": v11_features(spec) if isinstance(spec, Mapping) else [], "ok": ok}
+
+
+def local_size(element: Mapping[str, Any]) -> tuple[float, float, float]:
+    """Unrotated bounding size (x, y, z) of one element in spec axes (x right, y up, z depth)."""
+    kind = element["kind"]
+    if kind in ("box", "stairs"):
+        return tuple(element["size"])
+    if kind == "arch_bands":
+        return 2.0 * element["outer_radius"], element["outer_radius"], element["depth"]
+    if kind == "sphere":
+        return (2.0 * element["radius"],) * 3
+    axis = element.get("axis", "y")
+    if kind == "torus":
+        thin, wide = 2.0 * element["minor_radius"], 2.0 * (element["major_radius"] + element["minor_radius"])
+    else:
+        radius = max(element["radius"], element.get("top_radius", 0.0)) if kind == "cone" else element["radius"]
+        thin, wide = element["height"], 2.0 * radius
+    return {"y": (wide, thin, wide), "x": (thin, wide, wide), "z": (wide, wide, thin)}[axis]
+
+
 def validate_spec(spec: Mapping[str, Any]) -> dict[str, list[str]]:
     """Return ``{"errors": [...], "warnings": [...]}``; never raises on content problems."""
     errors: list[str] = []
     warnings: list[str] = []
     if not isinstance(spec, Mapping):
         return {"errors": ["spec: top level must be a JSON object"], "warnings": warnings}
-    if spec.get("schema") != SCHEMA:
-        return {"errors": [f"spec: schema must be {SCHEMA}"], "warnings": warnings}
+    if spec.get("schema") not in SUPPORTED_SCHEMAS:
+        return {"errors": [f"spec: schema must be one of {', '.join(SUPPORTED_SCHEMAS)}"], "warnings": warnings}
     bounds = spec.get("bounds")
     bx = bounds.get("x") if isinstance(bounds, dict) else None
     bz = bounds.get("z") if isinstance(bounds, dict) else None
@@ -170,6 +229,10 @@ def validate_spec(spec: Mapping[str, Any]) -> dict[str, list[str]]:
         floor = {}
     if floor.get("material") is not None and not (isinstance(floor["material"], str) and floor["material"] in materials):
         errors.append(f"floor: material {floor['material']!r} is not a defined material name")
+
+    if spec["schema"] == SCHEMA_V1:
+        for feature in v11_features(spec):
+            errors.append(f"spec: {feature} needs schema {SCHEMA_V11}, but the spec declares {SCHEMA_V1}")
 
     ids: set[str] = set()
 
@@ -217,8 +280,13 @@ def validate_spec(spec: Mapping[str, Any]) -> dict[str, list[str]]:
             if ok and "segments" in element and not _int_at_least(element["segments"], 8):
                 errors.append(f"{label}: segments must be an integer >= 8")
                 ok = False
-        else:
+        elif kind == "arch_bands":
             ok = _arch_errors(element, label, materials, errors)
+        else:
+            ok = _v11_element_errors(element, label, errors)
+        if ok and "axis" in element and (kind not in AXIS_KINDS or element["axis"] not in AXES):
+            errors.append(f"{label}: axis must be one of {', '.join(AXES)} and applies only to {', '.join(AXIS_KINDS)}")
+            ok = False
         if element.get("material") is not None and not (isinstance(element["material"], str) and element["material"] in materials):
             errors.append(f"{label}: material {element['material']!r} is not a defined material name")
             ok = False
@@ -227,12 +295,7 @@ def validate_spec(spec: Mapping[str, Any]) -> dict[str, list[str]]:
             ok = False
         if not ok:
             continue
-        if kind == "box":
-            top = element["size"][1] + element.get("y", 0.0)
-        elif kind == "cylinder":
-            top = element["height"] + element.get("y", 0.0)
-        else:
-            top = element["outer_radius"] + element.get("y", 0.0)
+        top = local_size(element)[1] + element.get("y", 0.0)
         if top > height + 1e-9:
             errors.append(f"{label}: top at {top:g} m exceeds the set height {height:g} m")
         hx, hz = element_extent(element)
@@ -347,6 +410,39 @@ def _arch_errors(element: Mapping[str, Any], label: str, materials, errors: list
     return len(errors) == problems
 
 
+def _v11_element_errors(element: Mapping[str, Any], label: str, errors: list[str]) -> bool:
+    """Shape checks for the kinds added in v1.1 (sphere, cone, torus, stairs)."""
+    kind = element["kind"]
+    problems = len(errors)
+    if kind == "sphere":
+        if not _positive(element.get("radius")):
+            errors.append(f"{label}: radius must be positive")
+        if "rings" in element and not _int_at_least(element["rings"], 4):
+            errors.append(f"{label}: rings must be an integer >= 4")
+    elif kind == "cone":
+        if not (_positive(element.get("radius")) and _positive(element.get("height"))):
+            errors.append(f"{label}: radius and height must be positive")
+        if "top_radius" in element and not (_is_num(element["top_radius"]) and element["top_radius"] >= 0):
+            errors.append(f"{label}: top_radius must be a number >= 0 (0 makes a point)")
+    elif kind == "torus":
+        major, minor = element.get("major_radius"), element.get("minor_radius")
+        if not (_positive(major) and _positive(minor)):
+            errors.append(f"{label}: major_radius and minor_radius must be positive")
+        elif minor >= major:
+            errors.append(f"{label}: minor_radius {minor:g} m must be smaller than major_radius {major:g} m")
+        if "tube_segments" in element and not _int_at_least(element["tube_segments"], 4):
+            errors.append(f"{label}: tube_segments must be an integer >= 4")
+    else:
+        if not (_vec(element.get("size"), 3) and all(v > 0 for v in element["size"])):
+            errors.append(f"{label}: size must be [width, height, depth], all positive")
+        steps = element.get("steps")
+        if not (_int_at_least(steps, 2) and steps <= MAX_STEPS):
+            errors.append(f"{label}: steps must be an integer from 2 to {MAX_STEPS}")
+    if kind != "stairs" and "segments" in element and not _int_at_least(element["segments"], 8):
+        errors.append(f"{label}: segments must be an integer >= 8")
+    return len(errors) == problems
+
+
 # --- geometry ---------------------------------------------------------------------------------
 
 def _box_mesh(width: float, height: float, depth: float) -> dict[str, Any]:
@@ -396,6 +492,123 @@ def _arch_ring_mesh(inner: float, outer: float, depth: float, segments: int) -> 
     return {"verts": verts, "faces": faces}
 
 
+def _turn_to_axis(mesh: dict[str, Any], axis: str) -> dict[str, Any]:
+    """Re-aim a mesh built around local Z onto a spec axis, as a cyclic permutation (winding is preserved).
+
+    Spec ``y`` (up) is Blender Z, spec ``x`` is Blender X and spec ``z`` (depth) is Blender Y.  The mesh is
+    then grounded: centred on x and y, lowest point on z = 0, so ``y`` in the spec stays the underside.
+    """
+    verts = mesh["verts"]
+    if axis == "x":
+        verts = [[c, a, b] for a, b, c in verts]
+    elif axis == "z":
+        verts = [[b, c, a] for a, b, c in verts]
+    xs, ys, zs = zip(*verts)
+    cx, cy, lo = (min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0, min(zs)
+    return {"verts": [[round(x - cx, 9), round(y - cy, 9), round(z - lo, 9)] for x, y, z in verts], "faces": mesh["faces"]}
+
+
+def _frustum_mesh(radius: float, top_radius: float, height: float, segments: int) -> dict[str, Any]:
+    """Cone frustum around local Z from z=0 to ``height``; ``top_radius`` 0 closes it to a point."""
+    verts = [[round(radius * math.cos(2.0 * math.pi * i / segments), 9), round(radius * math.sin(2.0 * math.pi * i / segments), 9), 0.0]
+             for i in range(segments)]
+    faces = [list(reversed(range(segments)))]
+    if top_radius > 0:
+        verts += [[round(top_radius * math.cos(2.0 * math.pi * i / segments), 9),
+                   round(top_radius * math.sin(2.0 * math.pi * i / segments), 9), height] for i in range(segments)]
+        for i in range(segments):
+            j = (i + 1) % segments
+            faces.append([i, j, segments + j, segments + i])
+        faces.append([segments + i for i in range(segments)])
+    else:
+        verts.append([0.0, 0.0, height])
+        for i in range(segments):
+            faces.append([i, (i + 1) % segments, segments])
+    return {"verts": verts, "faces": faces}
+
+
+def _sphere_mesh(radius: float, segments: int, rings: int) -> dict[str, Any]:
+    """UV sphere with poles on local Z: ``rings`` bands of latitude, ``segments`` around."""
+    verts = [[0.0, 0.0, -radius]]
+    for k in range(1, rings):
+        phi = math.pi * k / rings
+        ring = radius * math.sin(phi)
+        for i in range(segments):
+            a = 2.0 * math.pi * i / segments
+            verts.append([round(ring * math.cos(a), 9), round(ring * math.sin(a), 9), round(-radius * math.cos(phi), 9)])
+    verts.append([0.0, 0.0, radius])
+    top = len(verts) - 1
+    faces = []
+    for i in range(segments):
+        j = (i + 1) % segments
+        faces.append([0, 1 + j, 1 + i])
+    for k in range(rings - 2):
+        lo, hi = 1 + k * segments, 1 + (k + 1) * segments
+        for i in range(segments):
+            j = (i + 1) % segments
+            faces.append([lo + i, lo + j, hi + j, hi + i])
+    last = 1 + (rings - 2) * segments
+    for i in range(segments):
+        j = (i + 1) % segments
+        faces.append([top, last + i, last + j])
+    return {"verts": verts, "faces": faces}
+
+
+def _torus_mesh(major: float, minor: float, segments: int, tube_segments: int) -> dict[str, Any]:
+    """Ring around local Z (the hole axis): ``segments`` around the ring, ``tube_segments`` around the tube."""
+    verts = []
+    for i in range(segments):
+        theta = 2.0 * math.pi * i / segments
+        for j in range(tube_segments):
+            phi = 2.0 * math.pi * j / tube_segments
+            reach = major + minor * math.cos(phi)
+            verts.append([round(reach * math.cos(theta), 9), round(reach * math.sin(theta), 9), round(minor * math.sin(phi), 9)])
+    faces = []
+    for i in range(segments):
+        i2 = (i + 1) % segments
+        for j in range(tube_segments):
+            j2 = (j + 1) % tube_segments
+            faces.append([i * tube_segments + j, i2 * tube_segments + j, i2 * tube_segments + j2, i * tube_segments + j2])
+    return {"verts": verts, "faces": faces}
+
+
+def _stairs_mesh(width: float, height: float, depth: float, steps: int) -> dict[str, Any]:
+    """A solid flight rising toward +y (spec depth): ``steps`` equal treads, base on z=0, centred on x and y."""
+    run, rise = depth / steps, height / steps
+    profile = [(0.0, 0.0), (depth, 0.0)]
+    for i in range(steps - 1, -1, -1):
+        profile += [((i + 1) * run, (i + 1) * rise), (i * run, (i + 1) * rise)]
+    n, hx = len(profile), width / 2.0
+    verts = [[-hx, round(y - depth / 2.0, 9), round(z, 9)] for y, z in profile] + [[hx, round(y - depth / 2.0, 9), round(z, 9)] for y, z in profile]
+    faces = [list(reversed(range(n))), [n + k for k in range(n)]]                  # left cap, right cap
+    for k in range(n):
+        k2 = (k + 1) % n
+        faces.append([k, k2, n + k2, n + k])
+    return {"verts": verts, "faces": faces}
+
+
+def mesh_volume(mesh: Mapping[str, Any]) -> float:
+    """Signed volume of a closed mesh with outward winding (positive when the faces point outward)."""
+    verts, total = mesh["verts"], 0.0
+    for face in mesh["faces"]:
+        a = verts[face[0]]
+        for k in range(1, len(face) - 1):
+            b, c = verts[face[k]], verts[face[k + 1]]
+            total += (a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0]) + a[2] * (b[0] * c[1] - b[1] * c[0])) / 6.0
+    return round(total, 6)
+
+
+def world_bounds(obj: Mapping[str, Any]) -> dict[str, list[float]]:
+    """Axis-aligned bounds of a mesh object after its Z rotation and location, in Blender coordinates."""
+    angle = math.radians(obj["rotation_deg"])
+    c, s = math.cos(angle), math.sin(angle)
+    lx, ly, lz = obj["location"]
+    pts = [(lx + x * c - y * s, ly + x * s + y * c, lz + z) for x, y, z in obj["mesh"]["verts"]]
+    xs, ys, zs = zip(*pts)
+    return {"min": [round(min(xs), 6), round(min(ys), 6), round(min(zs), 6)],
+            "max": [round(max(xs), 6), round(max(ys), 6), round(max(zs), 6)]}
+
+
 def mesh_bounds(mesh: Mapping[str, Any]) -> dict[str, list[float]]:
     xs, ys, zs = zip(*mesh["verts"])
     return {"min": [min(xs), min(ys), min(zs)], "max": [max(xs), max(ys), max(zs)],
@@ -439,7 +652,24 @@ def scene_graph(spec: Mapping[str, Any]) -> dict[str, Any]:
         cx, cz = element["center"]
         base = element.get("y", 0.0)
         segments = element.get("segments", DEFAULT_SEGMENTS)
-        if kind == "box":
+        if kind in V11_KINDS or (kind == "cylinder" and element.get("axis", "y") != "y"):
+            axis = element.get("axis", "y")
+            if kind == "cylinder":
+                mesh = _turn_to_axis(_cylinder_mesh(element["radius"], element["height"], segments), axis)
+            elif kind == "cone":
+                mesh = _turn_to_axis(_frustum_mesh(element["radius"], element.get("top_radius", 0.0), element["height"], segments), axis)
+            elif kind == "sphere":
+                mesh = _turn_to_axis(_sphere_mesh(element["radius"], segments, element.get("rings", DEFAULT_RINGS)), "y")
+            elif kind == "torus":
+                mesh = _turn_to_axis(_torus_mesh(element["major_radius"], element["minor_radius"], segments,
+                                                 element.get("tube_segments", DEFAULT_TUBE_SEGMENTS)), axis)
+            else:
+                mesh = _stairs_mesh(*element["size"], element["steps"])
+            objects.append({"name": eid, "type": "mesh", "role": element.get("role", "architecture"),
+                            "collection": "Architecture" if element.get("role", "architecture") == "architecture" else "Dressing",
+                            "mesh": mesh, "location": [cx, cz, base], "rotation_deg": element.get("rotation_deg", 0.0),
+                            "materials": [element["material"]], "face_materials": None})
+        elif kind == "box":
             mesh = _box_mesh(*element["size"])
             objects.append({"name": eid, "type": "mesh", "role": element.get("role", "architecture"),
                             "collection": "Architecture" if element.get("role", "architecture") == "architecture" else "Dressing",
@@ -522,7 +752,8 @@ def graph_summary(graph: Mapping[str, Any]) -> dict[str, Any]:
             bounds = mesh_bounds(obj["mesh"])
             rows.append({"name": obj["name"], "type": "mesh", "vertices": len(obj["mesh"]["verts"]),
                          "faces": len(obj["mesh"]["faces"]), "dimensions": bounds["dimensions"], "location": obj["location"],
-                         "materials": obj["materials"]})
+                         "materials": obj["materials"], "world_bounds": world_bounds(obj),
+                         "volume": mesh_volume(obj["mesh"])})
         else:
             rows.append({"name": obj["name"], "type": obj["type"], "location": obj["location"]})
     return {"graph_sha256": graph["graph_sha256"], "objects": rows,
@@ -547,8 +778,35 @@ def shot_plan_set(spec: Mapping[str, Any]) -> dict[str, Any]:
             "elements": elements, "caches": [dict(c) for c in spec.get("caches", [])]}
 
 
-def synthetic_spec() -> dict[str, Any]:
-    """A fully synthetic archway hall: invented dimensions, colours and names, no private source."""
+def synthetic_spec(version: str = "1") -> dict[str, Any]:
+    """A fully synthetic archway hall: invented dimensions, colours and names, no private source.
+
+    ``version="1.1"`` adds one of every v1.1 primitive (horizontal cylinders, cone, sphere, torus, stairs).
+    """
+    if version not in ("1", "1.1"):
+        raise ValueError("version must be '1' or '1.1'")
+    spec = _synthetic_v1()
+    if version == "1.1":
+        spec["schema"], spec["id"], spec["title"] = SCHEMA_V11, "synthetic-archway-hall-v11", "Synthetic archway hall with v1.1 primitives"
+        spec["elements"] += [
+            {"id": "rail", "kind": "cylinder", "axis": "x", "center": [0.0, -2.0], "radius": 0.12, "height": 4.0, "y": 0.9,
+             "material": "wood", "segments": 24, "role": "dressing"},
+            {"id": "post", "kind": "cylinder", "axis": "z", "center": [4.5, 0.0], "radius": 0.15, "height": 3.0, "y": 1.0,
+             "material": "wood", "segments": 24, "role": "dressing"},
+            {"id": "obelisk", "kind": "cone", "center": [4.5, 3.5], "radius": 0.6, "top_radius": 0.1, "height": 2.4,
+             "material": "stone", "segments": 24},
+            {"id": "finial", "kind": "sphere", "center": [4.5, 3.5], "radius": 0.35, "y": 2.4, "material": "ember",
+             "segments": 24, "rings": 12, "role": "dressing"},
+            {"id": "hoop", "kind": "torus", "axis": "z", "center": [-4.0, 4.0], "major_radius": 1.2, "minor_radius": 0.1, "y": 1.0,
+             "material": "wall", "segments": 32, "tube_segments": 8, "role": "dressing"},
+            {"id": "steps", "kind": "stairs", "center": [0.0, 3.8], "size": [2.4, 0.9, 1.6], "steps": 4, "material": "stone"},
+            {"id": "steps-turned", "kind": "stairs", "center": [-4.5, -3.0], "size": [2.0, 0.6, 1.2], "steps": 3,
+             "rotation_deg": 90.0, "material": "stone"},
+        ]
+    return spec
+
+
+def _synthetic_v1() -> dict[str, Any]:
     return {
         "schema": SCHEMA, "id": "synthetic-archway-hall", "title": "Synthetic archway hall",
         "bounds": {"x": [-6.0, 6.0], "z": [-6.0, 8.0], "height": 7.0},
