@@ -18,8 +18,9 @@ python tools/av_pipeline.py verify --output outputs/av-pipeline [--delivery ebu_
 | `delivery` | filled dialogue | delivered dialogue and delivery report ([LOUDNESS](LOUDNESS.md)) |
 | `final_ledger` | the suggested plan, delivered dialogue | per-shot ledger and edit timeline, naming the delivered audio |
 | `colour` | final ledger, set graph hash, delivered dialogue | layer plan and ledger ([COLOUR-AND-LAYERS](COLOUR-AND-LAYERS.md)) |
-| `captions` | final ledger (frame rate) | SRT, WebVTT and report from invented word timing, laid out on the edit's frame grid ([CAPTIONS](CAPTIONS.md)) |
+| `captions` | delivered dialogue, final ledger (frame rate) | SRT, WebVTT and report: invented sentences laid into the dialogue-active spans measured on the delivered WAV, on the edit's frame grid ([CAPTIONS](CAPTIONS.md)) |
 | `burnin` | SRT, final ledger, set graph hash | the cues drawn onto 240x48 luma frames (one per edit frame, background tinted per shot) and a hash-chained frame ledger ([CAPTIONS](CAPTIONS.md#burn-in)) |
+| `qc` | every artefact above that bears on delivery (eleven, listed in [DELIVERY-QC](DELIVERY-QC.md)) | `qc/qc-report.json`: caption timing against the dialogue, frame rate and timecode across set spec, shot plan and burned frames, loudness spec against a fresh measurement; re-derived by `verify` ([DELIVERY-QC](DELIVERY-QC.md)) |
 
 `pipeline-manifest.json` lists each stage's input and output hashes and a hash over the whole manifest. `verify` reports, by name, an artefact whose bytes differ from the manifest, a stage input that is not an earlier stage's output, and a manifest edited after the fact. It also checks content links a hash cannot show: the final ledger was derived from the suggested plan, the colour plan's dialogue source is the filled WAV, and each plate's identity is derived from the set graph hash and its ledger row.
 
@@ -50,3 +51,7 @@ Everything is invented. A real set spec stays with the set it describes, never i
 ### Burn-in tamper detection
 
 `verify` re-renders all frames of the `burnin` stage from the SRT file, the final ledger and the recorded parameters and compares them with `captions/frames.y8` byte for byte, so a forger who edits a frame, the digest list, the chain head, the report and the manifest together is still named by the first frame that differs. The caption file must be the one the report was made from, the WebVTT file must carry the same cues as the SRT file, and the burn-in background segments must be the final ledger's shots. Tests cover a flipped pixel, a re-sealed forgery, a reworded caption and rewritten backgrounds.
+
+### QC tamper detection
+
+`verify` re-derives `qc/qc-report.json` from the artefacts on disk (`tools/av_pipeline.py verify [--qc-spec spec.json]`) and requires the file to be byte-equal and every check to pass, so a forger who fixes the caption files, the burned frames and every manifest hash still fails when a cue sits outside the dialogue ([DELIVERY-QC](DELIVERY-QC.md#tamper-detection)).
