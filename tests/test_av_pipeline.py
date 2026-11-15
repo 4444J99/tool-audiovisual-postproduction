@@ -42,6 +42,11 @@ class ChainTests(unittest.TestCase):
     def stage(self, name):
         return next(s for s in self.manifest["stages"] if s["stage"] == name)
 
+    def test_every_file_the_run_writes_is_hashed(self):
+        hashed = {pc.LOCATIONS[label] for entry in self.manifest["stages"] for label in entry["outputs"]}
+        written = {str(p.relative_to(self.out)) for p in self.out.rglob("*") if p.is_file()} - {"pipeline-manifest.json"}
+        self.assertEqual(written, hashed)
+
     def test_stage_order_and_every_input_is_an_earlier_output(self):
         self.assertEqual([s["stage"] for s in self.manifest["stages"]], list(pc.STAGES))
         produced = {}
@@ -91,7 +96,8 @@ class ChainTests(unittest.TestCase):
             self.assertEqual(again, self.manifest)
 
     def test_changed_artefact_is_named(self):
-        for label, rel in (("shot-plan", "plan/shot-plan.json"), ("dialogue-filled", "audio/dialogue-filled.wav"),
+        for label, rel in (("shot-plan", "plan/shot-plan.json"), ("coverage-matrix", "coverage/coverage-matrix.md"),
+                           ("coverage-report", "coverage/coverage-report.json"), ("fill-report", "audio/fill-report.json"), ("dialogue-filled", "audio/dialogue-filled.wav"),
                            ("scene-graph-summary", "set/scene-graph-summary.json")):
             target = self.copy()
             path = target / rel
@@ -122,7 +128,10 @@ class ChainTests(unittest.TestCase):
     def test_missing_file_is_reported_not_raised(self):
         target = self.copy()
         (target / "audio" / "dialogue-filled.wav").unlink()
-        self.assertTrue(any("missing" in p for p in pc.verify_chain(target)))
+        (target / "coverage" / "coverage-matrix.md").unlink()
+        problems = pc.verify_chain(target)
+        self.assertTrue(any("dialogue-filled on disk is missing" in p for p in problems))
+        self.assertTrue(any("coverage-matrix on disk is missing" in p for p in problems))
         self.assertEqual(pc.verify_chain(Path(self.tmp.name) / "nowhere")[0][:9], "manifest:")
 
 

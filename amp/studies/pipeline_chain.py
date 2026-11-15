@@ -195,9 +195,11 @@ def run_chain(out: Path, *, seed: int = 0) -> dict[str, Any]:
         raise ChainError([f"coverage after suggestions: {e}" for e in after["errors"]])
     report_h = write_json(out / "coverage" / "coverage-report.json", coverage)
     final_h = write_json(out / "coverage" / "suggested-plan.json", final_plan)
-    (out / "coverage" / "coverage-matrix.md").write_text(cm.render_table(after))
+    table = cm.render_table(after).encode()
+    (out / "coverage" / "coverage-matrix.md").write_bytes(table)
+    table_h = sha256_bytes(table)
     stage("coverage", {"shot-plan": plan_h, "requirement": need_h},
-          {"coverage-report": report_h, "suggested-plan": final_h},
+          {"coverage-report": report_h, "suggested-plan": final_h, "coverage-matrix": table_h},
           gaps_before=len(coverage["gaps"]), shots_suggested=len(suggestion["shots"]),
           errors_after=after["errors"], final_plan_sha256=sp.plan_hash(final_plan))
 
@@ -242,7 +244,7 @@ def chain_hash(manifest: Mapping[str, Any]) -> str:
 LOCATIONS = {"set-spec": "set/set-spec.json", "scene-graph-summary": "set/scene-graph-summary.json",
              "shot-plan-set": "set/shot-plan-set.json", "shot-plan": "plan/shot-plan.json",
              "dialogue-with-holes": "audio/dialogue-with-holes.wav", "requirement": "coverage/requirement.json",
-             "coverage-report": "coverage/coverage-report.json", "suggested-plan": "coverage/suggested-plan.json",
+             "coverage-report": "coverage/coverage-report.json", "coverage-matrix": "coverage/coverage-matrix.md", "suggested-plan": "coverage/suggested-plan.json",
              "dialogue-filled": "audio/dialogue-filled.wav", "fill-report": "audio/fill-report.json",
              "final-ledger": "plan/final-ledger.json", "layer-plan": "colour/layer-plan.json",
              "layer-ledger": "colour/layer-ledger.json"}
