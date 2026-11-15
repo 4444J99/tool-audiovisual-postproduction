@@ -242,5 +242,42 @@ function stutter(add, ctx) {
   return {picture, audio, audioAlignedOnly: true};
 }
 
+/** The most trace copies Routing draws (the catalog's maximum), and how far apart in source time they read (visual-engine.mjs: t - k x 0.085). */
+const MAX_COPIES = 8;
+const COPY_LAG = 0.085;
+
+/**
+ * Routing (picture): a travelling address. The picture moves between Origin and Destination along a triangle wave of period
+ * 2 x Travel (out and back), and `Trace copies` earlier positions of it trail behind: copy k sits at the path position
+ * `q = clamp(progress - k x 0.12 x Trace spread)`, scaled to 0.62 of the frame, lifted by 0.3 sin(q pi) of the frame height,
+ * read k x 0.085 s earlier from a cache, at opacity `(1 - k / (copies + 1)) x 0.95`, and laid over the copies behind it (copy 0 on
+ * top), as the workbench draws them. The voice's pan travel is a per-sample gain curve and is not built (the voice passes).
+ * Impact scatter (the text-port burst) belongs to the text stream and is not built.
+ */
+function routing(add, ctx = {}) {
+  const T = ctx.clock ?? '{rack.Time}';
+  const history = (MAX_COPIES - 1) * COPY_LAG;   // the oldest copy; the cache is sized from the project's cook rate, the rate its read indices use
+  const progress = `(lambda phase: phase if phase < 1 else 2 - phase)((${T} / max(0.08, {travel})) % 2)`;
+  const q = k => `min(1, max(0, ${progress} - ${k} * 0.12 * {spread}))`;
+  const picture = () => {
+    add('rt_cache', 'cacheTOP', {inputs: ['in_picture'], pars: {cachesize: expr(cacheSizeText(history)), active: 1}});
+    add('rt_base', 'constantTOP', {pars: {colorr: 0, colorg: 0, colorb: 0, alpha: 0}});
+    let below = 'rt_base';
+    for (let k = MAX_COPIES - 1; k >= 0; k--) {
+      add(`rt_frame_${k}`, 'cacheselectTOP', {pars: {cachetop: {ref: 'rt_cache'}, index: expr(cacheIndexText(k * COPY_LAG, history))}});
+      add(`rt_move_${k}`, 'transformTOP', {inputs: [`rt_frame_${k}`], pars: {
+        sx: 0.62, sy: 0.62, extend: 'zero',
+        tx: expr(`{origin} + ({destination} - {origin}) * ${q(k)} - 0.5`),
+        ty: expr(`0.3 * math.sin(${q(k)} * math.pi)`),
+      }});
+      add(`rt_gain_${k}`, 'levelTOP', {inputs: [`rt_move_${k}`], pars: {opacity: expr(`((1 - ${k} / (int(round({copies})) + 1)) * 0.95) if ${k} < int(round({copies})) else 0`)}});
+      add(`rt_over_${k}`, 'overTOP', {inputs: [`rt_gain_${k}`, below]});
+      below = `rt_over_${k}`;
+    }
+    return below;
+  };
+  return {picture};
+}
+
 /** The processors implemented by this version. A builder returns `shared` (optional, called first), `picture` and `audio`. */
-export const EFFECTS = Object.freeze({damage, delay, feedback, freeze, gate, displacement, reverse, stutter});
+export const EFFECTS = Object.freeze({damage, delay, feedback, freeze, gate, displacement, reverse, stutter, routing});

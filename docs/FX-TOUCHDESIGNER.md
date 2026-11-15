@@ -205,7 +205,7 @@ is released in the network and stays so.
 Editing a base parameter in TouchDesigner never sends the resolved value back over OSC: only edits made to the custom
 parameters are exchanged.
 
-**Effects (eight of thirteen).** Between `in_<port>` and `proc_<port>` a processor now holds the effect chain
+**Effects (nine of thirteen).** Between `in_<port>` and `proc_<port>` a processor now holds the effect chain
 (`tools/td-network/effects.mjs`). Every effect parameter is an expression over the processor's resolved values, so
 macros, automation, events and sidechain drive it; the chain stays inside the processor, keeps the input's resolution,
 and the network stays static (a count parameter is a fixed maximum of stages switched by its resolved value).
@@ -220,6 +220,7 @@ and the network stays static (a count parameter is a fixed maximum of stages swi
 | Displacement | moving Noise TOP (`Field scale`, `Field movement`) pulling the picture through a Displace TOP along `Direction` | none |
 | Reverse | a Cache TOP of the input read at the resolver's `depth` (see Latency below), then a Transform TOP sliding it by `shift` in route mode; mode, span, speed and pivot come from the workbench's own `reverseSourceTime` | only delayed by the processor's latency (the reversal itself needs a per-sample history reader, not built) |
 | Stutter | three sources chosen by the resolver's `pick`: the input delayed by the latency, a Cache TOP that stops taking frames once the captured window has arrived (read at `depth`), and a transparent frame for the gap between repeats | only delayed by the processor's latency |
+| Routing | up to eight trace copies over a transparent base, copy 0 on top: copy k reads `k x 0.085` s back from a Cache TOP, is scaled to 0.62, placed at the path position `clamp(progress - k x 0.12 x Trace spread)` between Origin and Destination (a triangle wave of period `2 x Travel`) and lifted by `0.3 sin(q pi)`, at opacity `(1 - k / (copies + 1)) x 0.95`; the copy count is the resolved `Trace copies` | none (the pan travel is a per-sample gain curve; the voice passes). The text burst (`Impact scatter`) is not built |
 
 **Latency (look-ahead buffers).** Reverse and Stutter read source time ahead of their playhead, which a live network cannot read.
 Each is given a fixed, declared latency instead (`tools/td-network/latency.mjs`): the stream it receives runs `lookahead` seconds
@@ -250,7 +251,7 @@ ahead than the bound and that the bound is reached: Reverse reads at most `span`
 
 Like the workbench, a processor builds its audio chain only when it targets `voice` and its picture chain only when it targets `picture`, `body`, `objects` or `room`; otherwise that signal passes through and the spec's `warnings` say so.
 
-`tests/test_td_effects.py` evaluates every one of these expressions (they are Python) against stand-ins for what they read,
+`tests/test_td_routing.py` runs the real `VisualEngine` on a recording canvas and compares each draw call of a Routing processor (position, size, opacity, the source time it asked for) with the network's expressions over a grid of every parameter's extremes and times. `tests/test_td_effects.py` evaluates every one of the other expressions (they are Python) against stand-ins for what they read,
 at each parameter's minimum, default and maximum, and checks the arithmetic: tap gains and delays, the gate's duty
 cycle, the bit-depth step grid, the mosaic cell counts, the displaced axis and the feedback transform.
 
@@ -267,9 +268,9 @@ Sample-wise expressions (Signal Damage's hold, the source's sidechain envelope) 
 
 **Scrubbing backward through Feedback's reset epoch.** `EpochLatch` keeps its state every 64 picture frames as the walk passes, so a backward seek replays at most 64 frames from the nearest saved state instead of the whole history; measured on a 2,000-frame walk, 200 backward single-frame seeks took 1.40 s before and 0.023 s after, with identical answers (`tests/test_td_epoch.py`).
 
-**Not applied by this network:** the effects of the other five processors (Routing, Granular,
+**Not applied by this network:** the effects of the other four processors (Granular,
 Queue / Overflow, Exchange, Typography), which pass signal through unchanged and are named in the
-spec's `warnings`; the voice of Reverse and Stutter (delayed only, see Latency);
+spec's `warnings`; the voice of Reverse and Stutter (delayed only, see Latency) and of Routing (passes);
 the audio of Feedback and Displacement; Signal Damage's picture `Signal drive`; Displacement's `Boundary spill`, audio warp and ring
 blend; the source excerpt offset (`Offset`, read-only); and audio device output. Text wires carry no gain, and several
 text wires at one mix read only the first. The menu values these chains set (`custom` resolution, `nearest` filtering,
