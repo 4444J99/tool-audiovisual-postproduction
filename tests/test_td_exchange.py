@@ -85,6 +85,12 @@ class ExchangeTests(unittest.TestCase):
                 self.assertAlmostEqual(evaluate(crop["cropleft"]["expr"], rows, t), sx / W)
                 self.assertAlmostEqual(evaluate(crop["cropright"]["expr"], rows, t), (sx + sw) / W)
                 self.assertAlmostEqual(self.chain["xc_slot_%d" % slot]["pars"]["tx"], (dx + dw / 2) / W - 0.5)
+                # a custom output resolution stretches the strip across the whole canvas, so the slot's scale must bring it back to the strip's width
+                slot_pars = self.chain["xc_slot_%d" % slot]["pars"]
+                crop_width = evaluate(crop["cropright"]["expr"], rows, t) - evaluate(crop["cropleft"]["expr"], rows, t)
+                self.assertAlmostEqual(crop_width * 1.0, sw / W)
+                self.assertAlmostEqual(1.0 * slot_pars["sx"] * 1.0, dw / W)   # canvas width x scale = the width the engine drew
+                self.assertEqual(slot_pars["sy"], 1)
                 # the source time is the playhead less History offset, never before the start of the media
                 self.assertAlmostEqual(draw["time"], max(0, t - p["timeOffset"]), places=9, msg=case)
                 compared += 1
