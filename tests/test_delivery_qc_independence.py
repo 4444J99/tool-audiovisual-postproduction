@@ -110,6 +110,33 @@ class CoverageAndIndependenceTests(Base):
         self.assertEqual(again, (self.out / "qc" / "qc-report.json").read_bytes())
         self.assertEqual(json.loads(again)["schema"], qc.SCHEMA)
 
+    def test_the_independent_overlap_floor_cannot_be_loosened_to_nothing(self):
+        for value in (1e-7, 0.01, 0.49, 0, -1, float("nan"), True):
+            with self.assertRaises(qc.QcError, msg=repr(value)):
+                qc.normalize_spec({"independent_overlap_min": value})
+        self.assertEqual(qc.normalize_spec({"independent_overlap_min": 0.5})["independent_overlap_min"], 0.5)
+
+    def test_the_report_schema_names_the_new_shape(self):
+        self.assertEqual(self.report["schema"], "amps.delivery_qc.v2")
+
+    def test_one_outlier_frame_does_not_make_flat_noise_look_like_two_classes(self):
+        audio = 0.01 * np.random.default_rng(2).standard_normal(16000 * 3)
+        audio[8000:8480] *= 1e-6                           # one 30 ms frame far below the rest
+        self.assertEqual(qc.independent_spans(audio, 16000), [])
+
+    def test_a_span_clipped_at_the_end_of_the_audio_is_not_shorter_than_the_minimum(self):
+        audio = 0.003 * np.random.default_rng(3).standard_normal(16000 * 2)
+        audio[16000 * 2 - 3600:] += 0.3 * np.sin(np.arange(3600) * 0.2)      # 0.225 s of burst reaching the end
+        for a, b in qc.independent_spans(audio, 16000):
+            self.assertGreaterEqual(b - a, qc.INDEPENDENT_DETECTOR["min_span_s"] * 16000)
+
+    def test_the_cut_between_the_two_classes_is_the_upper_edge_of_the_lower_bin(self):
+        audio = 0.003 * np.random.default_rng(4).standard_normal(16000 * 4)
+        audio[16000:32000] += 0.3 * np.sin(np.arange(16000) * 0.2)
+        (a, b), = qc.independent_spans(audio, 16000)
+        self.assertAlmostEqual(a / 16000, 1.0, delta=0.03)
+        self.assertAlmostEqual(b / 16000, 2.0, delta=0.03)
+
 
 if __name__ == "__main__":
     unittest.main()
