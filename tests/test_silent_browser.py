@@ -208,6 +208,36 @@ class SilentBrowserPageTests(unittest.TestCase):
         blank.set_content('<audio id="a"></audio>')
         self.assertTrue(blank.evaluate('window.__SILENT_BROWSER__.native(document.querySelector("#a")).muted === true'))
 
+    def test_media_routed_through_the_source_node_constructor_is_released_like_the_factory(self):
+        result = self.page.evaluate("""() => {
+          const Context = window.AudioContext || window.webkitAudioContext;
+          const ctx = new Context(), el = document.querySelector('#parsed_video');
+          const node = new MediaElementAudioSourceNode(ctx, {mediaElement: el});
+          node.connect(ctx.destination);
+          el.muted = false; el.volume = 0.25;
+          const out = {captured: window.__SILENT_BROWSER__.captured(el), native: window.__SILENT_BROWSER__.native(el),
+                       isNode: node instanceof MediaElementAudioSourceNode, sinkGain: window.__SILENT_BROWSER__.sinkInfo(ctx).gain};
+          ctx.close();
+          return out;
+        }""")
+        self.assertTrue(result['captured'] and result['isNode'])
+        self.assertEqual(result['native'], {'muted': False, 'volume': 0.25})
+        self.assertEqual(result['sinkGain'], 0)
+
+    def test_media_inside_nested_declarative_shadow_roots_is_pinned(self):
+        result = self.page.evaluate("""async () => {
+          if (typeof Element.prototype.setHTMLUnsafe !== 'function') return {skipped: true};
+          const host = document.createElement('div'); document.body.append(host);
+          const src = document.querySelector('#parsed').src;
+          host.setHTMLUnsafe(`<div><template shadowrootmode="open"><div><template shadowrootmode="open"><audio id="deep" loop src="${src}"></audio></template></div></template></div>`);
+          await new Promise(resolve => setTimeout(resolve, 0));
+          const inner = host.firstElementChild.shadowRoot.firstElementChild.shadowRoot.querySelector('#deep');
+          return {native: window.__SILENT_BROWSER__.native(inner)};
+        }""")
+        if result.get('skipped'):
+            self.skipTest('declarative shadow DOM parsing (setHTMLUnsafe) is not exposed by this engine')
+        self.assertEqual(result['native'], {'muted': True, 'volume': 0})
+
     def test_the_first_page_of_a_persistent_context_is_silenced_before_the_caller_writes_into_it(self):
         engine = getattr(self.pw, self.engine_name)
         options = (browser_options() if self.engine_name == 'chromium' else {})
