@@ -257,6 +257,29 @@ class ChainTests(unittest.TestCase):
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("missing burnin", problems[0])
 
+    def test_a_stage_cannot_be_resealed_with_fewer_inputs_or_outputs(self):
+        for side, label in (("outputs", "burnin-frames"), ("outputs", "captions-vtt"), ("inputs", "scene-graph-summary")):
+            target = Path(self.tmp.name) / f"fewer-{side}-{label}"
+            shutil.copytree(self.out, target)
+            manifest = json.loads((target / "pipeline-manifest.json").read_text())
+            entry = next(e for e in manifest["stages"] if label in e[side])
+            del entry[side][label]
+            manifest["chain_sha256"] = pc.chain_hash(manifest)
+            (target / "pipeline-manifest.json").write_text(json.dumps(manifest))
+            problems = pc.verify_chain(target)
+            self.assertTrue(any(f"{entry['stage']}: {side} are" in p for p in problems), (label, problems))
+        target = self.copy()
+        manifest = json.loads((target / "pipeline-manifest.json").read_text())
+        next(e for e in manifest["stages"] if e["stage"] == "burnin")["outputs"] = {}
+        manifest["chain_sha256"] = pc.chain_hash(manifest)
+        (target / "pipeline-manifest.json").write_text(json.dumps(manifest))
+        self.assertTrue(any("burnin: outputs are []" in p for p in pc.verify_chain(target)))
+
+    def test_every_required_stage_has_declared_labels_matching_a_real_run(self):
+        self.assertEqual(list(pc.STAGE_LABELS), list(pc.STAGES))
+        for entry in self.manifest["stages"]:
+            self.assertEqual((tuple(sorted(entry["inputs"])), tuple(sorted(entry["outputs"]))), pc.STAGE_LABELS[entry["stage"]])
+
     def test_a_chain_with_the_optional_blender_stage_still_names_every_required_stage(self):
         manifest = json.loads((self.out / "pipeline-manifest.json").read_text())
         manifest["stages"].append({"stage": "blender", "inputs": {}, "outputs": {}})

@@ -342,6 +342,8 @@ def verify(payload: bytes, report: Mapping[str, Any], srt_text: str) -> list[str
             problems.append("chain head does not match the frames file")
         if report["frames_sha256"] != sha256_bytes(payload):
             problems.append("recorded frames hash does not match the frames file")
+        if report["cues"] != [{"index": c["index"], "start": c["start"], "end": c["end"], "lines": c["lines"]} for c in cues]:
+            problems.append("the cues recorded in the report are not the cues of the caption file")
         shown = sorted({f for c in cues for f in range(c["start"], c["end"])})
         if report["captioned_frames"] != len(shown):
             problems.append("captioned frame count does not match the caption file")
