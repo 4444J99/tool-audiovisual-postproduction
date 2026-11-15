@@ -16,10 +16,24 @@ from composition.fixtures import record
 from studies import test_review_evidence as audio_tests
 
 
+def run(*command):
+    """Run a fixture command; a failure carries the command's own stderr instead of a bare exit status."""
+    result=subprocess.run(command,cwd=ROOT,capture_output=True,text=True,timeout=20)
+    if result.returncode:
+        raise AssertionError(f"{' '.join(command)} exited {result.returncode}: {result.stderr.strip()[-800:]}")
+    return result
+
+
 class ReferenceReviewTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # @napi-rs/canvas is a declared devDependency that CI installs with `npm ci`; a fresh checkout lacks it.
+        # Fail once with the remedy rather than as four opaque subprocess errors. This is a failure, not a skip.
+        if not (ROOT/'node_modules'/'@napi-rs'/'canvas').is_dir():
+            raise AssertionError("@napi-rs/canvas is not installed; run `npm ci --ignore-scripts --no-audit --no-fund` in the repository root")
+
     def fixture(self,directory):
         helper=audio_tests.ReviewEvidenceTests();root,binding,locations,original=helper.fixture(directory)
-        def run(*command):return subprocess.run(command,cwd=ROOT,check=True,capture_output=True,timeout=20)
         def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
         run('node','tests/composition/render_reference_fixture.mjs','source',str(root))
         source=root/'source.mkv';run('ffmpeg','-nostdin','-v','error','-framerate','2','-i',str(root/'source-%03d.png'),'-c:v','ffv1','-pix_fmt','bgr0',str(source))
