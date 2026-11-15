@@ -17,7 +17,6 @@ the rack's OSC report set); the resolved value is what the workbench would rende
 The resolver itself is pure: `resolve_rack(contract, bases, time, controls)`. The TouchDesigner glue is `tick(rack)`,
 called from an Execute DAT at the start of every frame.
 """
-import bisect
 import json
 import math
 
@@ -188,24 +187,15 @@ class EpochLatch:
     time alone (an automated Reset that tracks the playhead never crosses), so the latch remembers; a backward seek replays from
     the start, so the answer never depends on the order the playhead moved in.
 
-    `at(time, control)` returns the epoch at `time`. The sidechain level (`control`) is remembered for every frame the latch is
-    asked about, and a frame walked later takes the level of the latest remembered frame at or before it (the level held until the
-    next observation), so a sidechain-modulated Reset time is judged on the levels it actually had, as the workbench evaluates
-    its envelope at each historical frame. A frame before the first observation takes the first level seen."""
+    `at(time, control)` returns the epoch at `time`. The sidechain level each frame was judged on is recorded the first time that
+    frame is walked and never changed afterwards: a frame that is the one asked about takes the level passed in, a frame walked on the
+    way there takes the level of the frame before it (the level held until the next observation), and a replay after a backward seek
+    uses exactly the recorded levels, so a sidechain-modulated Reset time gives the same epoch however the playhead moved, as the
+    workbench's per-frame history does. The first frame walked takes the level passed in."""
     def __init__(self, spec, base, fps=EPOCH_FPS):
         self.spec, self.base, self.fps = spec, base, fps
-        self.levels = {}       # frame -> sidechain level observed at that frame
-        self.observed = []     # the observed frames, ascending
+        self.levels = {}       # frame -> the sidechain level that frame was judged on
         self._restart()
-
-    def _level(self, frame):
-        index = bisect.bisect_right(self.observed, frame)
-        return self.levels[self.observed[index - 1] if index else self.observed[0]]
-
-    def _observe(self, frame, control):
-        if frame not in self.levels:
-            bisect.insort(self.observed, frame)
-        self.levels[frame] = control
 
     def _restart(self):
         self.frame, self.active, self.epoch = -1, False, 0.0
@@ -224,10 +214,11 @@ class EpochLatch:
         frame = int(math.floor(max(0.0, time) * self.fps + 1e-6))
         if frame < self.frame:
             self._restart()
-        self._observe(frame, control)
         while self.frame < frame:
             self.frame += 1
-            self._step(self.frame, self._level(self.frame))
+            if self.frame not in self.levels:
+                self.levels[self.frame] = control if self.frame == frame or self.frame - 1 not in self.levels else self.levels[self.frame - 1]
+            self._step(self.frame, self.levels[self.frame])
         return self.epoch
 
 

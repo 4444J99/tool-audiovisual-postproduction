@@ -115,6 +115,20 @@ class EpochTests(unittest.TestCase):
         for time in (0.5, 1.5, 3.0, 0.0, 2.0):
             self.assertAlmostEqual(playing.at(time, level(time)), workbench(time), places=9, msg=time)
 
+    def test_the_level_a_frame_was_judged_on_is_kept_when_the_playhead_cooks_faster_than_the_pictures(self):
+        """Codex: with several cooks inside one 12 fps frame, a later cook must not overwrite the level that frame was judged on; a
+        backward seek and a return would otherwise give a different epoch."""
+        spec = {"order": ["reset"], "params": {"reset": {"min": 0, "max": 12, "step": 0.01}}, "macro": [], "automation": [], "events": [],
+                "modulation": {"parameter": "params.reset", "mode": "add", "amount": 3}}
+        base = {"intensity": 1.0, "wet": 1.0, "params": {"reset": 0.0}, "bypass": False, "solo": False}
+        latch = resolve.EpochLatch(spec, base, 12.0)
+        for time, level in ((0.0, 0.0), (1 / 12, 1.0), (0.15, 0.0), (2 / 12, 0.0)):
+            epoch = latch.at(time, level)
+        self.assertAlmostEqual(epoch, 2 / 12)
+        self.assertEqual(latch.at(0.0, 0.0), 0.0)
+        self.assertAlmostEqual(latch.at(2 / 12, 0.0), 2 / 12, msg="the same history after a seek and a return")
+        self.assertEqual(latch.levels[1], 1.0)
+
     def test_the_epoch_row_is_written_for_feedback_only(self):
         ramp = self.data["ramp"]
         node = {"order": ramp["resolve"]["order"]}
