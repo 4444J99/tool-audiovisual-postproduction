@@ -29,6 +29,7 @@ MP4 = "short-film.mp4"
 HASHES = "demo-hashes.json"
 DEMO_QC = "demo-qc.json"
 SCHEMA = "amps.short_film_demo.v1"
+MARKER = ".short-film-demo"  # written first, so a failed run can still be replaced; its text is the schema name
 LOUDNESS_TOLERANCE_LU = 1.0  # AAC is lossy: the mp4's audio must stay within this of the delivered WAV
 DURATION_TOLERANCE_S = 0.05
 
@@ -151,8 +152,14 @@ def judge_mp4(out, ledger, burnin, tools):
     return checks
 
 
+def artefact_hashes(out):
+    """SHA-256 of every file the run wrote, except the demo's own bookkeeping files at the top of the directory."""
+    own = {HASHES, DEMO_QC, MARKER}
+    return {str(p.relative_to(out)): sha256_file(p) for p in sorted(out.rglob("*")) if p.is_file() and str(p.relative_to(out)) not in own}
+
+
 def collect_hashes(out, manifest, ffmpeg_line):
-    files = {str(p.relative_to(out)): sha256_file(p) for p in sorted(out.rglob("*")) if p.is_file() and p.name not in (HASHES, DEMO_QC)}
+    files = artefact_hashes(out)
     stages = {entry["stage"]: entry for entry in manifest["stages"]}
     return {
         "schema": SCHEMA,
@@ -172,11 +179,14 @@ def collect_hashes(out, manifest, ffmpeg_line):
 
 def run_demo(out, delivery=None, qc_spec=None):
     out = Path(out)
+    tools = ffmpeg_tools()
     if out.exists() and any(out.iterdir()):
-        if not (out / HASHES).is_file():
+        marker = out / MARKER
+        if not (marker.is_file() and not marker.is_symlink() and marker.read_text() == SCHEMA):
             raise DemoError([f"{out} is not empty and is not a previous demo output; choose a new directory"])
         shutil.rmtree(out)
-    tools = ffmpeg_tools()
+    out.mkdir(parents=True, exist_ok=True)
+    (out / MARKER).write_text(SCHEMA)
     try:
         manifest = pc.run_chain(out, delivery=delivery or pc.DEFAULT_DELIVERY, qc_spec=qc_spec)
     except pc.ChainError as error:
@@ -211,7 +221,7 @@ def verify_demo(out, delivery=None, qc_spec=None):
     manifest = json.loads((out / "pipeline-manifest.json").read_text())
     if recorded.get("chain_sha256") != manifest["chain_sha256"]:
         problems.append("demo-hashes.json names a chain hash that differs from pipeline-manifest.json")
-    on_disk = {str(p.relative_to(out)): sha256_file(p) for p in sorted(out.rglob("*")) if p.is_file() and p.name not in (HASHES, DEMO_QC)}
+    on_disk = artefact_hashes(out)
     for name in sorted(set(on_disk) | set(recorded.get("files", {}))):
         if on_disk.get(name) != recorded.get("files", {}).get(name):
             problems.append(f"{name} differs from demo-hashes.json" if name in on_disk and name in recorded["files"] else f"{name} is not in both the directory and demo-hashes.json")

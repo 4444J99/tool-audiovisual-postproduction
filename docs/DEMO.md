@@ -9,7 +9,7 @@ python tools/short_film_demo.py run --output outputs/short-film-demo
 python tools/short_film_demo.py verify --output outputs/short-film-demo
 ```
 
-Needs NumPy and SciPy (the chain's loudness stage) and an ffmpeg with `libx264` and `aac`. `outputs/` is git-ignored, so the output is scratch. `--delivery` (a preset or spec JSON) and `--qc-spec` pass through to the chain. A non-empty `--output` that is not a previous demo output is refused and left alone; a previous demo output is replaced.
+Needs NumPy and SciPy (the chain's loudness stage) and an ffmpeg with `libx264` and `aac`. `outputs/` is git-ignored, so the output is scratch. `--delivery` (a preset or spec JSON) and `--qc-spec` pass through to the chain. A non-empty `--output` is refused and left alone unless it holds the `.short-film-demo` marker the demo writes first (so even a run that failed part-way can be rerun into the same directory); a marked directory is replaced.
 
 ## What it writes (`outputs/short-film-demo/`)
 
@@ -25,7 +25,7 @@ Needs NumPy and SciPy (the chain's loudness stage) and an ffmpeg with `libx264` 
 
 ## Expected hashes
 
-These were observed on 2026-11-15 (macOS arm64, Python 3.14, NumPy/SciPy as installed, ffmpeg 9.0.2 Homebrew with libx264). The rows above the mp4 come from Python and NumPy arithmetic and are what a stale-doc test in `tests/test_short_film_demo.py` compares against. The frames, delivered dialogue, QC report and captions hashes were identical on both platforms; only the chain hash differs between them (the manifest records measured floating-point loudness fields), so both values are listed and the test accepts the platform it runs on.
+These were observed on 2026-11-15 (macOS arm64, Python 3.14, NumPy/SciPy as installed, ffmpeg 9.0.2 Homebrew with libx264). The frames, delivered dialogue, QC report and captions hashes are asserted by a stale-doc test in `tests/test_short_film_demo.py`; they came out identical on macOS and on the Linux CI runner. The chain hash differed between those two platforms and the cause was not isolated (the manifest records measured loudness values, so floating-point differences in NumPy/SciPy or the platform are a candidate, not a finding). It is therefore listed once per platform observed, and its test only requires the run's chain hash to be one of the listed values, on any platform. NumPy and SciPy are not pinned exactly by this repository, so a new platform or library release may need a new row.
 
 | Output | SHA-256 |
 |---|---|
@@ -41,7 +41,7 @@ The mp4 hash is not pinned anywhere: it depends on the ffmpeg, libx264 and AAC e
 
 ## What the test asserts
 
-`tests/test_short_film_demo.py` runs the command twice into two directories and asserts: both exit 0 and print the same summary; `demo-hashes.json`, the mp4 and every other written file are byte-identical across the two runs; the whole twelve-stage chain ran and its QC report passes; every mp4 check passes; `verify` accepts a fresh run; a flipped mp4 byte, an edited caption, and a lossy re-encoded mp4 whose hash file was re-sealed (named by the decoded-luma check) are each refused; a foreign non-empty directory is refused untouched; a rerun over its own output gives the same hashes; a delivery spec the audio cannot meet (`streaming`) writes no mp4; and the hashes in this document are the ones the run produces. The test is skipped where ffmpeg lacks `libx264` or `aac`.
+`tests/test_short_film_demo.py` runs the command twice into two directories and asserts: both exit 0 and print the same summary; `demo-hashes.json`, the mp4 and every other written file are byte-identical across the two runs; the whole twelve-stage chain ran and its QC report passes; every mp4 check passes; `verify` accepts a fresh run; a flipped mp4 byte, an edited caption, and a lossy re-encoded mp4 whose hash file was re-sealed (named by the decoded-luma check) are each refused; a foreign non-empty directory, including one with a stray `demo-hashes.json`, is refused untouched; a refused run does not lock its directory; a rerun over its own output gives the same hashes; a delivery spec the audio cannot meet (`streaming`) writes no mp4; and the hashes in this document are the ones the run produces. The test is skipped where ffmpeg lacks `libx264` or `aac`.
 
 ## What this does not show
 

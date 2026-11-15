@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import short_film_demo as demo  # noqa: E402
 
 
-DOCUMENTED = ("chain_sha256", "frames_sha256", "delivered_dialogue_sha256", "qc_report_sha256", "captions_srt_sha256")
+DOCUMENTED = ("frames_sha256", "delivered_dialogue_sha256", "qc_report_sha256", "captions_srt_sha256")
 
 
 def cli(*args):
@@ -61,7 +61,7 @@ class ShortFilmDemoTests(unittest.TestCase):
     def test_hashes_are_stable_across_two_runs_for_every_file(self):
         a, b = self.hashes(self.first), self.hashes(self.second)
         self.assertEqual(a, b)
-        self.assertEqual(sorted(a["files"]), sorted(str(p.relative_to(self.first)) for p in self.first.rglob("*") if p.is_file() and p.name not in (demo.HASHES, demo.DEMO_QC)))
+        self.assertEqual(sorted(a["files"]), sorted(str(p.relative_to(self.first)) for p in self.first.rglob("*") if p.is_file() and str(p.relative_to(self.first)) not in (demo.HASHES, demo.DEMO_QC, demo.MARKER)))
         for name in a["files"]:
             self.assertEqual((self.first / name).read_bytes(), (self.second / name).read_bytes(), name)
 
@@ -119,6 +119,7 @@ class ShortFilmDemoTests(unittest.TestCase):
         path.write_text(path.read_text().replace("Hello", "Jello"))
         result = cli("verify", "--output", str(out))
         self.assertEqual(result.returncode, 2)
+        self.assertIn("captions", result.stdout)
 
     def test_foreign_non_empty_directory_is_refused_and_left_alone(self):
         target = Path(self.tmp.name) / "foreign"
@@ -128,6 +129,25 @@ class ShortFilmDemoTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("not a previous demo output", result.stdout)
         self.assertEqual((target / "mine.txt").read_text(), "keep")
+
+    def test_a_failed_run_does_not_lock_its_directory(self):
+        target = Path(self.tmp.name) / "retry"
+        self.assertEqual(cli("run", "--output", str(target), "--delivery", "streaming").returncode, 2)
+        self.assertTrue(any(target.iterdir()), "the refused run should have left chain files behind")
+        result = cli("run", "--output", str(target))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((target / demo.MP4).is_file())
+
+    def test_a_stray_hash_file_does_not_authorise_replacing_a_foreign_directory(self):
+        target = Path(self.tmp.name) / "stray"
+        target.mkdir()
+        (target / demo.HASHES).write_text("{}")
+        (target / "mine.txt").write_text("keep")
+        self.assertEqual(cli("run", "--output", str(target)).returncode, 2)
+        self.assertEqual((target / "mine.txt").read_text(), "keep")
+
+    def test_chain_hash_is_one_of_the_documented_platform_values(self):
+        self.assertIn(self.hashes(self.first)["chain_sha256"], DOC.read_text(), "docs/DEMO.md lists no chain hash for this platform; add the observed value")
 
     def test_rerun_over_its_own_output_gives_the_same_hashes(self):
         out = self.copy()
