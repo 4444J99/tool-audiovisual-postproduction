@@ -236,7 +236,9 @@ export function buildNetworkSpec(patch, options = {}) {
       add(comp, 'resolved', 'tableDAT', {table: resolvedTable(node, controls, latency.lag, latency.lookahead)});
       const wet = expr('{wet}'), bypass = expr('int({bypass})');
       if (latency.lookahead > 0 && LOOKAHEAD[node.type]() > latency.lookahead + 1e-9) warnings.push(`${node.id}: ${node.type} can read ${LOOKAHEAD[node.type]()} s ahead but the latency is capped at ${maxLatency} s${LIMITED[node.type] ? `, so ${LIMITED[node.type].join(', ')} is limited to ${latency.lookahead} s` : '; a read beyond the cap shows the newest frame'}.`);
-      const effectContext = {lookahead: latency.lookahead, lag: latency.lag, ...(latency.lag > 0 ? {clock: '{clock}'} : {})};
+      // the workbench's per-processor noise seed (visual-engine.mjs `effect`): the patch seed (1 when it has none) plus the id's character codes
+      const seed = (Number(patch.seed) || 1) + [...node.id].reduce((sum, char) => sum + char.charCodeAt(0), 0);
+      const effectContext = {lookahead: latency.lookahead, lag: latency.lag, seed, ...(latency.lag > 0 ? {clock: '{clock}'} : {})};
       const effect = EFFECTS[node.type]?.((name, type, extra = {}) => add(comp, name, type, {...extra, pars: Object.fromEntries(Object.entries(extra.pars ?? {}).map(([key, value]) => [key, value && typeof value === 'object' && 'ref' in value ? {ref: `${comp}/${value.ref}`} : value]))}), effectContext);
       // Like the workbench, a processor only touches the shared voice when it targets `voice`, and the picture when it
       // targets any visual stream; otherwise that signal passes through untouched.

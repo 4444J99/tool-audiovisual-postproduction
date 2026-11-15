@@ -320,5 +320,65 @@ function exchange(add, ctx = {}) {
   return {picture, notes: [`exchange cuts the picture into ${EXCHANGE_REGIONS} strips (the workbench's fallback when the media pack names no people; the network cannot read the pack's regions); the Crop TOP's units and output-resolution behaviour are the reference defaults (the parameter reference lists no menu tokens), and the voice addresses are not built.`]};
 }
 
+/** The workbench's `noise(seed, i, j)` (visual-engine.mjs) as a Python expression over two expression texts: a 32-bit integer hash scaled to [0, 1). */
+export const noiseText = (seed, i, j = '0') => {
+  const start = `((${(seed | 0) >>> 0} ^ (((${i}) + 1) * 374761393 & 0xFFFFFFFF) ^ (((${j}) + 1) * 668265263 & 0xFFFFFFFF)) & 0xFFFFFFFF)`;
+  return `(lambda a: (lambda b: ((b ^ (b >> 16)) & 0xFFFFFFFF) / 4294967296)(((a ^ (a >> 13)) * 1274126177) & 0xFFFFFFFF))(${start})`;
+};
+
+/** The most entries Queue / Overflow keeps (the catalog's largest Queue capacity) and the longest burst interval (how far back an entry can sit). */
+const MAX_QUEUE = 24;
+const MAX_BURST = 6;
+
+/**
+ * Queue / Overflow (picture): arrivals enter at `Arrival rate` per second inside each `Burst interval`, leave at a fifth of
+ * `Release rate`, and what is waiting (at most `Queue capacity` entries, first in first out or last in first out) is drawn as
+ * a stack of small copies of the source from the instants each entry arrived, from the top left, falling down and across,
+ * scattered by `Overflow spread` over the burst once more is waiting than the capacity (all from the workbench's own formulas). Entry
+ * `j` is a cache read back `age` seconds, scaled to 0.48, rotated about its top-left corner and placed there; with nothing waiting the
+ * frame itself is drawn. The scatter uses the workbench's noise hash with the processor's seed. The text port's smaller 0.65 copies are not built.
+ */
+function queue(add, ctx = {}) {
+  const T = ctx.clock ?? '{rack.Time}';
+  const seed = ctx.seed ?? 1;
+  const period = 'max(0.4, {burst})';
+  const phase = `((${T}) % ${period})`;
+  const arrivals = `int(math.floor(${phase} * {rate}))`;
+  const released = `int(math.floor(${phase} * {release} * 0.2))`;
+  const backlog = `max(0, ${arrivals} - ${released})`;
+  const count = `min(int(math.floor({capacity} + 0.5)), ${backlog})`;
+  const overflow = `(${backlog} > {capacity})`;
+  const burst = `((${phase} / ${period}) * {spread} if ${overflow} else 0)`;
+  const slot = j => `(${j} if int(round({order})) == 0 else ${count} - 1 - ${j})`;
+  const age = j => `max(0, ${phase} - (${released} + ${slot(j)}) / max(0.25, {rate}))`;
+  const W = '{op:in_picture}.width', H = '{op:in_picture}.height';
+  const x = j => `(${W} * 0.08 + ${j} * ${W} * 0.025 + ${burst} * (${noiseText(seed, j, `int(math.floor(${T} / ${period}))`)} - 0.5) * ${W})`;
+  const y = j => `(${H} * 0.15 + ${j} * ${H} * 0.055 + ${burst} * (${noiseText(seed, j, '5')} - 0.5) * ${H})`;
+  const angle = j => `((${noiseText(seed, j)} - 0.5) * 0.8 if ${overflow} else 0)`;
+  // the copy's centre: its top-left corner (x, y) plus the half-size diagonal turned by the angle (canvas y runs down)
+  const centreX = j => `(${x(j)} + 0.48 * ${W} / 2 * math.cos(${angle(j)}) - 0.48 * ${H} / 2 * math.sin(${angle(j)}))`;
+  const centreY = j => `(${y(j)} + 0.48 * ${W} / 2 * math.sin(${angle(j)}) + 0.48 * ${H} / 2 * math.cos(${angle(j)}))`;
+  const picture = () => {
+    add('qu_cache', 'cacheTOP', {inputs: ['in_picture'], pars: {cachesize: expr(cacheSizeText(MAX_BURST)), active: 1}});
+    // nothing waiting: the frame itself, as the workbench draws it; otherwise transparent
+    add('qu_idle', 'levelTOP', {inputs: ['in_picture'], pars: {opacity: expr(`1 if ${count} == 0 else 0`)}});
+    let below = 'qu_idle';
+    for (let j = 0; j < MAX_QUEUE; j++) {
+      add(`qu_frame_${j}`, 'cacheselectTOP', {pars: {cachetop: {ref: 'qu_cache'}, index: expr(cacheIndexText(age(j), MAX_BURST))}});
+      add(`qu_move_${j}`, 'transformTOP', {inputs: [`qu_frame_${j}`], pars: {
+        sx: 0.48, sy: 0.48, extend: 'zero',
+        tx: expr(`(${centreX(j)} - ${W} / 2) / ${W}`),
+        ty: expr(`-(${centreY(j)} - ${H} / 2) / ${H}`),
+        rotate: expr(`-${angle(j)} * 180 / math.pi`),
+      }});
+      add(`qu_gain_${j}`, 'levelTOP', {inputs: [`qu_move_${j}`], pars: {opacity: expr(`1 if ${j} < ${count} else 0`)}});
+      add(`qu_over_${j}`, 'overTOP', {inputs: [`qu_gain_${j}`, below]});
+      below = `qu_over_${j}`;
+    }
+    return below;
+  };
+  return {picture, notes: ['queue: the text port\'s smaller 0.65 copies (the written source) are not built, only the picture; the Transform TOP\'s Rotate is assumed counter-clockwise about the image centre (the parameter reference lists no menu tokens or pivot default), as Feedback already assumes the centre, and its translate unit is taken as the reference default.']};
+}
+
 /** The processors implemented by this version. A builder returns `shared` (optional, called first), `picture` and `audio`. */
-export const EFFECTS = Object.freeze({damage, delay, feedback, freeze, gate, displacement, reverse, stutter, routing, exchange});
+export const EFFECTS = Object.freeze({damage, delay, feedback, freeze, gate, displacement, reverse, stutter, routing, exchange, queue});
