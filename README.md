@@ -52,11 +52,14 @@ The eight-layout comparison's placement rules are a pure module (`web/fx/layout-
 
 `tools/reverse_angle.py` plans a same-side reverse camera and reports which reverse-view pixels the source recording genuinely shows ([guide](docs/REVERSE-ANGLE.md)).
 
+## Set spec to Blender scene
+
+`tools/set_scene.py` validates a set spec (bounds, materials, boxes, cylinders, stepped arch bands, lights, cameras) and builds it in headless Blender, then compares Blender's measured scene with the spec's scene graph ([guide](docs/SET-SCENE.md)). `shot-set` exports the same environment as a shot plan's `set` block.
+
 ## Room-tone fill
 
 `tools/room_tone_fill.py` finds digital-silence holes in edited dialogue, borrows steady room tone from the same recording, builds it into a loop-matched bed with equal-power crossfades, and fills each hole level-matched to the nearest real tone, leaving every other sample bit-identical ([guide](docs/ROOM-TONE-FILL.md)).
 
-||||||| 5e53f6a
 ## Actor-coverage matrix
 
 `tools/coverage_matrix.py` derives, from a shot plan's geometry, what size and angle each shot gives each actor, checks required cells, dialogue lines and recorded room tone, and proposes validated shots for the gaps ([guide](docs/COVERAGE-MATRIX.md)).
