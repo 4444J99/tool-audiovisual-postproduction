@@ -302,6 +302,8 @@ def _derive(root: Path, locations: Mapping[str, str], spec: Mapping[str, Any] | 
         stamp_problems.append(f"the SRT file has {len(parsed_cues)} cues, the caption report {len(recorded)}, the burn-in report {len(burn_cues)}")
     if [(c["start"], c["end"]) for c in vtt_cues] != [(c["start"], c["end"]) for c in cues]:
         stamp_problems.append("the WebVTT stamps stand for different frames than the SRT stamps")
+    if [c["lines"] for c in vtt_cues] != [c["lines"] for c in cues]:
+        stamp_problems.append("the WebVTT text differs from the SRT text")
     checks.append(_check("timebase.timecode", not roundtrip and not stamp_problems,
                          "shot boundaries convert to a timecode and back; every caption stamp stands for the frame the caption and burn-in reports record",
                          basis=f"non-drop HH:MM:SS:FF at the nominal {int(round(fps))} fps label; exact rate {fps}",
@@ -393,13 +395,15 @@ def _burned_frames(payload: bytes, burn_report: Mapping[str, Any], total: int,
     size = params["geometry"]["width"] * params["geometry"]["height"]
     if len(payload) != size * params["frames"] or params["frames"] != total:
         return [-1], [], []              # a marker no cue can equal: the frame file is not the burn-in's shape
-    blank = b"".join(cb.frame_stream(params, []))
-    burned = [i for i in range(params["frames"]) if payload[i * size:(i + 1) * size] != blank[i * size:(i + 1) * size]]
+    burned: list[int] = []
+    for i, frame in enumerate(cb.frame_stream(params, [])):                 # one frame at a time: no second copy of the video
+        if payload[i * size:(i + 1) * size] != frame:
+            burned.append(i)
     try:
-        drawn = b"".join(cb.frame_stream(params, cues))
+        mismatch = [i for i, frame in enumerate(cb.frame_stream(params, cues)) if payload[i * size:(i + 1) * size] != frame]
     except cb.BurnError as error:
         return burned, [], [f"the caption file cannot be re-rendered: {'; '.join(error.errors[:3])}"]
-    return burned, [i for i in range(params["frames"]) if payload[i * size:(i + 1) * size] != drawn[i * size:(i + 1) * size]], []
+    return burned, mismatch, []
 
 
 def verify(root: Path | str, locations: Mapping[str, str], recorded: bytes, spec: Mapping[str, Any] | None = None) -> list[str]:
