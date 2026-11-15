@@ -42,6 +42,20 @@ SCHEMA = "amps.pipeline_chain.v1"
 SAMPLE_RATE = 16000
 DEFAULT_DELIVERY = "ebu_r128"
 STAGES = ("set", "shot_plan", "dialogue", "requirement", "coverage", "room_tone", "delivery", "final_ledger", "colour", "captions", "burnin")
+# The labels each required stage must list, so a re-sealed manifest cannot make a stage commit to less than it should.
+STAGE_LABELS = {
+    "set": ((), ("scene-graph-summary", "set-spec", "shot-plan-set")),
+    "shot_plan": (("shot-plan-set",), ("shot-plan",)),
+    "dialogue": ((), ("dialogue-with-holes",)),
+    "requirement": (("dialogue-with-holes", "shot-plan"), ("requirement",)),
+    "coverage": (("requirement", "shot-plan"), ("coverage-matrix", "coverage-report", "suggested-plan")),
+    "room_tone": (("dialogue-with-holes",), ("dialogue-filled", "fill-report")),
+    "delivery": (("dialogue-filled",), ("delivery-report", "dialogue-delivered")),
+    "final_ledger": (("dialogue-delivered", "suggested-plan"), ("final-ledger",)),
+    "colour": (("dialogue-delivered", "final-ledger", "scene-graph-summary", "suggested-plan"), ("layer-ledger", "layer-plan")),
+    "captions": (("final-ledger",), ("captions-report", "captions-srt", "captions-vtt")),
+    "burnin": (("captions-srt", "final-ledger", "scene-graph-summary"), ("burnin-frames", "burnin-report")),
+}
 
 
 class ChainError(Exception):
@@ -387,6 +401,11 @@ def verify_chain(out: Path) -> list[str]:
     produced: dict[str, str] = {}
     for entry in manifest.get("stages", []):
         name = entry["stage"]
+        if name in STAGE_LABELS:
+            for side, want in zip(("inputs", "outputs"), STAGE_LABELS[name]):
+                have = tuple(sorted(entry[side]))
+                if have != want:
+                    problems.append(f"{name}: {side} are {list(have)}, expected {list(want)}")
         for label, digest in entry["inputs"].items():
             if produced.get(label) != digest:
                 problems.append(f"{name}: input {label} is {digest[:12]} but the upstream output is "

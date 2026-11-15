@@ -225,6 +225,14 @@ class TamperTests(unittest.TestCase):
         report["captioned_frames"] += 1
         self.assertEqual(cb.verify(self.payload, report, SRT), ["captioned frame count does not match the caption file"])
 
+    def test_recorded_cues_must_be_the_cues_of_the_caption_file(self):
+        for edit in (lambda c: c[0]["lines"].__setitem__(0, "Something else."), lambda c: c[1].__setitem__("end", c[1]["end"] + 1),
+                     lambda c: c[0].__setitem__("index", 9), lambda c: c.pop()):
+            report = self.report_copy()
+            edit(report["cues"])
+            problems = cb.verify(self.payload, report, SRT)
+            self.assertIn("the cues recorded in the report are not the cues of the caption file", problems)
+
     def test_a_malformed_report_is_reported_not_raised(self):
         self.assertTrue(cb.verify(self.payload, {}, SRT)[0].startswith("burn-in report cannot be checked"))
         self.assertTrue(cb.verify(self.payload, {"params": {"schema": "other"}}, SRT)[0].startswith("burn-in report: schema"))
