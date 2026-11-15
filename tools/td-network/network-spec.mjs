@@ -125,6 +125,13 @@ function resolveBlock(node, patch, entry = {lag: 0, lookahead: 0}) {
   };
 }
 
+/** The workbench's authored words (visual-engine.mjs `word`): `HOW WHY WHAT` when none are given, split on whitespace; a field that holds only whitespace
+ *  leaves no word to step through, and the workbench then shows `HOW`. */
+export function authoredWords(text) {
+  const words = String(text || 'HOW WHY WHAT').split(/\s+/).filter(Boolean);
+  return words.length ? words : ['HOW'];
+}
+
 export function buildNetworkSpec(patch, options = {}) {
   const verdict = validatePatch(patch);
   if (!verdict.valid) throw Error(`Patch ${patch?.id} is not valid: ${verdict.errors.slice(0, 3).join(' ')}`);
@@ -141,7 +148,7 @@ export function buildNetworkSpec(patch, options = {}) {
   // Typography's words: the patch's authored words, or the checked word cues the caller supplies (`options.wordCues`); the cues of the
   // media pack are private to it and are never read from the patch
   const wordMaterial = patch.metadata?.wordMode === 'authored'
-    ? {mode: 'authored', words: String(patch.metadata.words || 'HOW WHY WHAT').split(/\s+/).filter(Boolean)}
+    ? {mode: 'authored', words: authoredWords(patch.metadata.words)}
     : {mode: 'cues', cues: (options.wordCues ?? []).map(cue => ({in: Number(cue.in), out: cue.out == null ? 0 : Number(cue.out), text: String(cue.text), probability: cue.probability == null ? 1 : Number(cue.probability)}))};
   const implemented = [];
   const operators = [];

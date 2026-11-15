@@ -199,6 +199,23 @@ class TypographyTests(unittest.TestCase):
                 compared += 1
         self.assertGreater(compared, 20000)
 
+    def test_an_authored_word_field_of_only_whitespace_falls_back_to_how_as_the_workbench_does(self):
+        # Codex P2 on this pull request: the empty table made the expression divide by zero
+        script = ("import {VisualEngine} from './web/fx/visual-engine.mjs';"
+                  "const engine = new VisualEngine({duration: 12, fps: 12}, {}, {width: 64, height: 36, createCanvas: () => ({getContext: () => ({})})});"
+                  "const patch = {metadata: {wordMode: 'authored', words: '   '}};"
+                  "process.stdout.write(JSON.stringify([0, 0.3, 0.7, 1.5, 2.8].map(t => [t, engine.word(t, patch, 8)])));")
+        engine = subprocess.run(["node", "--input-type=module", "-e", script], capture_output=True, text=True, cwd=ROOT, check=False)
+        self.assertEqual(engine.returncode, 0, engine.stderr)
+        spec = spec_with("   ")
+        chain = {o["name"]: o for o in spec["operators"] if o["parent"] == "fx_fx_1" and o["name"].startswith("ty_")}
+        self.assertEqual(chain["ty_words"]["table"], [["HOW"]])
+        self.__class__.table = chain["ty_words"]["table"]
+        rows = rows_for(None, {"size": 1.05, "copies": 9, "persistence": 8, "fragment": 0.65, "mode": 0, "drift": 0.55})
+        for t, word in json.loads(engine.stdout):
+            self.assertEqual(word, "HOW")
+            self.assertEqual(evaluate(chain["ty_text"]["pars"]["text"]["expr"], rows, t), word)
+
     def test_the_wall_copies_read_older_words_and_the_word_follows_both_clocks(self):
         # the wall's copy i asks for the word 0.32 i seconds earlier: the network's text expression reads its own clock minus that
         self.table_for("authored")

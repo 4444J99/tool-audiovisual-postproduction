@@ -101,7 +101,7 @@ class Comp:
             return [Chan(self.gate)]
         if name == "in_picture":
             return Sized()
-        if name in ("audio", "dmg_drive"):   # a CHOP read sample by sample: the source, or the driven signal (same stand-in samples)
+        if name in ("audio", "dmg_drive", "in_audio"):   # a CHOP read sample by sample: the source, the driven signal, or the processor's input (same stand-in samples)
             return self.audio
         raise KeyError(name)
 

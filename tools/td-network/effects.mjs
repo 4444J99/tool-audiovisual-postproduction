@@ -251,7 +251,7 @@ const COPY_LAG = 0.085;
  * 2 x Travel (out and back), and `Trace copies` earlier positions of it trail behind: copy k sits at the path position
  * `q = clamp(progress - k x 0.12 x Trace spread)`, scaled to 0.62 of the frame, lifted by 0.3 sin(q pi) of the frame height,
  * read k x 0.085 s earlier from a cache, at opacity `(1 - k / (copies + 1)) x 0.95`, and laid over the copies behind it (copy 0 on
- * top), as the workbench draws them. The voice's pan travel is a per-sample gain curve and is not built (the voice passes).
+ * top), as the workbench draws them. The voice pans the mono sum along the same travel (equal power) at block rate.
  * Impact scatter (the text-port burst) belongs to the text stream and is not built.
  */
 function routing(add, ctx = {}) {
@@ -276,7 +276,17 @@ function routing(add, ctx = {}) {
     }
     return below;
   };
-  return {picture};
+  // The voice: the workbench pans the mono sum of the shared recording along the same travel, `cos`/`sin` of the pan angle (equal power, x sqrt 2),
+  // as a per-sample curve. One Expression CHOP reads both source channels per sample and picks the cosine for channel 0 and the sine for channel 1;
+  // the pan is evaluated once per cook (as Freeze's voice envelope is), so it follows the travel at block rate.
+  const audio = () => {
+    const position = `min(1, max(0, {origin} + ({destination} - {origin}) * ${progress}))`;
+    const pan = `min(1, max(0, 0.5 + (${position} - 0.5) * min(2, max(0, {spread}))))`;
+    add('rt_voice', 'expressionCHOP', {inputs: ['in_audio'], pars: {expr0expr: expr(
+      `({op:in_audio}[0][me.sampleIndex] + {op:in_audio}[min(1, {op:in_audio}.numChans - 1)][me.sampleIndex]) * 0.5 * (math.cos(${pan} * math.pi / 2) if me.chanIndex == 0 else math.sin(${pan} * math.pi / 2)) * math.sqrt(2)`)}});
+    return 'rt_voice';
+  };
+  return {picture, audio};
 }
 
 /** The strips Exchange cuts the picture into when the media pack names no labelled people (the workbench's own fallback, visual-engine.mjs `people.length||5`). */
