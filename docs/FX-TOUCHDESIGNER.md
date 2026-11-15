@@ -108,7 +108,7 @@ node tools/fx-td-network.mjs web/fx/fixtures/closed-inbox.json --out outputs/td 
 
 This writes `<id>.network.json` (the spec: operators, parameters, wiring, contract), `<id>.build.py` (self-contained,
 with the spec embedded) and `modules/` (the Python that ends up in Text DATs, for reading). Options: `--picture-fps` (12, the workbench's picture bank rate: the grid Feedback's reset epoch is latched on), `--source-file`,
-`--osc-in-port` (7000), `--osc-out-port` (7001), `--host`, `--root-name` (`fx_rack`). Output is deterministic: the
+`--word-cues` (a JSON list of word cues for Typography; none by default), `--osc-in-port` (7000), `--osc-out-port` (7001), `--host`, `--root-name` (`fx_rack`). Output is deterministic: the
 same patch gives the same bytes.
 
 In TouchDesigner's Textport:
@@ -205,7 +205,7 @@ is released in the network and stays so.
 Editing a base parameter in TouchDesigner never sends the resolved value back over OSC: only edits made to the custom
 parameters are exchanged.
 
-**Effects (eleven of thirteen).** Between `in_<port>` and `proc_<port>` a processor now holds the effect chain
+**Effects (twelve of thirteen).** Between `in_<port>` and `proc_<port>` a processor now holds the effect chain
 (`tools/td-network/effects.mjs`). Every effect parameter is an expression over the processor's resolved values, so
 macros, automation, events and sidechain drive it; the chain stays inside the processor, keeps the input's resolution,
 and the network stays static (a count parameter is a fixed maximum of stages switched by its resolved value).
@@ -223,6 +223,7 @@ and the network stays static (a count parameter is a fixed maximum of stages swi
 | Routing | up to eight trace copies over a transparent base, copy 0 on top: copy k reads `k x 0.085` s back from a Cache TOP, is scaled to 0.62, placed at the path position `clamp(progress - k x 0.12 x Trace spread)` between Origin and Destination (a triangle wave of period `2 x Travel`) and lifted by `0.3 sin(q pi)`, at opacity `(1 - k / (copies + 1)) x 0.95`; the copy count is the resolved `Trace copies` | the voice pans the mono sum of the shared recording along the same travel, equal power (`cos` / `sin` of the pan angle x sqrt 2): one Expression CHOP reads both source channels per sample, with the pan evaluated once per cook (block rate, as Freeze's voice envelope is). The text burst (`Impact scatter`) is not built |
 | Exchange | the frame is cut into 5 strips (the workbench's fallback when the media pack names no people; the network cannot read the pack's regions) and dealt out again by a cyclic permutation: slot `d` shows strip `(d - ((floor(time / Exchange interval) x Address offset + 1) mod 5)) mod 5`, cut by a Crop TOP from a Cache TOP read `History offset` back, put in its slot by a Transform TOP on a full-size canvas (`tx` = the slot's centre) and laid side by side with Over TOPs; the picture changes at a hard cut, as the workbench's does. Mode 1 (voice addresses) passes the picture through a Switch TOP. Before `History offset` seconds of history exist the cache's oldest frame is shown, where the workbench clamps to the start of the media | none (the voice addresses need a per-sample history reader, not built) |
 | Queue / Overflow | the workbench's own queue arithmetic per playhead second inside each `Burst interval`: arrivals `floor(phase x Arrival rate)`, released `floor(phase x Release rate x 0.2)`, waiting `max(0, arrivals - released)`, shown `min(Queue capacity, waiting)`. Up to 24 entries (the catalog's largest capacity), entry `j` a Cache Select read back the age of the arrival it shows (first in first out, or reversed for last in first out), a Transform TOP scaling it to 0.48 and placing and turning it as the engine's `translate`/`rotate` do (top-left corner at `(0.08 W + 0.025 W j, 0.15 H + 0.055 H j)` plus, once more is waiting than the capacity, a scatter of `Overflow spread x phase / period` with the engine's noise hash and the processor's seed (`patch.seed` plus the id's character codes) and a turn of up to 0.4 rad), a Level TOP switching entries beyond the count off, laid over each other with entry 0 at the bottom over a Level TOP that is the frame itself while nothing waits. The noise is the engine's 32-bit hash as a Python expression, equal bit for bit | none |
+| Typography | the workbench's word (authored words step every 0.7 s and go blank once older than `Word persistence`; otherwise the latest checked cue that has started with probability above 0.5, `OUT` before any, blank `Word persistence` after its end) in a Table DAT `ty_words` (the patch's authored words, or the cues given with `--word-cues cues.json`: a list of `{in, out, text, probability}`; the media pack's own cues are private to it and are not read). Solid obstruction (mode 0): one Text TOP (Arial-style bold, `H x Canvas-relative word size` px, `#dbfb65`), up to 32 copies, copy 0 opaque and on top, the others at 0.18 shifted by `(sin(time x Word drift + k) x 0.16, cos(...) x 0.18)` of the frame, then for `Letter fragmentation` above 0.3 twelve Crop TOP strips of the word shifted by `sin(4k + floor(5 time)) x fragmentation x 0.045`; Inbox wall (mode 2): up to 32 left-aligned words, three per row, the row height giving the size, the word of copy `i` the one from `0.32 i` s earlier; Image aperture (mode 1): the picture multiplied by white text over a near-black frame. Modes 0 and 2 lay the words over the picture, mode 1 replaces it | none (visual only, as in the workbench) |
 
 **Latency (look-ahead buffers).** Reverse and Stutter read source time ahead of their playhead, which a live network cannot read.
 Each is given a fixed, declared latency instead (`tools/td-network/latency.mjs`): the stream it receives runs `lookahead` seconds
@@ -253,6 +254,8 @@ ahead than the bound and that the bound is reached: Reverse reads at most `span`
 
 Like the workbench, a processor builds its audio chain only when it targets `voice` and its picture chain only when it targets `picture`, `body`, `objects` or `room`; otherwise that signal passes through and the spec's `warnings` say so.
 
+`tests/test_td_typography.py` records the engine's words (`fillText` on a canvas that remembers its word, so every later `drawImage` of it carries the word, alpha and offset) for authored words and for supplied cues, over mode x size x copies x persistence x fragmentation x drift x 9 times, and compares each copy's word, opacity and offset, each fragment strip's crop edges and shift, each wall word's text, size and position and the aperture's word and size with the network's expressions (more than 20,000 comparisons). Glyph pixels are not compared: the Text TOP draws its own, and it does not squeeze a word wider than the frame as the workbench does. The captions text stream is not built.
+
 `tests/test_td_queue.py` records the engine's transform stack for Queue / Overflow (each copy's size, centre on the canvas, turn and source time) over Queue capacity x Arrival rate x Release rate x Burst interval x Overflow spread x order x 9 times (more than 15,000 copy comparisons, over 2,000 of them scattered and turned by an overflow) and compares them with the network's expressions, plus the noise hash against the engine's text on 1,800 inputs. The text port's smaller copies are not built.
 
 `tests/test_td_exchange.py` does the same for Exchange: every strip the engine deals (source rectangle, destination rectangle, the source time asked for) over a grid of Exchange interval x Address offset x History offset x mode x times, against the network's crop edges, slot positions and cache read-back (more than 5,000 strip comparisons).
@@ -276,8 +279,7 @@ Sample-wise expressions (Signal Damage's hold, the source's sidechain envelope) 
 
 **Scrubbing backward through Feedback's reset epoch.** `EpochLatch` keeps its state every 64 picture frames as the walk passes, so a backward seek replays at most 64 frames from the nearest saved state instead of the whole history; measured on a 2,000-frame walk, 200 backward single-frame seeks took 1.40 s before and 0.023 s after, with identical answers (`tests/test_td_epoch.py`).
 
-**Not applied by this network:** the effects of the other two processors (Granular,
-Typography), which pass signal through unchanged and are named in the
+**Not applied by this network:** the effects of the remaining processor (Granular), which passes signal through unchanged and are named in the
 spec's `warnings`; the voice of Reverse and Stutter (delayed only, see Latency);
 Exchange's voice addresses; the audio of Feedback and Displacement; Signal Damage's picture `Signal drive`; Displacement's `Boundary spill`, audio warp and ring
 blend; the source excerpt offset (`Offset`, read-only); and audio device output. Text wires carry no gain, and several
