@@ -33,9 +33,9 @@ MARKER = ".short-film-demo"  # written first, so a failed run can still be repla
 LOUDNESS_TOLERANCE_LU = 1.0  # AAC is lossy: the mp4's audio must stay within this of the delivered WAV
 DURATION_TOLERANCE_S = 0.05
 AUDIO_MIN_SNR_DB = 15.0  # the mp4's sound against the delivered dialogue, after AAC; a re-encode measures about 33 dB, noise at the same loudness about -3 dB
-AUDIO_MAX_LAG = 2048  # samples the decoded audio may sit from the delivered WAV (AAC priming)
-PADDING_GUARD = 4096  # samples after the dialogue that AAC may still ring into
-PADDING_PEAK = 0.01  # after the dialogue the padding must stay below this (about -40 dBFS); the clean demo is exactly zero
+AUDIO_MAX_LAG = 512  # samples (32 ms) the decoded audio may sit from the delivered WAV; the edit list trims AAC priming, so an honest decode measures exactly 0
+PADDING_GUARD = 1024  # samples after the dialogue that AAC may still ring into (measured: at most 0.0003 inside it, exactly 0 after it)
+PADDING_PEAK = 0.001  # after the guard the padding must stay below this (-60 dBFS); the clean demo is exactly zero
 CHROMA_TOLERANCE = 1  # the chain writes flat 128 chroma, and the video is lossless
 
 
@@ -119,12 +119,12 @@ def aligned_snr_db(heard, reference):
     n = len(reference)
     if len(heard) < n or not np.any(reference):
         return float("-inf")
-    size = 1 << (n + AUDIO_MAX_LAG).bit_length()
+    size = 1 << (n + 2 * AUDIO_MAX_LAG).bit_length()  # room for both signs of lag: the correlation is circular
     window = heard[:n + AUDIO_MAX_LAG]
     cross = np.fft.irfft(np.fft.rfft(window, size) * np.conj(np.fft.rfft(reference, size)), size)
     lags = np.concatenate([np.arange(0, AUDIO_MAX_LAG + 1), np.arange(-AUDIO_MAX_LAG, 0)])
     lag = int(lags[np.argmax(np.concatenate([cross[:AUDIO_MAX_LAG + 1], cross[size - AUDIO_MAX_LAG:]]))])
-    shifted = heard[lag:lag + n] if lag >= 0 else np.concatenate([np.zeros(-lag), heard[:n + lag]])
+    shifted = heard[lag:lag + n] if lag >= 0 else np.concatenate([np.zeros(-lag), heard[:max(n + lag, 0)]])
     if len(shifted) < n:  # the track ends before the dialogue does: the missing samples count as silence, so the SNR drops
         shifted = np.concatenate([shifted, np.zeros(n - len(shifted))])
     error = float(np.sum((shifted - reference) ** 2))
@@ -150,6 +150,10 @@ def judge_mp4(out, ledger, burnin, tools):
     v, a = video[0], audio[0]
     add("mp4.video_geometry", (v["codec_name"], v["width"], v["height"], v["avg_frame_rate"]) == ("h264", width, height, f"{ledger['fps']}/1"),
         "H.264 at the burn-in geometry and the ledger's exact frame rate", observed=[v["codec_name"], v["width"], v["height"], v["avg_frame_rate"]], expected=["h264", width, height, f"{ledger['fps']}/1"])
+    pixel_format, color_range, aspect = v.get("pix_fmt"), v.get("color_range"), v.get("sample_aspect_ratio")
+    add("mp4.video_pixel_format", pixel_format == "yuv420p" and color_range in (None, "tv", "unknown") and aspect in (None, "1:1", "0:1", "N/A"),
+        "yuv420p, limited or unflagged range, square pixels: the chroma check reads the stream as it is, so a 4:4:4 or full-range stream is refused",
+        observed=[pixel_format, color_range, aspect])
     add("mp4.audio_format", (a["codec_name"], int(a["sample_rate"]), a["channels"]) == ("aac", 16000, 1), "AAC, 16 kHz, mono", observed=[a["codec_name"], int(a["sample_rate"]), a["channels"]])
     duration = float(info["format"]["duration"])
     add("mp4.duration", abs(duration - ledger["total_seconds"]) <= DURATION_TOLERANCE_S, "container duration equals the final ledger's total seconds",
