@@ -36,6 +36,10 @@ AUDIO_MIN_SNR_DB = 15.0  # the mp4's sound against the delivered dialogue, after
 AUDIO_MAX_LAG = 512  # samples (32 ms) the decoded audio may sit from the delivered WAV; the edit list trims AAC priming, so an honest decode measures exactly 0
 PADDING_GUARD = 1024  # samples after the dialogue that AAC may still ring into (measured: at most 0.0003 inside it, exactly 0 after it)
 PADDING_PEAK = 0.001  # after the guard the padding must stay below this (-60 dBFS); the clean demo is exactly zero
+GUARD_PEAK = 0.003  # inside the guard, ten times the measured ringing, so a click there is still named
+BLOCK_SAMPLES = 1600  # 100 ms blocks for the blockwise SNR
+BLOCK_FLOOR_RMS = 0.003  # blocks of the delivered dialogue quieter than this (-50 dBFS) are not judged blockwise
+AUDIO_MIN_BLOCK_SNR_DB = 6.0  # every judged block; an honest encode measures at least 12.9 (the first block) and typically 22 or more
 CHROMA_TOLERANCE = 1  # the chain writes flat 128 chroma, and the video is lossless
 
 
@@ -114,21 +118,47 @@ def decode(ffmpeg, path, *args):
     return run.stdout
 
 
-def aligned_snr_db(heard, reference):
-    """SNR of ``heard`` against ``reference`` at the best lag within AUDIO_MAX_LAG samples (cross-correlation by FFT)."""
+def align(heard, reference):
+    """``heard`` shifted to the best lag within AUDIO_MAX_LAG samples of ``reference`` (cross-correlation by FFT), padded or cut to its length; None if too short."""
     n = len(reference)
     if len(heard) < n or not np.any(reference):
-        return float("-inf")
+        return None
     size = 1 << (n + 2 * AUDIO_MAX_LAG).bit_length()  # room for both signs of lag: the correlation is circular
     window = heard[:n + AUDIO_MAX_LAG]
     cross = np.fft.irfft(np.fft.rfft(window, size) * np.conj(np.fft.rfft(reference, size)), size)
     lags = np.concatenate([np.arange(0, AUDIO_MAX_LAG + 1), np.arange(-AUDIO_MAX_LAG, 0)])
     lag = int(lags[np.argmax(np.concatenate([cross[:AUDIO_MAX_LAG + 1], cross[size - AUDIO_MAX_LAG:]]))])
-    shifted = heard[lag:lag + n] if lag >= 0 else np.concatenate([np.zeros(-lag), heard[:max(n + lag, 0)]])
+    shifted = heard[lag:lag + n] if lag >= 0 else np.concatenate([np.zeros(min(-lag, n)), heard[:max(n + lag, 0)]])
     if len(shifted) < n:  # the track ends before the dialogue does: the missing samples count as silence, so the SNR drops
         shifted = np.concatenate([shifted, np.zeros(n - len(shifted))])
+    return shifted[:n]
+
+
+def snr_db(shifted, reference):
     error = float(np.sum((shifted - reference) ** 2))
     return float("inf") if error == 0 else float(10 * np.log10(np.sum(reference ** 2) / error))
+
+
+def aligned_snr_db(heard, reference):
+    """SNR of ``heard`` against ``reference`` at the best lag within AUDIO_MAX_LAG samples."""
+    shifted = align(heard, reference)
+    return float("-inf") if shifted is None else snr_db(shifted, reference)
+
+
+def worst_block_snr_db(heard, reference):
+    """The lowest SNR over the 100 ms blocks of ``reference`` that are louder than BLOCK_FLOOR_RMS, and the start (s) of that block."""
+    shifted = align(heard, reference)
+    if shifted is None:
+        return float("-inf"), 0
+    worst, at = float("inf"), 0
+    for start in range(0, len(reference) - BLOCK_SAMPLES + 1, BLOCK_SAMPLES):
+        block = reference[start:start + BLOCK_SAMPLES]
+        if np.sqrt(np.mean(block ** 2)) < BLOCK_FLOOR_RMS:
+            continue
+        value = snr_db(shifted[start:start + BLOCK_SAMPLES], block)
+        if value < worst:
+            worst, at = value, start
+    return worst, at
 
 
 def judge_mp4(out, ledger, burnin, tools):
@@ -151,9 +181,11 @@ def judge_mp4(out, ledger, burnin, tools):
     add("mp4.video_geometry", (v["codec_name"], v["width"], v["height"], v["avg_frame_rate"]) == ("h264", width, height, f"{ledger['fps']}/1"),
         "H.264 at the burn-in geometry and the ledger's exact frame rate", observed=[v["codec_name"], v["width"], v["height"], v["avg_frame_rate"]], expected=["h264", width, height, f"{ledger['fps']}/1"])
     pixel_format, color_range, aspect = v.get("pix_fmt"), v.get("color_range"), v.get("sample_aspect_ratio")
-    add("mp4.video_pixel_format", pixel_format == "yuv420p" and color_range in (None, "tv", "unknown") and aspect in (None, "1:1", "0:1", "N/A"),
-        "yuv420p, limited or unflagged range, square pixels: the chroma check reads the stream as it is, so a 4:4:4 or full-range stream is refused",
-        observed=[pixel_format, color_range, aspect])
+    colour = [v.get("color_space"), v.get("color_transfer"), v.get("color_primaries")]
+    add("mp4.video_pixel_format", pixel_format == "yuv420p" and color_range in (None, "tv", "unknown") and aspect in (None, "1:1", "0:1", "N/A")
+        and all(flag in (None, "unknown") for flag in colour),
+        "yuv420p, limited or unflagged range, square pixels, no colour matrix, transfer or primaries flags: the chroma check reads the stream as it is, so a 4:4:4, full-range or re-flagged stream is refused",
+        observed=[pixel_format, color_range, aspect, *colour])
     add("mp4.audio_format", (a["codec_name"], int(a["sample_rate"]), a["channels"]) == ("aac", 16000, 1), "AAC, 16 kHz, mono", observed=[a["codec_name"], int(a["sample_rate"]), a["channels"]])
     duration = float(info["format"]["duration"])
     add("mp4.duration", abs(duration - ledger["total_seconds"]) <= DURATION_TOLERANCE_S, "container duration equals the final ledger's total seconds",
@@ -174,16 +206,26 @@ def judge_mp4(out, ledger, burnin, tools):
 
     pcm = np.frombuffer(decode(ffmpeg, path, "-map", "0:a:0", "-ar", "16000", "-ac", "1"), dtype="<i2").astype(np.float64) / 32768.0
     rate, delivered = pc.read_pcm16(out / "audio" / "dialogue-delivered.wav")
-    reference = ld.measure(delivered, rate)["integrated_lufs"]
-    heard = ld.measure(pcm[:len(delivered)], rate)["integrated_lufs"]
-    add("mp4.audio_loudness", abs(heard - reference) <= LOUDNESS_TOLERANCE_LU, f"the mp4's audio measures within {LOUDNESS_TOLERANCE_LU} LU of the delivered dialogue (AAC is lossy)",
-        delivered_lufs=round(reference, 2), mp4_lufs=round(heard, 2))
+    try:
+        reference = ld.measure(delivered, rate)["integrated_lufs"]
+        heard = ld.measure(pcm[:len(delivered)], rate)["integrated_lufs"]
+        add("mp4.audio_loudness", abs(heard - reference) <= LOUDNESS_TOLERANCE_LU, f"the mp4's audio measures within {LOUDNESS_TOLERANCE_LU} LU of the delivered dialogue (AAC is lossy)",
+            delivered_lufs=round(reference, 2), mp4_lufs=round(heard, 2))
+    except ld.LoudnessError as error:
+        add("mp4.audio_loudness", False, f"the mp4's audio cannot be measured: {error}")
     snr = aligned_snr_db(pcm, delivered)
     add("mp4.audio_matches_delivered", snr >= AUDIO_MIN_SNR_DB, f"the mp4's sound is the delivered dialogue: at least {AUDIO_MIN_SNR_DB} dB SNR against dialogue-delivered.wav (AAC is lossy)",
         snr_db=None if snr in (float("inf"), float("-inf")) else round(snr, 1))
+    block, at = worst_block_snr_db(pcm, delivered)
+    add("mp4.audio_blocks_match_delivered", block >= AUDIO_MIN_BLOCK_SNR_DB,
+        f"every 100 ms block of the dialogue louder than -50 dBFS is there at least {AUDIO_MIN_BLOCK_SNR_DB} dB SNR: a muted or replaced stretch cannot hide in a whole-track figure",
+        worst_block_snr_db=None if block in (float("inf"), float("-inf")) else round(block, 1), worst_block_at_s=round(at / rate, 2))
+    inside = pcm[len(delivered):len(delivered) + PADDING_GUARD]
+    guard_peak = float(np.abs(inside).max()) if inside.size else 0.0
     padding = pcm[len(delivered) + PADDING_GUARD:]
     peak = float(np.abs(padding).max()) if padding.size else 0.0
-    add("mp4.audio_padding_silent", peak <= PADDING_PEAK, "after the dialogue the mp4's padding is silent", padding_peak=round(peak, 4))
+    add("mp4.audio_padding_silent", guard_peak <= GUARD_PEAK and peak <= PADDING_PEAK,
+        f"after the dialogue the mp4's padding is silent: below {GUARD_PEAK} for the first {PADDING_GUARD} samples (AAC rings there), below {PADDING_PEAK} after", guard_peak=round(guard_peak, 4), padding_peak=round(peak, 4))
     return checks
 
 
