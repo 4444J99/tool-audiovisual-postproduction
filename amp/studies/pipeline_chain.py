@@ -28,6 +28,8 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from . import caption_burnin as cb
+from . import captions as cap
 from . import colour_grade as cg
 from . import coverage_matrix as cm
 from . import layer_plan as lp
@@ -39,7 +41,7 @@ from . import shot_plan as sp
 SCHEMA = "amps.pipeline_chain.v1"
 SAMPLE_RATE = 16000
 DEFAULT_DELIVERY = "ebu_r128"
-STAGES = ("set", "shot_plan", "dialogue", "requirement", "coverage", "room_tone", "delivery", "final_ledger", "colour")
+STAGES = ("set", "shot_plan", "dialogue", "requirement", "coverage", "room_tone", "delivery", "final_ledger", "colour", "captions", "burnin")
 
 
 class ChainError(Exception):
@@ -146,6 +148,18 @@ def colour_plan(ledger: Mapping[str, Any], graph_sha256: str, audio_sha256: str,
                                                               "power": [1, 1, 1], "saturation": 1.0}]},
                        "film": cg.synthetic_chain()},
             "layers": layers}
+
+
+CAPTION_SPEC = "broadcast"
+BURNIN_GEOMETRY = {"width": 240, "height": 48}
+
+
+def burnin_segments(ledger: Mapping[str, Any], graph_sha256: str) -> list[dict[str, Any]]:
+    """One background segment per shot, seeded by the shot's declared plate identity; any tail past the last shot gets its own."""
+    segments = [{"start": row["edit_in"], "end": row["edit_out"], "seed": plate_hash(graph_sha256, row)} for row in ledger["shots"]]
+    if segments and segments[-1]["end"] < ledger["total_frames"]:
+        segments.append({"start": segments[-1]["end"], "end": ledger["total_frames"], "seed": sha256_bytes(b"tail:" + graph_sha256.encode())})
+    return segments
 
 
 def deliver(filled_path: Path, delivered_path: Path, spec: Mapping[str, Any], on_ceiling: str = "refuse") -> dict[str, Any]:
@@ -290,6 +304,29 @@ def run_chain(out: Path, *, seed: int = 0, delivery: str | Mapping[str, Any] = D
           {"layer-plan": cplan_h, "layer-ledger": cledger_h},
           layer_plan_sha256=lp.plan_hash(cplan), edit_frames=ledger["total_frames"], warnings=creport["warnings"],
           plate_identity="declared: sha256 of the set graph hash and the shot ledger row; no render exists in this chain")
+
+    # 7. captions laid out on the edit's frame grid, then burned into synthetic frames, one background segment per shot
+    built = cap.build(cap.synthetic_words(), ledger["fps"], CAPTION_SPEC)
+    if built["problems"]:
+        raise ChainError([f"captions: {p}" for p in built["problems"]])
+    srt_bytes, vtt_bytes = built["srt"].encode("utf-8"), built["vtt"].encode("utf-8")
+    (out / LOCATIONS["captions-srt"]).parent.mkdir(parents=True, exist_ok=True)
+    (out / LOCATIONS["captions-srt"]).write_bytes(srt_bytes)
+    (out / LOCATIONS["captions-vtt"]).write_bytes(vtt_bytes)
+    caption_report = {k: built[k] for k in ("schema", "spec", "fps", "cues", "problems", "words", "warnings", "srt_sha256", "vtt_sha256")}
+    caption_report_h = write_json(out / LOCATIONS["captions-report"], caption_report)
+    stage("captions", {"final-ledger": ledger_h},
+          {"captions-srt": sha256_bytes(srt_bytes), "captions-vtt": sha256_bytes(vtt_bytes), "captions-report": caption_report_h},
+          cues=len(built["cues"]), spec_name=built["spec"]["name"], fps=built["fps"], last_cue_end_frame=built["cues"][-1]["end"],
+          source="captions.synthetic_words: invented speech timing, not a transcript of the dialogue stand-in")
+    payload, burn_report = cb.burn(built["srt"], ledger["fps"], ledger["total_frames"], BURNIN_GEOMETRY, burnin_segments(ledger, summary["graph_sha256"]))
+    (out / LOCATIONS["burnin-frames"]).write_bytes(payload)
+    burn_h = write_json(out / LOCATIONS["burnin-report"], burn_report)
+    stage("burnin", {"captions-srt": sha256_bytes(srt_bytes), "final-ledger": ledger_h, "scene-graph-summary": graph_h},
+          {"burnin-frames": sha256_bytes(payload), "burnin-report": burn_h},
+          frames=ledger["total_frames"], captioned_frames=burn_report["captioned_frames"], chain_head=burn_report["chain_head"],
+          geometry=burn_report["params"]["geometry"],
+          background="invented test pattern tinted per shot by the declared plate identity; no render exists in this chain")
     manifest = {"schema": SCHEMA, "stages": stages}
     manifest["chain_sha256"] = chain_hash(manifest)
     write_json(out / "pipeline-manifest.json", manifest)
@@ -325,7 +362,9 @@ LOCATIONS = {"set-spec": "set/set-spec.json", "scene-graph-summary": "set/scene-
              "dialogue-filled": "audio/dialogue-filled.wav", "fill-report": "audio/fill-report.json",
              "dialogue-delivered": "audio/dialogue-delivered.wav", "delivery-report": "audio/delivery-report.json",
              "final-ledger": "plan/final-ledger.json", "layer-plan": "colour/layer-plan.json",
-             "layer-ledger": "colour/layer-ledger.json", "blender-report": "set/blender-report.json",
+             "layer-ledger": "colour/layer-ledger.json", "captions-srt": "captions/captions.srt",
+             "captions-vtt": "captions/captions.vtt", "captions-report": "captions/captions-report.json",
+             "burnin-frames": "captions/frames.y8", "burnin-report": "captions/burnin-report.json", "blender-report": "set/blender-report.json",
              "scene-blend": "set/scene.blend"}
 
 
@@ -384,6 +423,38 @@ def delivery_checks(out: Path, expected: str | Mapping[str, Any] | None = None) 
     return problems
 
 
+def burnin_checks(out: Path) -> list[str]:
+    """What a re-sealed manifest cannot fake: every burned frame is re-rendered from the caption file and the
+    shot ledger and compared with the bytes on disk, and the caption file is the one the report was made from."""
+    out = Path(out)
+    problems: list[str] = []
+    try:
+        report = json.loads((out / LOCATIONS["burnin-report"]).read_text())
+        srt = (out / LOCATIONS["captions-srt"]).read_text(encoding="utf-8")
+        ledger = json.loads((out / LOCATIONS["final-ledger"]).read_text())
+        summary = json.loads((out / LOCATIONS["scene-graph-summary"]).read_text())
+        params = report["params"]
+        if params["frames"] != ledger["total_frames"] or params["fps"] != str(cap.parse_fps(ledger["fps"])):
+            problems.append("burn-in frames do not follow the final ledger's length and frame rate")
+        if params["segments"] != cb.normalize_segments(burnin_segments(ledger, summary["graph_sha256"]), ledger["total_frames"]):
+            problems.append("burn-in backgrounds are not the shot segments of the final ledger")
+        if params["geometry"] != cb.normalize_geometry(BURNIN_GEOMETRY):
+            problems.append("burn-in geometry is not the chain's declared geometry")
+        problems += [f"burn-in: {p}" for p in cb.verify((out / LOCATIONS["burnin-frames"]).read_bytes(), report, srt)]
+        cues = cap.parse(srt, ledger["fps"])
+        problems += [f"captions: {p}" for p in cap.check(cues, ledger["fps"], CAPTION_SPEC)]
+        recorded = json.loads((out / LOCATIONS["captions-report"]).read_text())
+        if recorded["srt_sha256"] != cap.sha256_text(srt):
+            problems.append("captions report was not made from the caption file on disk")
+        if cap.sha256_text(srt) != params["srt_sha256"]:
+            problems.append("burn-in report was not made from the caption file on disk")
+        if cap.render_vtt(cues) != (out / LOCATIONS["captions-vtt"]).read_text(encoding="utf-8"):
+            problems.append("the WebVTT file does not carry the same cues as the SRT file")
+    except (OSError, KeyError, ValueError, TypeError, IndexError, json.JSONDecodeError) as error:
+        problems.append(f"burn-in: cannot check ({error})")
+    return problems
+
+
 def cross_checks(out: Path, delivery: str | Mapping[str, Any] | None = None) -> list[str]:
     """Content links the hashes alone do not show: the same set id, plan hash, graph hash and audio hash.
     ``delivery`` is the loudness spec the caller requires the chain to have been delivered to, if any."""
@@ -401,6 +472,7 @@ def cross_checks(out: Path, delivery: str | Mapping[str, Any] | None = None) -> 
     if ledger.get("dialogue_sha256") != delivered:
         problems.append("final ledger does not name the delivered dialogue")
     problems += delivery_checks(out, delivery)
+    problems += burnin_checks(out)
     for row in ledger["shots"]:
         if cplan["sources"][f"plate-{row['id'].lower()}"]["sha256"] != plate_hash(summary["graph_sha256"], row):
             problems.append(f"plate for {row['id']} is not derived from the set graph and its ledger row")

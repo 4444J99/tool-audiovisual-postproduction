@@ -72,7 +72,7 @@ Headless Blender check, 2026-11-14 (Blender 5.0.1, macOS, main `f2a4047`): `pyth
 
 ## Caption timing
 
-`tools/captions.py` lays word cues out as SRT and WebVTT on the frame grid: sentence, pause and clause splits, balanced one- or two-line breaks, minimum gaps, stretching to minimum duration and reading speed, and an explicit report of every rule the words leave no room to meet; written files are parsed back and `check` judges any caption file ([guide](docs/CAPTIONS.md)).
+`tools/captions.py` lays word cues out as SRT and WebVTT on the frame grid: sentence, pause and clause splits, balanced one- or two-line breaks, minimum gaps, stretching to minimum duration and reading speed, and an explicit report of every rule the words leave no room to meet; written files are parsed back and `check` judges any caption file ([guide](docs/CAPTIONS.md)). `tools/caption_burnin.py` burns the cues of a written file onto synthetic frames with an embedded bitmap font and a hash-chained frame ledger, and `verify` re-renders every frame to compare ([burn-in](docs/CAPTIONS.md#burn-in)); the end-to-end chain now ends with a `captions` and a `burnin` stage.
 
 ## Room-tone fill
 
