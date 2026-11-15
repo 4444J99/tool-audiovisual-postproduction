@@ -25,23 +25,24 @@ Needs NumPy and SciPy (the chain's loudness stage) and an ffmpeg with `libx264` 
 
 ## Expected hashes
 
-These were observed on 2026-11-15 (macOS arm64, Python 3.14, NumPy/SciPy as installed, ffmpeg 9.0.2 Homebrew with libx264). The frames, delivered dialogue, QC report and captions hashes are asserted by a stale-doc test in `tests/test_short_film_demo.py`; they came out identical on macOS and on the Linux CI runner. The chain hash differed between those two platforms and the cause was not isolated (the manifest records measured loudness values, so floating-point differences in NumPy/SciPy or the platform are a candidate, not a finding). It is therefore listed once per platform observed, and its test only requires the run's chain hash to be one of the listed values, on any platform. NumPy and SciPy are not pinned exactly by this repository, so a new platform or library release may need a new row.
+Observed on 2026-11-15 on macOS arm64 (Python 3.14, NumPy/SciPy as installed, ffmpeg 9.0.2 Homebrew with libx264). The first three rows were also identical on the Linux CI runner (Python 3.12) in every run observed, and `tests/test_short_film_demo.py` asserts them against this document.
 
 | Output | SHA-256 |
 |---|---|
-| chain (`pipeline-manifest.json` hash), macOS arm64 | `71053aa9a10d7fdb97b556d38f19e9de34a20cfd0bf48666e063d7f9f8404321` |
-| chain, Linux x86_64 Python 3.12 (CI runner) | `a445ad783117cf2bc6dc77484a93e0e1cb13678c5c66ca46aefe7c122c5fd142` |
 | burned-in frames (`captions/frames.y8`) | `3215d7b1177fdd06feba51d60cc7a0f9d85b32ce492dab368c519dd9fc411c83` |
 | delivered dialogue (`audio/dialogue-delivered.wav`) | `40bef4b2a87ecdd5d850b7c0687a848d873e160bf92210765c371b6c57043f0b` |
-| chain QC report (`qc/qc-report.json`) | `89bfbe59de8e2770bd601a52c7abc5bdc9aa3a108c53ef27b9ad63f0352358d7` |
 | captions (`captions/captions.srt`) | `8de8f3861419cd913521044a04c3dd3c2fe2fc3200cc22e63ee3c42681dfb16a` |
+| chain (`pipeline-manifest.json` hash), macOS arm64 | `71053aa9a10d7fdb97b556d38f19e9de34a20cfd0bf48666e063d7f9f8404321` |
+| chain QC report (`qc/qc-report.json`), macOS arm64 | `89bfbe59de8e2770bd601a52c7abc5bdc9aa3a108c53ef27b9ad63f0352358d7` |
 | `short-film.mp4` (this ffmpeg build only) | `a22adfc7d9f192dcff05535e9961ee2cacf46662bd03cbb294498db516a6640e` |
 
-The mp4 hash is not pinned anywhere: it depends on the ffmpeg, libx264 and AAC encoder build, so another build may write different bytes for the same picture and sound. What does not change is `mp4.luma_equals_burnin`, which ties the picture to `frames.y8` whatever encoder wrote it. Encoding uses `-threads 1`, bit-exact flags, no metadata and `-qp 0`, which is what makes the bytes repeat on one build.
+The chain hash and the QC report hash are **not** portable and are not asserted against this document. Both record measured loudness values, and they changed between hosts and even between two CI runs of the same commit on the same runner image (chain `a445ad78...fd142` in one Linux run, `ad97bf03...3623f` in the next). The cause was not isolated; a difference in floating-point results between runner CPUs or library builds is a candidate, not a finding. NumPy and SciPy are not pinned exactly by this repository. What the test does guarantee for them is repetition: two runs in one environment give byte-identical files, and `verify` re-derives the QC report from the artefacts.
+
+The mp4 hash is likewise not pinned anywhere: it depends on the ffmpeg, libx264 and AAC encoder build, so another build may write different bytes for the same picture and sound. What does not change is `mp4.luma_equals_burnin`, which ties the picture to `frames.y8` whatever encoder wrote it. Encoding uses `-threads 1`, bit-exact flags, no metadata and `-qp 0`, which is what makes the bytes repeat on one build.
 
 ## What the test asserts
 
-`tests/test_short_film_demo.py` runs the command twice into two directories and asserts: both exit 0 and print the same summary; `demo-hashes.json`, the mp4 and every other written file are byte-identical across the two runs; the whole twelve-stage chain ran and its QC report passes; every mp4 check passes; `verify` accepts a fresh run; a flipped mp4 byte, an edited caption, and a lossy re-encoded mp4 whose hash file was re-sealed (named by the decoded-luma check) are each refused; a foreign non-empty directory, including one with a stray `demo-hashes.json`, is refused untouched; a refused run does not lock its directory; a rerun over its own output gives the same hashes; a delivery spec the audio cannot meet (`streaming`) writes no mp4; and the hashes in this document are the ones the run produces. The test is skipped where ffmpeg lacks `libx264` or `aac`.
+`tests/test_short_film_demo.py` runs the command twice into two directories and asserts: both exit 0 and print the same summary; `demo-hashes.json`, the mp4 and every other written file are byte-identical across the two runs; the whole twelve-stage chain ran and its QC report passes; every mp4 check passes; `verify` accepts a fresh run; a flipped mp4 byte, an edited caption, and a lossy re-encoded mp4 whose hash file was re-sealed (named by the decoded-luma check) are each refused; a foreign non-empty directory, including one with a stray `demo-hashes.json`, is refused untouched; a refused run does not lock its directory; a rerun over its own output gives the same hashes; a delivery spec the audio cannot meet (`streaming`) writes no mp4; and the frames, delivered-dialogue and captions hashes in this document are the ones the run produces. The test is skipped where ffmpeg lacks `libx264` or `aac`.
 
 ## What this does not show
 
