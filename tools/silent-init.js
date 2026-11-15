@@ -195,7 +195,7 @@
       const NativeSourceNode = window.MediaElementAudioSourceNode;
       const SilentSourceNode = function MediaElementAudioSourceNode(context, options) {
         const node = Reflect.construct(NativeSourceNode, options === undefined ? [context] : [context, options], new.target || SilentSourceNode);
-        capture(options && options.mediaElement);
+        capture(node.mediaElement);  // the element native construction bound (an accessor option is read once, by native code)
         return node;
       };
       SilentSourceNode.prototype = NativeSourceNode.prototype;

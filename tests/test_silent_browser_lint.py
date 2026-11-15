@@ -63,6 +63,12 @@ def python_launches(source: str, name: str):
                             aliases.add(target.id); changed = True
     found = []
     for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Attribute) and node.value.attr in PY_LAUNCHERS:
+            owner = node.value.value  # a bound launch method kept for later: launch = pw.chromium.launch
+            label = owner.attr if isinstance(owner, ast.Attribute) else owner.id if isinstance(owner, ast.Name) else ''
+            if label in aliases or (driver and label not in SAFE_OWNERS):
+                found.append(node.lineno)
+            continue
         if not isinstance(node, ast.Call):
             continue
         func = node.func
@@ -84,9 +90,34 @@ def python_launches(source: str, name: str):
 
 
 def _blank_comments(source: str) -> str:
-    """Blank out comments but keep every newline, so a commented launch is ignored and line numbers stay true."""
-    source = re.sub(r"/\*.*?\*/", lambda m: re.sub(r"[^\n]", " ", m.group(0)), source, flags=re.S)
-    return re.sub(r"(?m)(^|[^:'\"`])//[^\n]*", lambda m: m.group(1) + " " * (len(m.group(0)) - len(m.group(1))), source)
+    """Blank out comments but keep every newline, so a commented launch is ignored and line numbers stay true.
+    String literals are walked, so ``" // "`` inside a string never hides the code after it."""
+    out, i, n, quote = [], 0, len(source), None
+    while i < n:
+        c, pair = source[i], source[i:i + 2]
+        if quote is None:
+            if pair == '//':
+                j = source.find('\n', i)
+                j = n if j < 0 else j
+                out.append(' ' * (j - i)); i = j
+                continue
+            if pair == '/*':
+                j = source.find('*/', i + 2)
+                j = n if j < 0 else j + 2
+                out.append(re.sub(r'[^\n]', ' ', source[i:j])); i = j
+                continue
+            if c in '"\'`':
+                quote = c
+            out.append(c)
+        else:
+            out.append(c)
+            if c == '\\' and i + 1 < n:
+                out.append(source[i + 1]); i += 2
+                continue
+            if c == quote or (c == '\n' and quote in '"\''):
+                quote = None
+        i += 1
+    return ''.join(out)
 
 
 def node_launches(source: str):
@@ -149,6 +180,9 @@ class SilentLaunchLintTests(unittest.TestCase):
         self.assertEqual(node_launches("const pw = require('playwright'); await thing.launch();\n"), [1])
         self.assertEqual(python_launches("import playwright\nlaunch = getattr(pw.chromium, 'launch')\n", 'x.py'), [2])
         self.assertEqual(python_launches("import playwright\nbt = pw.chromium\nrunner = bt\nrunner.launch()\n", 'x.py'), [4])
+        self.assertEqual(python_launches("import playwright\nlaunch = pw.chromium.launch\nlaunch()\n", 'x.py'), [2])
+        self.assertEqual(node_launches('const note = " // "; webkit.launch();\n'), [1])
+        self.assertEqual(node_launches('const url = "http://x"; // chromium.launch()\n'), [])
         self.assertEqual(node_launches('/* webkit.launch() */ const x = 1;\n'), [])
         self.assertEqual(node_launches('await engine.launch(id);\n'), [])
         self.assertEqual(python_launches('p.chromium.launch()\n', 'x.py'), [1])
