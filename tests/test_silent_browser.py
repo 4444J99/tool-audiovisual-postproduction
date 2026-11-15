@@ -302,11 +302,14 @@ class SilentBrowserPageTests(unittest.TestCase):
           if (!window.speechSynthesis) return {skipped: true};
           const utterance = new SpeechSynthesisUtterance(''); utterance.volume = 1;
           speechSynthesis.cancel(); speechSynthesis.speak(utterance); speechSynthesis.cancel();
-          return {volume: utterance.volume};
+          const ssml = new SpeechSynthesisUtterance('<speak><prosody volume="x-loud">hello</prosody></speak>'); ssml.volume = 1;
+          speechSynthesis.speak(ssml); speechSynthesis.cancel();
+          return {volume: utterance.volume, ssmlVolume: ssml.volume, ssmlText: ssml.text};
         }''')
         if result.get('skipped'):
             self.skipTest('speechSynthesis is not exposed by this engine')
         self.assertEqual(result['volume'], 0)
+        self.assertEqual((result['ssmlVolume'], result['ssmlText']), (0, ''), 'markup carries its own volume, so it is spoken as nothing')
 
     def test_realtime_connections_reach_the_native_connect_only_through_the_gain_zero_sink(self):
         # A spy installed first sits underneath the silent init script, so it sees what the native connect is given.
@@ -320,8 +323,8 @@ class SilentBrowserPageTests(unittest.TestCase):
         raw = engine.launch(headless=True, args=silent_args(self.engine_name, ['--no-sandbox']), **options)
         self.addCleanup(raw.close)
         context = raw.new_context()
-        context.add_init_script(spy)
-        silence_context(context)
+        # One script, so the order is not left to Playwright: the spy is evaluated first, then the silent init wraps it.
+        context.add_init_script(spy + '\n' + init_script())
         page = context.new_page()
         page.goto('data:text/html,<title>x</title>')
         seen = page.evaluate("""() => {

@@ -8,7 +8,7 @@
  *    would feed silence into the graph and break the analyser suites) and its sound is silenced in the graph.
  *  - Web Audio: every connection to a realtime AudioContext destination goes through a per-context GainNode at
  *    gain 0, so nothing reaches the device. OfflineAudioContext keeps its real destination: it renders to a buffer.
- *  - speechSynthesis utterances are spoken at volume 0.
+ *  - speechSynthesis utterances are spoken at volume 0, and an utterance whose text carries markup (SSML) is spoken as empty.
  */
 (() => {
   'use strict';
@@ -187,7 +187,11 @@
     const speak = SpeechSynthesis.prototype.speak;
     Object.defineProperty(SpeechSynthesis.prototype, 'speak', {
       configurable: true, writable: true, enumerable: true,
-      value: function (utterance) { try { utterance.volume = 0; } catch (error) { /* not an utterance */ } return speak.call(this, utterance); },
+      value: function (utterance) {
+        // utterance.volume does not bind SSML: markup can carry its own loud <prosody volume>, so markup is spoken as nothing.
+        try { utterance.volume = 0; if (/<[^>]+>/.test(String(utterance.text))) utterance.text = ''; } catch (error) { /* not an utterance */ }
+        return speak.call(this, utterance);
+      },
     });
   }
 
