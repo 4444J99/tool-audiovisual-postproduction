@@ -84,9 +84,14 @@ def write_json(path: Path, value: Any) -> str:
     return sha256_file(path)
 
 
+def quantise16(audio: np.ndarray) -> np.ndarray:
+    """The 16-bit samples a WAV stores: the one place float audio becomes an artefact."""
+    return np.clip(np.round(audio * 32768.0), -32768, 32767).astype("<i2")
+
+
 def pcm16_bytes(audio: np.ndarray, sr: int) -> bytes:
     """A canonical 16-bit mono WAV (44-byte header + samples), so the file hash is reproducible."""
-    data = np.clip(np.round(audio * 32768.0), -32768, 32767).astype("<i2").tobytes()
+    data = quantise16(audio).tobytes()
     header = (b"RIFF" + (36 + len(data)).to_bytes(4, "little") + b"WAVEfmt " + (16).to_bytes(4, "little")
               + (1).to_bytes(2, "little") + (1).to_bytes(2, "little") + sr.to_bytes(4, "little")
               + (sr * 2).to_bytes(4, "little") + (2).to_bytes(2, "little") + (16).to_bytes(2, "little")
@@ -94,10 +99,13 @@ def pcm16_bytes(audio: np.ndarray, sr: int) -> bytes:
     return header + data
 
 
-def read_pcm16(path: Path) -> tuple[int, np.ndarray]:
-    raw = Path(path).read_bytes()
+def decode_pcm16(raw: bytes) -> tuple[int, np.ndarray]:
     sr = int.from_bytes(raw[24:28], "little")
     return sr, np.frombuffer(raw[44:], dtype="<i2").astype(np.float64) / 32768.0
+
+
+def read_pcm16(path: Path) -> tuple[int, np.ndarray]:
+    return decode_pcm16(Path(path).read_bytes())
 
 
 # ------------------------------------------------------------------------------------------ inputs
@@ -294,9 +302,14 @@ def run_chain(out: Path, *, seed: int = 0, delivery: str | Mapping[str, Any] = D
           errors_after=after["errors"], final_plan_sha256=sp.plan_hash(final_plan))
 
     # 4. room-tone fill on the same dialogue
+    # The fill synthesises float64 samples whose last bits depend on the host's FFT and libm.  Only the 16-bit samples
+    # that are written are the artefact, so the report is derived from those, never from the float intermediate:
+    # a float hash would change the sealed chain between hosts while the WAV stayed byte-identical.
     filled, fill = rt.fill_holes(heard, sr, seed=seed)
-    fill_report = rt.fill_report(heard, filled, sr, fill)
     wav_out = pcm16_bytes(filled, sr)
+    stored = quantise16(filled).astype(np.float64) / 32768.0
+    fill = {**fill, "output_sha256": rt.audio_sha256(stored)}
+    fill_report = rt.fill_report(heard, stored, sr, fill)
     (out / "audio" / "dialogue-filled.wav").write_bytes(wav_out)
     filled_h = sha256_bytes(wav_out)
     fill_h = write_json(out / "audio" / "fill-report.json", fill_report)

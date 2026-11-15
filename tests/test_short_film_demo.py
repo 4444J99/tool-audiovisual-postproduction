@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -13,7 +14,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import short_film_demo as demo  # noqa: E402
 
 
-DOCUMENTED = ("frames_sha256", "delivered_dialogue_sha256", "captions_srt_sha256")
+DOCUMENTED = ("chain_sha256", "qc_report_sha256", "frames_sha256", "delivered_dialogue_sha256", "captions_srt_sha256")
 
 
 def cli(*args):
@@ -54,7 +55,7 @@ class ShortFilmDemoTests(unittest.TestCase):
         self.assertEqual(self.run_a.returncode, 0, self.run_a.stdout + self.run_a.stderr)
         self.assertEqual(self.run_b.returncode, 0, self.run_b.stdout + self.run_b.stderr)
         a, b = json.loads(self.run_a.stdout), json.loads(self.run_b.stdout)
-        for key in ("chain_sha256", "mp4_sha256", "frames_sha256", "delivered_dialogue_sha256", "captions_srt_sha256"):
+        for key in ("chain_sha256", "mp4_sha256", "frames_sha256", "delivered_dialogue_sha256", "captions_srt_sha256", "qc_report_sha256"):
             self.assertRegex(a[key], r"^[0-9a-f]{64}$")
             self.assertEqual(a[key], b[key], key)
 
@@ -64,6 +65,28 @@ class ShortFilmDemoTests(unittest.TestCase):
         self.assertEqual(sorted(a["files"]), sorted(str(p.relative_to(self.first)) for p in self.first.rglob("*") if p.is_file() and str(p.relative_to(self.first)) not in (demo.HASHES, demo.DEMO_QC, demo.MARKER)))
         for name in a["files"]:
             self.assertEqual((self.first / name).read_bytes(), (self.second / name).read_bytes(), name)
+
+    def test_chain_and_qc_hashes_repeat_and_are_the_hashes_of_the_files(self):
+        a, b = self.hashes(self.first), self.hashes(self.second)
+        manifest = json.loads((self.first / "pipeline-manifest.json").read_text())
+        self.assertEqual(a["chain_sha256"], b["chain_sha256"])
+        self.assertEqual(a["chain_sha256"], manifest["chain_sha256"])
+        self.assertEqual(a["deterministic"]["qc_report_sha256"], b["deterministic"]["qc_report_sha256"])
+        self.assertEqual(a["deterministic"]["qc_report_sha256"], demo.sha256_file(self.first / "qc" / "qc-report.json"))
+        self.assertEqual(a["files"]["pipeline-manifest.json"], b["files"]["pipeline-manifest.json"])
+        self.assertEqual(a["files"]["qc/qc-report.json"], b["files"]["qc/qc-report.json"])
+
+    def test_every_hash_is_the_same_from_another_cwd_a_relative_path_and_a_changed_environment(self):
+        elsewhere = Path(self.tmp.name) / "elsewhere"
+        elsewhere.mkdir()
+        env = dict(os.environ, PYTHONHASHSEED="4242", TZ="Pacific/Auckland", LC_ALL="C", OPENBLAS_NUM_THREADS="1", OMP_NUM_THREADS="1")
+        run = subprocess.run([sys.executable, str(TOOL), "run", "--output", "deep/../relative-out"], capture_output=True, text=True, cwd=elsewhere, env=env)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        moved = elsewhere / "relative-out"
+        self.assertEqual(self.hashes(moved), self.hashes(self.first))
+        for name in ("pipeline-manifest.json", "qc/qc-report.json", demo.DEMO_QC, demo.HASHES):
+            self.assertEqual((moved / name).read_bytes(), (self.first / name).read_bytes(), name)
+        self.assertEqual(cli("verify", "--output", str(moved)).returncode, 0)
 
     def test_mp4_bytes_repeat_and_are_the_hashed_file(self):
         self.assertEqual((self.first / demo.MP4).read_bytes(), (self.second / demo.MP4).read_bytes())
