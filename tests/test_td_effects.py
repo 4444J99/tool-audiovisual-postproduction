@@ -114,19 +114,20 @@ class Project:
 
 
 class Me:
-    def __init__(self, value, index=0):
-        self.inputVal, self.inputIndex = value, index
+    """The members of an Expression CHOP's `me` (docs.derivative.ca ExpressionCHOP_Class): inputVal, sampleIndex, chanIndex."""
+    def __init__(self, value, index=0, chan=0):
+        self.inputVal, self.sampleIndex, self.chanIndex = value, index, chan
 
 
-def evaluate(text, rows, time=0.0, control=0.0, gate=1.0, sample=0.0, audio=None, index=0, rate=48000.0):
+def evaluate(text, rows, time=0.0, control=0.0, gate=1.0, sample=0.0, audio=None, index=0, rate=48000.0, chan=0):
     comp = Comp(rows, time, control, gate)
     if audio:
         comp.audio = Audio(*audio, rate=rate)
-    return eval(text, {"parent": lambda: comp, "project": Project, "me": Me(sample, index), "math": math, "float": float, "int": int, "max": max, "min": min, "round": round})
+    return eval(text, {"parent": lambda: comp, "project": Project, "me": Me(sample, index, chan), "math": math, "float": float, "int": int, "max": max, "min": min, "round": round})
 
 
 def rows_for(definition_params, picks):
-    rows = {"intensity": 1.0, "wet": 1.0, "bypass": 0, "solo": 0, "active": 1}
+    rows = {"intensity": 1.0, "wet": 1.0, "bypass": 0, "solo": 0, "active": 1, "epoch": 0.0}
     for key, value in picks.items():
         rows["param." + key] = value
     return rows
@@ -233,18 +234,18 @@ class EffectTests(unittest.TestCase):
 
     def test_feedback_returns_follow_the_workbenchs_pass_count_tail_and_reset_rule(self):
         """visual-engine.mjs: passes = min(round(repeats), floor((t - epoch) / time)); a return k draws when gain ** k >= threshold;
-        epoch is the reset time once the playhead has reached it, else 0. Compared over a grid of every parameter's extremes."""
+        epoch is the latched reset crossing the resolver supplies. Compared over a grid of every parameter's extremes and epochs."""
         by_name = {o["name"]: o for o in self.chain("feedback")}
         grid = itertools.product((0.04, 0.26, 1.5), (0.0, 0.5, 0.9), (1, 4, 10, 16), (0.001, 0.005, 0.1), (0.0, 3.0, 11.5), (0.0, 0.7, 2.9, 3.0, 8.0, 12.0))
         checked = 0
-        for delay, gain, repeats, threshold, reset, now in grid:
-            rows = rows_for(None, {"time": delay, "gain": gain, "repeats": repeats, "scale": 0.81, "rotation": 0.25, "reset": reset, "threshold": threshold})
-            epoch = reset if now >= reset else 0
+        for delay, gain, repeats, threshold, epoch, now in grid:
+            rows = rows_for(None, {"time": delay, "gain": gain, "repeats": repeats, "scale": 0.81, "rotation": 0.25, "reset": 11.5, "threshold": threshold})
+            rows["epoch"] = epoch
             passes = min(round(repeats), math.floor((now - epoch) / delay))
             for k in range(1, 17):
                 wanted = gain ** k if (k <= passes and gain ** k >= threshold and round(delay * k * 60) < 240) else 0
-                got = evaluate(by_name["fb_mix_%d" % k]["pars"]["cross"]["expr"], rows, time=now)
-                self.assertAlmostEqual(got, wanted, places=12, msg="k=%d %r" % (k, (delay, gain, repeats, threshold, reset, now)))
+                got = evaluate(by_name["fb_gain_%d" % k]["pars"]["opacity"]["expr"], rows, time=now)
+                self.assertAlmostEqual(got, wanted, places=12, msg="k=%d %r" % (k, (delay, gain, repeats, threshold, epoch, now)))
                 checked += 1
         self.assertGreater(checked, 5000)
 
@@ -256,15 +257,17 @@ class EffectTests(unittest.TestCase):
             self.assertAlmostEqual(evaluate(move["sx"]["expr"], rows), 0.81 ** k)
             self.assertEqual(evaluate(move["sx"]["expr"], rows), evaluate(move["sy"]["expr"], rows))
             self.assertAlmostEqual(evaluate(move["rotate"]["expr"], rows), 90.0 * k)
+            self.assertEqual(move["extend"], "zero", "outside the transformed picture the return is transparent")
             self.assertEqual(evaluate(by_name["fb_frame_%d" % k]["pars"]["index"]["expr"], rows), -min(239, round(0.1 * k * 60)))
         self.assertEqual(by_name["fb_cache"]["pars"]["cachesize"], 240)
-        self.assertEqual([by_name["fb_mix_%d" % k]["inputs"][0] for k in (1, 2, 16)], ["in_picture", "fb_mix_1", "fb_mix_15"])   # the returns stack in order, k = 1 first
+        self.assertEqual([by_name["fb_over_%d" % k]["inputs"] for k in (1, 2, 16)], [["fb_gain_1", "in_picture"], ["fb_gain_2", "fb_over_1"], ["fb_gain_16", "fb_over_15"]])   # each return over the picture so far, k = 1 first
+        self.assertEqual({o["type"] for o in self.chain("feedback") if o["name"].startswith("fb_over_")}, {"overTOP"})
         self.assertNotIn("feedbackTOP", {o["type"] for o in self.chain("feedback")}, "returns read the history; there is no loop to diverge")
 
     def test_a_feedback_return_beyond_the_cache_is_switched_off(self):
         by_name = {o["name"]: o for o in self.chain("feedback")}
         rows = rows_for(None, {"time": 1.5, "gain": 0.9, "repeats": 16, "scale": 1, "rotation": 0, "reset": 0, "threshold": 0.001})   # 90 frames per return: only k = 1, 2 fit in 240
-        gains = [evaluate(by_name["fb_mix_%d" % k]["pars"]["cross"]["expr"], rows, time=100.0) for k in (1, 2, 3)]
+        gains = [evaluate(by_name["fb_gain_%d" % k]["pars"]["opacity"]["expr"], rows, time=100.0) for k in (1, 2, 3)]
         self.assertEqual([g > 0 for g in gains], [True, True, False])
 
     # -- Freeze / Hold -------------------------------------------------------------------------------------------------
@@ -346,6 +349,7 @@ process.stdout.write(JSON.stringify(out));
         self.assertEqual(by_name["dmg_bits"]["inputs"], ["dmg_hold"])
         sr, n = 48000.0, 3000
         ramp = [float(i) for i in range(n)]
+        right = [1000.0 + 2 * i for i in range(n)]   # a different signal in the right channel: it must not be replaced by the left
         for rate in (100, 600, 1800, 3200, 12000, 24000, 48000, 90000):
             rows = rows_for(None, {"bits": 16, "rate": rate, "block": 0.1, "levels": 4, "drive": 1.0, "band": 900, "output": 1.0})
             phase, taken_at, last = 1.0, [], 0
@@ -356,7 +360,9 @@ process.stdout.write(JSON.stringify(out));
                     last = i
                 taken_at.append(last)
             for i in range(0, n, 7):
-                got = int(evaluate(expression, rows, audio=(ramp, ramp), index=i, rate=sr))   # the ramp, so the value is the sample index read
+                got = int(evaluate(expression, rows, audio=(ramp, right), index=i, rate=sr))   # the ramp, so the value is the sample index read
+                got_right = evaluate(expression, rows, audio=(ramp, right), index=i, rate=sr, chan=1)
+                self.assertEqual(got_right, 1000.0 + 2 * round(evaluate(expression.replace("[me.chanIndex]", "[0]"), rows, audio=(ramp, ramp), index=i, rate=sr)), "the right channel reads its own samples")
                 # a hold boundary falls within one sample of where the workbench's accumulated phase puts it (the phase sums floats, so a
                 # boundary sample can land either side): the read must match the hold of this sample or of a neighbour
                 near = [taken_at[j] for j in (i - 1, i, i + 1) if 0 <= j < n]

@@ -155,12 +155,59 @@ def resolve_rack(contract, bases, time, controls=None):
     return out
 
 
-def resolved_rows(spec, resolved):
-    """The rows written into a processor's `resolved` table, in a fixed order: name, value."""
+def has_epoch(spec):
+    """A processor with a Reset time parameter (Feedback) also resolves an `epoch` row."""
+    return 'reset' in spec['order']
+
+
+def resolved_rows(spec, resolved, epoch=0.0):
+    """The rows written into a processor's `resolved` table, in a fixed order: name, value. A processor with a Reset time
+    parameter ends with an `epoch` row (EpochLatch)."""
     rows = [['intensity', resolved['intensity']], ['wet', resolved['wet']], ['bypass', 1 if resolved['bypass'] else 0],
             ['solo', 1 if resolved['solo'] else 0], ['active', 1 if resolved['active'] else 0]]
     rows += [['param.' + key, resolved['params'][key]] for key in spec['order']]
+    if has_epoch(spec):
+        rows.append(['epoch', epoch])
     return rows
+
+
+EPOCH_FPS = 60.0   # the frame grid the latch walks; the workbench walks its media's frame rate
+
+
+class EpochLatch:
+    """Feedback's reset epoch, as the workbench's VisualEngine.feedbackEpoch keeps it: the picture clock walks frame by frame, and
+    each time the resolved Reset time becomes reached (`time >= reset`) after not being reached, the epoch moves to that frame's
+    time; it stays there until the next crossing. It is 0 before the first. The epoch cannot be derived from the current Reset
+    time alone (an automated Reset that tracks the playhead never crosses), so the latch remembers; a backward seek replays from
+    the start, so the answer never depends on the order the playhead moved in.
+
+    `at(time, control)` returns the epoch at `time`. The sidechain level `control` is held at its current value for frames that
+    were walked at an earlier time."""
+    def __init__(self, spec, base, fps=EPOCH_FPS):
+        self.spec, self.base, self.fps = spec, base, fps
+        self._restart()
+
+    def _restart(self):
+        self.frame, self.active, self.epoch = -1, False, 0.0
+
+    def _step(self, frame, control):
+        time = frame / self.fps
+        reset = resolve_node(self.spec, self.base, time, control)['params']['reset']
+        active = time + 1e-9 >= reset
+        if active and not self.active:
+            self.epoch = time
+        self.active = active
+
+    def at(self, time, control=0.0):
+        if not _finite(time):
+            raise ValueError('epoch time must be finite')
+        frame = int(math.floor(max(0.0, time) * self.fps + 1e-6))
+        if frame < self.frame:
+            self._restart()
+        while self.frame < frame:
+            self.frame += 1
+            self._step(self.frame, control)
+        return self.epoch
 
 
 def base_values(node, read):
@@ -192,6 +239,7 @@ def release_rules(spec, path):
 # --- TouchDesigner glue ----------------------------------------------------------------------------
 _LAST = {}
 _RULES = {}   # rack path -> {processor id: the node's resolve block, edited live}
+_LATCH = {}   # (rack path, comp) -> (base values, EpochLatch)
 
 
 def _contract_rules(rack):
@@ -213,6 +261,7 @@ def release(rack, comp, path):
             changed = release_rules(node['resolve'], path)
             if changed:
                 _LAST.pop((rack.path, comp), None)
+                _LATCH.pop((rack.path, comp), None)   # the workbench rebuilds its feedback history when the patch changes
             return changed
     return False
 
@@ -229,8 +278,15 @@ def tick(rack):
         controls[node['id']] = float(channel[0].eval()) if channel is not None and channel.numChans else 0.0
     resolved = resolve_rack(contract, bases, time, controls)
     for node in contract['nodes']:
-        rows = resolved_rows(node['resolve'], resolved[node['id']])
         key = (rack.path, node['comp'])
+        epoch = 0.0
+        if has_epoch(node['resolve']):
+            base = bases[node['id']]
+            held = _LATCH.get(key)
+            if held is None or held[0] != base:
+                held = _LATCH[key] = (json.loads(json.dumps(base)), EpochLatch(node['resolve'], base))
+            epoch = held[1].at(time, controls[node['id']])
+        rows = resolved_rows(node['resolve'], resolved[node['id']], epoch)
         if _LAST.get(key) == rows:
             continue
         _LAST[key] = rows
@@ -244,3 +300,4 @@ def tick(rack):
 def reset():
     _LAST.clear()
     _RULES.clear()
+    _LATCH.clear()

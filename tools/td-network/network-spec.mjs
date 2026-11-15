@@ -89,6 +89,7 @@ function resolvedTable(node, controls) {
   return [
     ['intensity', fixed(node.intensity)], ['wet', fixed(node.wet)], ['bypass', node.bypass ? 1 : 0], ['solo', node.solo ? 1 : 0], ['active', 1],
     ...definition.params.map(item => [`param.${item.key}`, fixed(node.params[item.key])]),
+    ...(definition.params.some(item => item.key === 'reset') ? [['epoch', 0]] : []),   // the latched reset crossing (td_resolve EpochLatch)
   ];
 }
 
@@ -185,7 +186,7 @@ export function buildNetworkSpec(patch, options = {}) {
       add(comp, 'out_text', 'nullDAT', {inputs: ['text']});
       // The sidechain envelope the workbench derives from the source (audio-engine.mjs amplitudeEnvelope): peak level,
       // 6 ms attack, 75 ms release, times 5, limited to 1. It is the only producer of the control signal.
-      add(comp, 'env_peak', 'expressionCHOP', {inputs: ['audio'], pars: {expr0expr: expr('max(abs({op:audio}[0][me.inputIndex]), abs({op:audio}[{op:audio}.numChans - 1][me.inputIndex]))')}});
+      add(comp, 'env_peak', 'expressionCHOP', {inputs: ['audio'], pars: {expr0expr: expr('max(abs({op:audio}[0][me.sampleIndex]), abs({op:audio}[{op:audio}.numChans - 1][me.sampleIndex]))')}});
       add(comp, 'env_follow', 'lagCHOP', {inputs: ['env_peak'], pars: {lag1: 0.006, lag2: 0.075}});
       add(comp, 'control', 'expressionCHOP', {inputs: ['env_follow'], pars: {expr0expr: expr('min(1, me.inputVal * 5)')}});
       add(comp, 'out_control', 'nullCHOP', {inputs: ['control']});
@@ -419,7 +420,7 @@ export function validateNetworkSpec(spec) {
       if (!range || range.min !== item.min || range.max !== item.max || range.step !== item.step) fail(`contract: ${node.id}.${item.key} resolve range differs from the catalog`);
     }
     const rows = tableKeys.get(`${node.comp}/resolved`);
-    const expected = ['intensity', 'wet', 'bypass', 'solo', 'active', ...definition.params.map(item => `param.${item.key}`)];
+    const expected = ['intensity', 'wet', 'bypass', 'solo', 'active', ...definition.params.map(item => `param.${item.key}`), ...(definition.params.some(item => item.key === 'reset') ? ['epoch'] : [])];
     if (!rows || expected.length !== rows.size || !expected.every(key => rows.has(key))) fail(`contract: ${node.comp}/resolved does not hold the resolved rows`);
   }
   const rack = spec.contract.rack;

@@ -15,7 +15,7 @@
  * `expr(template)` turns a template into {expr, resolved, rack, siblings} so the validator can check that every row,
  * rack parameter and sibling the expression reads exists.
  */
-const COMMON = new Set(['intensity', 'wet', 'bypass', 'solo', 'active']);
+const COMMON = new Set(['intensity', 'wet', 'bypass', 'solo', 'active', 'epoch']);
 export const rowName = key => (COMMON.has(key) ? key : `param.${key}`);
 const RESOLVED = key => `float(parent().op('resolved')['${rowName(key)}',1].val)`;
 
@@ -56,7 +56,7 @@ function damage(add) {
     // sample-rate reduction: a new sample is taken once the hold phase (rate / sample rate per sample, from 1) reaches 1, i.e. at
     // sample ceil(k * step - 1) for the k-th hold of `step` samples; the workbench holds before it quantises
     const step = 'max(1.0, {op:dmg_drive}.rate / min({op:dmg_drive}.rate, max(100, {rate})))';
-    add('dmg_hold', 'expressionCHOP', {inputs: ['dmg_drive'], pars: {expr0expr: expr(`{op:dmg_drive}[0][max(0, int(math.ceil(int((me.inputIndex + 1) / (${step})) * (${step}) - 1)))]`)}});
+    add('dmg_hold', 'expressionCHOP', {inputs: ['dmg_drive'], pars: {expr0expr: expr(`{op:dmg_drive}[me.chanIndex][max(0, int(math.ceil(int((me.sampleIndex + 1) / (${step})) * (${step}) - 1)))]`)}});
     add('dmg_bits', 'expressionCHOP', {inputs: ['dmg_hold'], pars: {expr0expr: expr('max(-1, min(1, round(me.inputVal * (2 ** ({bits} - 1))) / (2 ** ({bits} - 1))))')}});
     add('dmg_band', 'lagCHOP', {inputs: ['dmg_bits'], pars: {lag1: expr('1 / (6.283185307 * max(1, {band}))'), lag2: expr('1 / (6.283185307 * max(1, {band}))')}});
     add('dmg_out', 'mathCHOP', {inputs: ['dmg_band'], pars: {gain: expr('{output}')}});
@@ -110,24 +110,27 @@ const MAX_RECURRENCES = 16;
  * Feedback: the workbench draws the input, then for each recurrence k = 1 .. passes the picture from k x Feedback delay
  * earlier, scaled by Scale per recurrence^k, rotated by Rotation per recurrence x k and blended at Return gain^k, where
  * passes = min(Maximum recurrences, floor((time - epoch) / Feedback delay)), the returns stop at the first one whose gain is
- * below Tail threshold, and epoch is Reset time once the playhead has reached it (0 before). Each recurrence reads the
+ * below Tail threshold, and epoch is the time the playhead last reached Reset time (0 before; it is latched, see EpochLatch in
+ * td_resolve, because an automated Reset time can track the playhead without ever crossing it). Each recurrence reads the
  * history, not its own output, so it is a finite set of Cache Select taps, not a Feedback TOP loop. A tap that would reach
  * further back than the cache holds is switched off (as in Delay / Echo), never collapsed onto the oldest frame.
  */
 function feedback(add) {
   const frames = k => `int(round({time} * ${k} * project.cookRate))`;
-  const epoch = '({reset} if {rack.Time} >= {reset} else 0)';
-  const passes = `min(int(round({repeats})), int(({rack.Time} - ${epoch}) / max(0.001, {time})))`;
+  // `epoch` is the latched reset crossing the resolver keeps (td_resolve EpochLatch): 0 until Reset time is reached, then that time
+  const passes = `min(int(round({repeats})), int(({rack.Time} - {epoch}) / max(0.001, {time})))`;
   const picture = () => {
     add('fb_cache', 'cacheTOP', {inputs: ['in_picture'], pars: {cachesize: CACHE_FRAMES, active: 1}});
     let below = 'in_picture';
     for (let k = 1; k <= MAX_RECURRENCES; k++) {
       add(`fb_frame_${k}`, 'cacheselectTOP', {pars: {cachetop: {ref: 'fb_cache'}, index: expr(`-min(${CACHE_FRAMES - 1}, ${frames(k)})`)}});
-      add(`fb_move_${k}`, 'transformTOP', {inputs: [`fb_frame_${k}`], pars: {sx: expr(`{scale} ** ${k}`), sy: expr(`{scale} ** ${k}`), rotate: expr(`{rotation} * 360 * ${k}`)}});
-      // source-over of an opaque frame at alpha g is the cross-fade below -> frame by g; a return that is past the pass count,
-      // under the tail threshold or beyond the cache contributes nothing
-      add(`fb_mix_${k}`, 'crossTOP', {inputs: [below, `fb_move_${k}`], pars: {cross: expr(`({gain} ** ${k}) if (${k} <= ${passes} and ({gain} ** ${k}) >= {threshold} and ${frames(k)} < ${CACHE_FRAMES}) else 0`)}});
-      below = `fb_mix_${k}`;
+      // outside the scaled and rotated picture the return is transparent (extend: zero), so it leaves what is below untouched
+      add(`fb_move_${k}`, 'transformTOP', {inputs: [`fb_frame_${k}`], pars: {sx: expr(`{scale} ** ${k}`), sy: expr(`{scale} ** ${k}`), rotate: expr(`{rotation} * 360 * ${k}`), extend: 'zero'}});
+      // the return's own alpha is Return gain^k; a return that is past the pass count, under the tail threshold or beyond the cache has none
+      add(`fb_gain_${k}`, 'levelTOP', {inputs: [`fb_move_${k}`], pars: {opacity: expr(`({gain} ** ${k}) if (${k} <= ${passes} and ({gain} ** ${k}) >= {threshold} and ${frames(k)} < ${CACHE_FRAMES}) else 0`)}});
+      // source-over, as the workbench draws each return onto the picture so far (Over TOP: input 1 over input 2)
+      add(`fb_over_${k}`, 'overTOP', {inputs: [`fb_gain_${k}`, below]});
+      below = `fb_over_${k}`;
     }
     return below;
   };
