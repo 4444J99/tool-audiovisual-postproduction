@@ -68,7 +68,7 @@ Headless Blender check, 2026-11-14 (Blender 5.0.1, macOS, main `f2a4047`): `pyth
 
 ## End-to-end chain
 
-`tools/av_pipeline.py` runs set spec, shot plan, coverage matrix, room-tone fill, a loudness delivery stage (measured, one gain to a declared EBU/streaming/podcast spec, re-measured from the written file) and colour plan on synthetic inputs and pins each hand-off by hash ([guide](docs/PIPELINE-CHAIN.md)).
+`tools/av_pipeline.py` runs set spec, shot plan, coverage matrix, room-tone fill, a loudness delivery stage (measured, one gain to a declared EBU/streaming/podcast spec, re-measured from the written file) and colour plan on synthetic inputs and pins each hand-off by hash ([guide](docs/PIPELINE-CHAIN.md)). `tools/short_film_demo.py` runs the whole chain from one command and muxes a small checked mp4 ([demo](docs/DEMO.md)).
 
 ## Loudness and true peak
 

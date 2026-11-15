@@ -24,6 +24,8 @@ python tools/av_pipeline.py verify --output outputs/av-pipeline [--delivery ebu_
 
 `pipeline-manifest.json` lists each stage's input and output hashes and a hash over the whole manifest. `verify` reports, by name, an artefact whose bytes differ from the manifest, a stage input that is not an earlier stage's output, and a manifest edited after the fact. It also checks content links a hash cannot show: the final ledger was derived from the suggested plan, the colour plan's dialogue source is the filled WAV, and each plate's identity is derived from the set graph hash and its ledger row.
 
+One command that runs this chain and also writes a small mp4 judged against it: [DEMO](DEMO.md).
+
 ## Delivery stage
 
 `delivery` runs after the room-tone fill and before the final ledger. It measures the filled dialogue (BS.1770-4 integrated loudness, loudness range, true peak), plans the one linear gain that reaches the declared spec (`solve_gain`, refuse-on-ceiling), applies it, writes `audio/dialogue-delivered.wav`, **reads the written file back and measures that**, and checks it against the spec. The gain is rounded to four decimals first, so the delivered bytes can be re-derived from the filled WAV and the report alone. No limiter or other dynamics processing is applied. The default spec is `ebu_r128` (-23 LUFS, +-0.5 LU, -1 dBTP); `--delivery` takes any preset in [LOUDNESS](LOUDNESS.md) or a spec JSON file, and the spec's hash is recorded in the stage.
