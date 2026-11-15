@@ -12,6 +12,22 @@ def errors(p):
     return sp.validate_plan(p)["errors"]
 
 
+class SensorWidthTests(unittest.TestCase):
+    def test_malformed_sensor_width_is_reported_not_raised(self):
+        for bad in (None, "36", True, 0, -1, float("nan"), float("inf")):
+            with self.subTest(value=bad):
+                p = plan()
+                p["shots"][0]["camera"]["sensor_width_mm"] = bad
+                found = errors(p)
+                self.assertTrue(any("sensor_width_mm must be a finite number greater than 0" in e for e in found), found)
+
+    def test_a_valid_sensor_width_changes_the_field_of_view(self):
+        p = plan()
+        p["shots"][0]["camera"]["sensor_width_mm"] = 24.0
+        self.assertEqual(errors(p), [])
+        self.assertLess(sp.build_ledger(p)["shots"][0]["hfov_deg"], sp.build_ledger(plan())["shots"][0]["hfov_deg"])
+
+
 class ShotPlanValidationTests(unittest.TestCase):
     def test_synthetic_plan_is_valid_and_ledger_is_contiguous(self):
         p = plan()
