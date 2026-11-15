@@ -314,3 +314,27 @@ test('learning a source replaces overlapping any-channel bindings', () => {
   wildcard.bind({source: {kind: 'cc', channel: 0, number: 5}, target: {nodeId: node.id, path: 'intensity'}});
   assert.equal(wildcard.bindings.length, 1);
 });
+
+test('a momentary release goes to the processor that received the press, not the new selection', () => {
+  const {patch, node, view, values} = rig('delay');
+  const other = patch.nodes.find(n => CATALOG_BY_TYPE[n.type] && n.id !== node.id) ?? {id: 'other-processor', type: 'stutter'};
+  const nodes = patch.nodes.some(n => n.id === other.id) ? view.nodes : [...view.nodes, other];
+  const held = {...view, nodes};
+  const map = new ControllerMap([{source: {kind: 'cc', channel: 1, number: 64}, target: {nodeId: SELECTED, path: 'bypass'}, mode: 'momentary'}]);
+  const press = map.process(cc(64, 127), held).actions;
+  assert.deepEqual(press.map(a => [a.nodeId, a.path, a.value]), [[node.id, 'bypass', true]]);
+  values.set(`${node.id}|bypass`, true);
+  const moved = {...held, selectedId: other.id, current: (id, path) => id === node.id && path === 'bypass' ? true : held.current(id, path)};
+  const release = map.process(cc(64, 0), moved).actions;
+  assert.deepEqual(release.map(a => [a.nodeId, a.path, a.value]), [[node.id, 'bypass', false]]);
+  const next = map.process(cc(64, 127), moved).actions;
+  assert.equal(next[0].nodeId, other.id, 'a fresh press follows the new selection');
+});
+
+test('clearing the gesture tracker makes the next edit a new gesture', () => {
+  const tracker = new GestureTracker(600);
+  assert.equal(tracker.touch('k', 1000), true);
+  assert.equal(tracker.touch('k', 1100), false);
+  tracker.clear();
+  assert.equal(tracker.touch('k', 1200), true, 'a gesture started within the gap after Undo still snapshots');
+});

@@ -151,6 +151,7 @@ export class ControllerMap {
     this.learning = null;
     this.pickup = new Map();
     this.pending = new Map();
+    this.held = new Map();
     for (const binding of bindings) this.bind(binding);
   }
 
@@ -165,6 +166,7 @@ export class ControllerMap {
     this.bindings.push(binding);
     this.pickup.clear();
     this.pending.clear();
+    this.held.clear();
     return binding;
   }
 
@@ -180,7 +182,7 @@ export class ControllerMap {
     return this.bindings.find(item => targetKey(item.target) === key) || null;
   }
 
-  clear() {this.bindings = []; this.pickup.clear(); this.pending.clear(); this.learning = null;}
+  clear() {this.bindings = []; this.pickup.clear(); this.pending.clear(); this.held.clear(); this.learning = null;}
 
   /** Arm MIDI learn: the next usable message binds to this target. */
   armLearn(target) {this.learning = validateTarget(target);}
@@ -225,7 +227,15 @@ export class ControllerMap {
       const next = this.#switchValue(mode, message, current);
       return next === null || next === current ? null : {global: target.global, value: next, binding: key};
     }
-    const nodeId = target.nodeId === SELECTED ? view.selectedId : target.nodeId;
+    // A held momentary switch releases the processor that received the press, even if the selection moved since.
+    const holdSlot = `${key}>${target.slot ?? target.path}`;
+    const heldId = mode === 'momentary' && target.nodeId === SELECTED ? this.held.get(holdSlot) : undefined;
+    const nodeId = heldId !== undefined && view.nodes.some(item => item.id === heldId) ? heldId
+      : target.nodeId === SELECTED ? view.selectedId : target.nodeId;
+    if (mode === 'momentary' && target.nodeId === SELECTED) {
+      const pressed = message.kind === 'note-on' || (message.kind !== 'note-off' && message.norm >= .5);
+      if (pressed) this.held.set(holdSlot, nodeId); else this.held.delete(holdSlot);
+    }
     const node = view.nodes.find(item => item.id === nodeId);
     const control = node && findControl(node, target, view);
     if (!control) return null;
@@ -310,6 +320,8 @@ export class GestureTracker {
     return previous === undefined || now - previous > this.gapMs;
   }
   end(key) {this.last.delete(key);}
+  /** Forget every gesture, e.g. after Undo restored the patch, so the next edit snapshots again. */
+  clear() {this.last.clear();}
 }
 
 /** Human text for a value on a control: option names, percentages or the unit. */

@@ -249,7 +249,7 @@ $('bypass').onclick=()=>{state.bypass=!state.bypass;$('bypass').classList.toggle
 $('layout').onchange=()=>{state.layout=$('layout').value;state.revision++;};
 $('fullscreen').onclick=enterFullscreen;$('exit-full').onclick=leaveFullscreen;
 document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement&&$('stage').classList.contains('expanded'))leaveFullscreen();});
-document.addEventListener('keydown',e=>{if(e.key==='Escape')leaveFullscreen();if(e.code==='Space'&&!['INPUT','TEXTAREA','SELECT','BUTTON'].includes(e.target.tagName)){e.preventDefault();state.playing||state.playPending?pause():play();}});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')leaveFullscreen();if(e.code==='Space'&&!e.defaultPrevented&&!['INPUT','TEXTAREA','SELECT','BUTTON'].includes(e.target.tagName)){e.preventDefault();state.playing||state.playPending?pause():play();}});
 document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
 $('source-details').onclick=()=>{setTab('source');$('tab-source').scrollIntoView({behavior:'smooth',block:'nearest'});};
 $('patch-select').onchange=()=>{if($('patch-select').value!=='current')loadNamed($('patch-select').value);};
@@ -302,7 +302,7 @@ $('demo-patch').onclick=()=>{
   patch.events=[];for(const n of patch.nodes.filter(isFX)){n.solo=false;n.automation=n.automation.filter(a=>!['intensity','wet'].includes(a.parameter));n.automation.push({parameter:'intensity',interpolation:'linear',keyframes:[{time:0,value:1},{time:6,value:1},{time:8,value:.12},{time:10,value:1}]});}
   setPatch(patch,{stash:false});state.loop=false;updateTransport();play();enterFullscreen();
 };
-$('undo').onclick=()=>{const previous=state.undo.pop();if(previous){const stack=state.undo;setPatch(previous,{stash:false,seek:false});state.undo=stack;toast('Previous rack restored.');}};
+$('undo').onclick=()=>{const previous=state.undo.pop();if(previous){const stack=state.undo;setPatch(previous,{stash:false,seek:false});state.undo=stack;gestures.clear();toast('Previous rack restored.');}};
 $('save').onclick=()=>{const blob=new Blob([JSON.stringify(state.patch,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`god-here-${state.patch.id}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),5000);toast('Patch exported with routing, source identity, seed and automation.');};
 $('import').onchange=async()=>{const file=$('import').files[0];if(!file)return;try{if(file.size>2e6)throw Error('Patch file exceeds 2 MB.');const patch=JSON.parse(await file.text());setPatch(patch);toast('Patch loaded.');}catch(error){toast(`Import rejected: ${error.message}`);}finally{$('import').value='';}};
 

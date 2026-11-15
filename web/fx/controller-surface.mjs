@@ -62,6 +62,7 @@ export function mountSurface(root, host, {request = globalThis.navigator?.reques
   const controller = host.controller;
   let midi = null, learnMode = false, layoutKey = '', lastBindings = '', osc = null;
   const dragging = new Set();
+  const stops = new Set();   // ends every live pointer drag; the strip it belonged to is about to be rebuilt
   const waiting = new Map();
 
   root.innerHTML = `
@@ -128,7 +129,7 @@ export function mountSurface(root, host, {request = globalThis.navigator?.reques
   function update() {
     const view = host.getView(), node = selectedNode(view);
     const key = node ? `${node.id}|${node.type}|${view.duration}` : '';
-    if (key !== layoutKey) {build(); controller.resetPickup(); waiting.clear();}
+    if (key !== layoutKey) {for (const stop of [...stops]) stop(); build(); controller.resetPickup(); waiting.clear();}
     if (!node) return;
     const definition = node.name || node.type;
     $('.cs-code').textContent = node.type;
@@ -233,12 +234,17 @@ export function mountSurface(root, host, {request = globalThis.navigator?.reques
       if (fill) fill.style.height = `${(n * 100).toFixed(1)}%`;
       if (cap) cap.style.bottom = `${(n * 100).toFixed(1)}%`;
     };
+    const gestureKey = `surface:${view.selectedId}:${control.path}`;
+    const stop = () => {
+      removeEventListener('pointermove', move); removeEventListener('pointerup', finish); removeEventListener('pointercancel', finish);
+      stops.delete(stop); dragging.delete(element); host.endGesture?.(gestureKey);
+    };
     const finish = ev => {
       if (ev.pointerId !== event.pointerId) return;
-      removeEventListener('pointermove', move); removeEventListener('pointerup', finish); removeEventListener('pointercancel', finish);
-      dragging.delete(element); host.endGesture?.(`surface:${host.getView().selectedId}:${control.path}`);
+      stop();
       controller.resetPickup(); update();
     };
+    stops.add(stop);
     addEventListener('pointermove', move); addEventListener('pointerup', finish); addEventListener('pointercancel', finish);
     if (rect) move(event);
   });
