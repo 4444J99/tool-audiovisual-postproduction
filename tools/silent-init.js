@@ -112,6 +112,8 @@
       observer.observe(root, {childList: true, subtree: true});
       observers.push(observer);
       for (const type of MEDIA_EVENTS) root.addEventListener(type, onMediaEvent, true);
+      // Roots nested inside this one (declarative or already attached) are found here, so every depth is watched.
+      for (const element of root.querySelectorAll('*')) if (element.shadowRoot) watchRoot(element.shadowRoot);
     }
     let documentObserver = null;
     const arm = () => {
@@ -169,6 +171,14 @@
         return originalDisconnect.call(this, targetOf(this, destination), ...rest);
       },
     });
+    // An element routed into the graph is released from the pin: its requested muted and volume apply natively, and the
+    // graph is silenced at the destination. Both creation paths do this: the factory and the constructor.
+    const capture = element => {
+      if (!(element instanceof HTMLMediaElement)) return;
+      ensure(element); captured.add(element);
+      const asked = shadow.get(element);
+      nativeVolume.set.call(element, asked.volume); nativeMuted.set.call(element, asked.muted);
+    };
     for (const Context of Realtime) {
       const createSource = Context.prototype.createMediaElementSource;
       if (typeof createSource !== 'function') continue;
@@ -176,14 +186,20 @@
         configurable: true, writable: true, enumerable: true,
         value: function createMediaElementSource(element) {
           const node = createSource.call(this, element);
-          if (element instanceof HTMLMediaElement) {
-            ensure(element); captured.add(element);
-            const asked = shadow.get(element);
-            nativeVolume.set.call(element, asked.volume); nativeMuted.set.call(element, asked.muted);
-          }
+          capture(element);
           return node;
         },
       });
+    }
+    if (typeof window.MediaElementAudioSourceNode === 'function') {
+      const NativeSourceNode = window.MediaElementAudioSourceNode;
+      const SilentSourceNode = function MediaElementAudioSourceNode(context, options) {
+        const node = Reflect.construct(NativeSourceNode, options === undefined ? [context] : [context, options], new.target || SilentSourceNode);
+        capture(node.mediaElement);  // the element native construction bound (an accessor option is read once, by native code)
+        return node;
+      };
+      SilentSourceNode.prototype = NativeSourceNode.prototype;
+      Object.defineProperty(window, 'MediaElementAudioSourceNode', {configurable: true, writable: true, enumerable: false, value: SilentSourceNode});
     }
   }
 
