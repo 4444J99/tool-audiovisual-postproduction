@@ -238,10 +238,20 @@ class LimitTests(Base):
         self.assertFalse((Path(self.tmp.name) / "tight" / "pipeline-manifest.json").exists())
         self.assertEqual(json.loads((Path(self.tmp.name) / "tight" / "qc" / "qc-report.json").read_text())["status"], "fail")
 
-    def test_audio_with_no_dialogue_span_refuses_before_any_caption_is_made(self):
+    def test_a_qc_spec_changes_the_judgement_never_the_artefacts_judged(self):
+        strict = Path(self.tmp.name) / "strict-vad"
         with self.assertRaises(pc.ChainError) as caught:
-            pc.run_chain(Path(self.tmp.name) / "nospan", qc_spec={"vad": {"margin_db": 60.0}})
-        self.assertTrue(any("no speech spans" in e for e in caught.exception.errors), caught.exception.errors)
+            pc.run_chain(strict, qc_spec={"vad": {"margin_db": 60.0}})
+        self.assertTrue(any("captions.inside_dialogue" in e for e in caught.exception.errors), caught.exception.errors)
+        for rel in ("captions/captions.srt", "captions/frames.y8"):
+            self.assertEqual((strict / rel).read_bytes(), (self.out / rel).read_bytes(), rel)
+        stage = next(s for s in self.manifest["stages"] if s["stage"] == "captions")
+        self.assertEqual(stage["vad"], qc.DEFAULT_SPEC["vad"])
+        self.assertEqual(stage["max_cps"], pc.CAPTION_SPEC["max_cps"])
+
+    def test_audio_with_no_dialogue_span_cannot_receive_captions(self):
+        with self.assertRaises(cap.CaptionError):
+            cap.words_in_spans(["Hello."], [], 17.0)
 
     def test_a_looser_declared_spec_is_recorded_and_verified_only_when_declared(self):
         loose = {"name": "loose", "max_cue_frames": 400}
@@ -321,6 +331,22 @@ class ForgeryTests(Base):
             self.jsave(target, rel, data)
             found = self.check(self.derive(target), "timebase.frame_rate")
             self.assertFalse(found["ok"], rel)
+
+    def test_a_fractional_rate_agreed_everywhere_passes_the_rate_and_length_checks(self):
+        target = self.copy()
+        ntsc = "24000/1001"
+        for rel, edit in (("plan/shot-plan.json", lambda d: d.__setitem__("fps", ntsc)),
+                          ("plan/final-ledger.json", lambda d: d.update(fps=ntsc, total_seconds=round(636 * 1001 / 24000, 4))),
+                          ("colour/layer-plan.json", lambda d: d["comp"].__setitem__("fps", ntsc)),
+                          ("captions/captions-report.json", lambda d: d.__setitem__("fps", ntsc)),
+                          ("captions/burnin-report.json", lambda d: d["params"].__setitem__("fps", ntsc))):
+            data = self.jload(target, rel)
+            edit(data)
+            self.jsave(target, rel, data)
+        report = self.derive(target)
+        self.assertTrue(self.check(report, "timebase.frame_rate")["ok"])
+        self.assertTrue(self.check(report, "timebase.edit_length")["ok"], self.check(report, "timebase.edit_length"))
+        self.assertEqual(self.check(report, "timebase.frame_rate")["rate"], ntsc)
 
     def test_plan_fps_disagreement_is_named(self):
         target = self.copy()

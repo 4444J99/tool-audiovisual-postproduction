@@ -41,7 +41,11 @@ Deterministic JSON (no clock, no host): `schema`, `spec`, `status` (`pass` or `f
 
 ## What changed in the captions stage
 
-The captions are no longer laid on a timeline unrelated to the audio. The `captions` stage now takes the delivered dialogue as an input, finds its dialogue-active spans with the same detector, and lays one short invented sentence into each span (`captions.words_in_spans`; a sentence that cannot be read inside its span at `max_cps` is refused before any file is written). The chain's caption spec is the `broadcast` preset with a 0.4 s minimum duration (`broadcast-short`), because the shortest invented speech span is under half a second. The sentences are still invented; they are not a transcript.
+The captions are no longer laid on a timeline unrelated to the audio. The `captions` stage now takes the delivered dialogue as an input, finds its dialogue-active spans with a fixed detector (the default `vad`, recorded on the stage with the reading rate, so a `--qc-spec` never changes the artefacts it judges), and lays one short invented sentence into each span (`captions.words_in_spans`; a sentence that cannot be read inside its span at `max_cps` is refused before any file is written). The chain's caption spec is the `broadcast` preset with a 0.4 s minimum duration (`broadcast-short`), because the shortest invented speech span is under half a second. The sentences are still invented; they are not a transcript.
+
+## Independence of the clean pass
+
+On the clean chain the caption placement and `captions.inside_dialogue` use the same detector at its default setting, so a clean pass is close to tautological: it shows that the stage did what it was written to do, not that the placement is right in any independent sense. The check earns its keep under change: a cue moved after the fact, a different `--qc-spec` detector, a swapped WAV or an edited caption file all fail it, because the judgement is re-derived from the bytes on disk rather than read from the stage's record.
 
 ## Tamper detection
 
