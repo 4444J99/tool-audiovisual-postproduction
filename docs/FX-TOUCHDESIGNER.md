@@ -328,7 +328,8 @@ no-TouchDesigner procedure above.
 1. Prepare, without TouchDesigner (Node 22 or newer):
    `node tools/fx-td-network.mjs web/fx/fixtures/closed-inbox.json --out outputs/td --source-file /absolute/path/to/any-short-clip-with-audio.mp4`
    (without `--source-file`, `fx_source.Sourcefile` is empty and nothing flows, so there is no picture or audio to judge).
-   Confirm `outputs/td/closed-inbox.build.py` and `closed-inbox.network.json` exist. For the workbench side also run
+   Confirm `outputs/td/closed-inbox.build.py` and `closed-inbox.network.json` exist. For the workbench side, if `web/fx/assets` already holds your private media pack, leave it alone (the generator
+   overwrites that folder without asking); otherwise run
    `node tools/make-synthetic-asset-pack.mjs web/fx/assets` and `python3 -m http.server 8765 --bind 127.0.0.1` from the
    repository root.
 2. Open TouchDesigner and a new empty project. Open **Dialogs > Textport and DATs** (Alt+T).
