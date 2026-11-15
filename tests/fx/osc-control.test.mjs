@@ -203,3 +203,134 @@ test('a real move goes through, while one inside the echo tolerance does not', (
   assert.equal(interpretOsc(osc('/fx/selected/knob/0', norm + oscControl.ECHO_TOLERANCE / 2), view).actions.length, 0);
   assert.equal(interpretOsc(osc('/fx/selected/knob/0', Math.min(1, norm + 0.02)), view).actions.length, norm + 0.02 <= 1 ? 1 : 0);
 });
+
+// --- rule sync: the rack reports changes to the rules that govern a control ---------------------------------------------
+import {applyParameterEdit, processorRules, EVENT_MERGE_SECONDS} from '../../web/fx/parameter-rules.mjs';
+
+function ruleRig() {
+  const patch = freshPatch('delay');
+  const node = patch.nodes.find(n => CATALOG_BY_TYPE[n.type]);
+  node.automation = [{parameter: 'wet', interpolation: 'linear', keyframes: [{time: 0, value: 0.2}, {time: 5, value: 1}]}];
+  const view = {nodes: [node], selectedId: node.id, duration: 12, time: 0, current: () => 0.5, global: () => false, rules: id => id === node.id ? processorRules(patch, node) : null};
+  const ruleMessages = feedback => feedback.collect(view).filter(m => /\/(released|event|lane|macro)\//.test(m.address));
+  return {patch, node, view, ruleMessages, feedback: new OscFeedback()};
+}
+
+test('rule addresses are percent-encoded like the control addresses and split a parameter path the same way', () => {
+  assert.equal(oscControl.ruleAddress('fx 1', 'released', 'params.time'), '/fx/node/fx%201/released/params/time');
+  assert.equal(oscControl.ruleAddress('fx-1', 'lane', 'wet'), '/fx/node/fx-1/lane/wet');
+  assert.deepEqual([...oscControl.RULE_KINDS], ['released', 'event', 'lane', 'macro']);
+});
+
+test('the first report releases every control of a processor, then sends its rules; a second report sends nothing', () => {
+  const {node, ruleMessages, feedback} = ruleRig();
+  const first = ruleMessages(feedback);
+  const released = first.filter(m => m.address.includes('/released/')).map(m => m.address);
+  const {ranges, switches} = controller.describeControls(node, {duration: 12});
+  assert.equal(released.length, ranges.length + switches.length);
+  assert.equal(first.findIndex(m => !m.address.includes('/released/')) , released.length, 'every release comes first');
+  const lane = first.find(m => m.address.endsWith('/lane/wet'));
+  assert.deepEqual(JSON.parse(lane.args[0]), {interpolation: 'linear', keyframes: [{time: 0, value: 0.2}, {time: 5, value: 1}]});
+  assert.ok(first.some(m => m.address.includes('/macro/params/')), 'the preset macro mappings are sent');
+  assert.deepEqual(ruleMessages(feedback), []);
+});
+
+test('recording sends one event message per new event and a replaced value at the same time, and keeps the lane', () => {
+  const {patch, node, ruleMessages, feedback} = ruleRig();
+  ruleMessages(feedback);
+  applyParameterEdit(patch, node, 'wet', 0.7, {recording: true, time: 1.23456});
+  assert.deepEqual(ruleMessages(feedback), [{address: '/fx/node/fx-1/event/wet', args: [1.2346, 0.7]}]);
+  applyParameterEdit(patch, node, 'wet', 0.4, {recording: true, time: 1.23456 + EVENT_MERGE_SECONDS / 2});   // merged into the last event by the workbench
+  assert.deepEqual(ruleMessages(feedback), [{address: '/fx/node/fx-1/event/wet', args: [1.2346, 0.4]}]);
+  applyParameterEdit(patch, node, 'bypass', true, {recording: true, time: 3});
+  assert.deepEqual(ruleMessages(feedback), [{address: '/fx/node/fx-1/event/bypass', args: [3, 1]}], 'booleans travel as 0 / 1');
+});
+
+test('a hand edit releases the control, and what else the control still has is sent again', () => {
+  const {patch, node, ruleMessages, feedback} = ruleRig();
+  applyParameterEdit(patch, node, 'wet', 0.9, {recording: true, time: 1});
+  applyParameterEdit(patch, node, 'wet', 0.8, {recording: true, time: 2});
+  ruleMessages(feedback);
+  applyParameterEdit(patch, node, 'wet', 0.3, {});
+  assert.deepEqual(ruleMessages(feedback), [{address: '/fx/node/fx-1/released/wet', args: []}]);
+  // Clear removes one control's events but not its lane: the release drops both in the mirror, so the lane is sent again
+  applyParameterEdit(patch, node, 'wet', 0.9, {recording: true, time: 1});
+  node.automation.push({parameter: 'wet', interpolation: 'step', keyframes: [{time: 0, value: 1}]});
+  ruleMessages(feedback);
+  patch.events = [];
+  assert.deepEqual(ruleMessages(feedback).map(m => m.address), ['/fx/node/fx-1/released/wet', '/fx/node/fx-1/lane/wet']);
+});
+
+test('a processor parameter edit releases its macro mapping as well', () => {
+  const {patch, node, ruleMessages, feedback} = ruleRig();
+  const key = node.macro[0].parameter;
+  ruleMessages(feedback);
+  applyParameterEdit(patch, node, `params.${key}`, CATALOG_BY_TYPE[node.type].params.find(p => p.key === key).min, {});
+  assert.deepEqual(ruleMessages(feedback).map(m => m.address), [oscControl.ruleAddress(node.id, 'released', `params.${key}`)]);
+});
+
+test('a lane too large for one bridge frame is not sent: the mirror releases the control and keeps it released', () => {
+  const {node, ruleMessages, feedback} = ruleRig();
+  ruleMessages(feedback);
+  node.automation = [{parameter: 'wet', interpolation: 'linear', keyframes: Array.from({length: 2000}, (_, i) => ({time: i / 100, value: 0.123456789}))}];
+  assert.deepEqual(ruleMessages(feedback), [{address: '/fx/node/fx-1/released/wet', args: []}]);
+  assert.deepEqual(ruleMessages(feedback), [], 'and it stays quiet');
+});
+
+test('a view without rules reports no rule messages, and reset() makes the next report a full resync', () => {
+  const {view, node, feedback, ruleMessages} = ruleRig();
+  const plain = {...view, rules: undefined};
+  assert.deepEqual(new OscFeedback().collect(plain).filter(m => /\/(released|event|lane|macro)\//.test(m.address)), []);
+  ruleMessages(feedback);
+  feedback.reset();
+  assert.ok(ruleMessages(feedback).some(m => m.address === oscControl.ruleAddress(node.id, 'released', 'intensity')));
+});
+
+test('applyParameterEdit is exactly what the workbench setter does outside recording and while recording', () => {
+  const {patch, node} = ruleRig();
+  applyParameterEdit(patch, node, 'params.taps', 3, {recording: true, time: 2});
+  assert.equal(patch.events.length, 1);
+  assert.equal(node.params.taps === 3, false, 'recording does not change the base value');
+  applyParameterEdit(patch, node, 'params.taps', 3, {});
+  assert.deepEqual(patch.events, []);
+  assert.equal(node.params.taps, 3);
+  assert.ok(!node.macro.some(m => m.parameter === 'taps'));
+});
+
+test('a 50-keyframe lane passes the bridge\'s wire check (it was refused above 1,024 characters)', async () => {
+  const {parseWireMessage} = await import('../../tools/fx-bridge/bridge.mjs');
+  const {node, ruleMessages, feedback} = ruleRig();
+  ruleMessages(feedback);
+  node.automation = [{parameter: 'wet', interpolation: 'linear', keyframes: Array.from({length: 50}, (_, i) => ({time: i / 4, value: 0.123456789012}))}];
+  const lane = ruleMessages(feedback).find(m => m.address.endsWith('/lane/wet'));
+  assert.ok(lane.args[0].length > 1024);
+  assert.deepEqual(parseWireMessage(JSON.stringify(lane)), lane);
+});
+
+test('the largest lane the rack will send arrives through a real UDP socket, whole', async () => {
+  const {encodeMessage, decodePacket} = await import('../../tools/fx-bridge/osc-codec.mjs');
+  const dgram = await import('node:dgram');
+  const {node, ruleMessages, feedback} = ruleRig();
+  ruleMessages(feedback);
+  let count = 1;
+  const make = n => [{parameter: 'wet', interpolation: 'linear', keyframes: Array.from({length: n}, (_, i) => ({time: i / 13, value: 0.123456789012}))}];
+  while (JSON.stringify(make(count + 1)[0]).length <= oscControl.MAX_RULE_CHARS) count++;
+  node.automation = make(count);
+  const lane = ruleMessages(feedback).find(m => m.address.endsWith('/lane/wet'));
+  assert.ok(lane, 'a lane at the limit is still sent');
+  // the page sends the message as JSON; the bridge must accept it, whatever its length up to the limit (a 50-keyframe lane is over 1,000 characters)
+  const wire = (await import('../../tools/fx-bridge/bridge.mjs')).parseWireMessage(JSON.stringify(lane));
+  assert.deepEqual(wire, lane);
+  assert.ok(lane.args[0].length <= oscControl.MAX_RULE_CHARS && (await import('../../tools/fx-bridge/bridge.mjs')).MAX_STRING >= oscControl.MAX_RULE_CHARS);
+  const packet = encodeMessage(lane.address, lane.args);
+  assert.ok(packet.length < 9216, `${packet.length} bytes`);
+  const receiver = dgram.createSocket('udp4'), sender = dgram.createSocket('udp4');
+  await new Promise(resolve => receiver.bind(0, '127.0.0.1', resolve));
+  const arrived = new Promise(resolve => receiver.once('message', resolve));
+  await new Promise((resolve, reject) => sender.send(packet, receiver.address().port, '127.0.0.1', error => error ? reject(error) : resolve()));
+  const got = decodePacket(new Uint8Array(await arrived));
+  receiver.close(); sender.close();
+  assert.deepEqual(JSON.parse(got[0].args[0]).keyframes.length, count);
+  node.automation = make(count + 40);
+  assert.deepEqual(ruleMessages(feedback), [{address: '/fx/node/fx-1/released/wet', args: []}], 'one past the limit is released, never sent');
+});

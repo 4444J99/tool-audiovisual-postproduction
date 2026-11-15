@@ -9,6 +9,7 @@ import {compatiblePreviewEntries} from './preview-provenance.mjs';
 import {assetPackIdentity} from './asset-pack.mjs';
 import {ControllerMap, GestureTracker} from './controller-map.mjs';
 import {mountSurface} from './controller-surface.mjs';
+import {applyParameterEdit, processorRules} from './parameter-rules.mjs';
 
 const $=id=>document.getElementById(id);
 const escape=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -101,17 +102,7 @@ function rememberCustom(node){
   state.patch.metadata.customModuleStates[node.id]={node:clonePatch(node),events:clonePatch(state.patch.events.filter(e=>e.nodeId===node.id))};
 }
 function setParameter(node,path,value){
-  if(state.recording){
-    const t=position(),last=state.patch.events.at(-1);
-    if(last&&last.nodeId===node.id&&last.parameter===path&&Math.abs(last.time-t)<.05)last.value=value;
-    else state.patch.events.push({time:t,nodeId:node.id,parameter:path,value});
-    state.patch.events.sort((a,b)=>a.time-b.time);
-  }else{
-    state.patch.events=state.patch.events.filter(e=>!(e.nodeId===node.id&&e.parameter===path));
-    node.automation=node.automation.filter(a=>a.parameter!==path);
-    if(path.startsWith('params.')) {node.params[path.slice(7)]=value;node.macro=node.macro.filter(m=>m.parameter!==path.slice(7));}
-    else node[path]=value;
-  }
+  applyParameterEdit(state.patch,node,path,value,{recording:state.recording,time:state.recording?position():0});
   rememberCustom(node);
   invalidate();$('event-count').textContent=`${state.patch.events.length} recorded changes`;
 }
@@ -324,6 +315,7 @@ function controllerView(){
   const t=position();
   return {nodes:state.patch.nodes.filter(isFX),selectedId:state.selected,duration:media.duration,time:t,
     current(id,path){const n=state.patch.nodes.find(n=>n.id===id);if(!n)return 0;if(path==='bypass'||path==='solo')return !!toggleValue(n,path,t,state.patch);const e=evaluatedNode(n,t,state.patch);return path.startsWith('params.')?e.params[path.slice(7)]:e[path];},
+    rules:id=>{const n=state.patch.nodes.find(n=>n.id===id);return n?processorRules(state.patch,n):null;},
     global:name=>name==='play'?state.playing||state.playPending:name==='record'?state.recording:name==='loop'?state.loop:false};
 }
 function syncRackControl(node,path,value){

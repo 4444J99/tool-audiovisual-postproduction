@@ -228,7 +228,7 @@ class TickTests(unittest.TestCase):
         resolve.tick(rack)
         self.assertEqual((comp.table.clears, dict(map(tuple, comp.table.rows))["param.a"]), (2, 8.0))
 
-    def test_a_hand_edit_releases_the_rules_for_that_control_and_the_next_tick_follows_the_base(self):
+    def test_a_reported_release_drops_the_rules_for_that_control_and_the_next_tick_follows_the_base(self):
         resolve.reset()
         node = {"id": "a", "comp": "fx_a", "resolve": block(events=[{"time": 0, "parameter": "params.a", "value": 6}]),
                 "controls": [{"par": "Intensity", "path": "intensity", "kind": "range", "value": 1}, {"par": "Wet", "path": "wet", "kind": "range", "value": 1},
@@ -237,11 +237,11 @@ class TickTests(unittest.TestCase):
         comp = Comp({"Intensity": 1.0, "Wet": 1.0, "A": 2.0, "Bypass": 0, "Solo": 0})
         rack = Rack({"nodes": [node]}, 1.0, {"fx_a": comp})
         self.assertEqual(resolve.tick(rack)["a"]["params"]["a"], 6)
-        self.assertTrue(resolve.release(rack, "fx_a", "params.a"))
+        self.assertTrue(resolve.apply(rack, "fx_a", "released", "params.a", None))
         self.assertEqual(resolve.tick(rack)["a"]["params"]["a"], 2.0)
         self.assertEqual(dict(map(tuple, comp.table.rows))["param.a"], 2.0)
-        self.assertFalse(resolve.release(rack, "fx_a", "params.a"))
-        self.assertFalse(resolve.release(rack, "fx_missing", "params.a"))
+        self.assertFalse(resolve.apply(rack, "fx_a", "released", "params.a", None))
+        self.assertFalse(resolve.apply(rack, "fx_missing", "released", "params.a", None))
 
 
 if __name__ == "__main__":

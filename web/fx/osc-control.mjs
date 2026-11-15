@@ -17,7 +17,12 @@
  *   /fx/select/next | /fx/select/prev
  *   /fx/sync                         ask for the full state to be sent again
  * Outbound (rack -> TouchDesigner) uses /fx/node/<id>/..., /fx/transport/..., plus
- * /fx/selected <id>, /fx/selected/type, /fx/time and /fx/count. See docs/FX-TOUCHDESIGNER.md.
+ * /fx/selected <id>, /fx/selected/type, /fx/time and /fx/count, and the rule messages
+ *   /fx/node/<id>/released/<path>    the control's events, automation lane and macro mapping are gone
+ *   /fx/node/<id>/event/<path>       time, value: one recorded event (inserted, or its value replaced)
+ *   /fx/node/<id>/lane/<path>        one JSON string {interpolation, keyframes}: the control's automation lane
+ *   /fx/node/<id>/macro/<path>       one JSON string {min, max, curve}: the macro mapping of a processor parameter
+ * where <path> is intensity, wet, bypass, solo or params/<key>. See docs/FX-TOUCHDESIGNER.md.
  *
  * Processor ids can contain characters OSC reserves, so each address segment is
  * percent-encoded for everything outside A-Z a-z 0-9 _ . -.
@@ -56,8 +61,18 @@ export function decodeSegment(text) {
   try {return textDecoder.decode(Uint8Array.from(bytes));} catch {return null;}
 }
 
+/** The rule message kinds the rack reports to a mirroring network, besides control values. */
+export const RULE_KINDS = Object.freeze(['released', 'event', 'lane', 'macro']);
+/** A lane whose JSON is longer than this is not mirrored: each message leaves the bridge as one UDP datagram, and macOS
+ *  refuses datagrams over 9216 bytes (net.inet.udp.maxdgram). The mirror drops its copy of that control's rules instead. */
+export const MAX_RULE_CHARS = 8000;
+/** Event times travel with this many decimals (float32 on the wire keeps them to about a microsecond). */
+export const EVENT_TIME_DECIMALS = 4;
+
 const pathSegments = path => path.startsWith('params.') ? ['params', encodeSegment(path.slice(7))] : [path];
 export const nodeAddress = (id, path) => `/${OSC_ROOT}/node/${encodeSegment(id)}/${pathSegments(path).join('/')}`;
+/** The address of one rule message (`kind` is one of RULE_KINDS) for a control path. */
+export const ruleAddress = (id, kind, path) => `/${OSC_ROOT}/node/${encodeSegment(id)}/${kind}/${pathSegments(path).join('/')}`;
 
 const isNumber = value => typeof value === 'number' && Number.isFinite(value);
 /** A switch value: booleans, or numbers at or above one half. No argument means "trigger". */
@@ -149,8 +164,51 @@ const round = (value, places) => Math.round(value * 10 ** places) / 10 ** places
  * `{address, args}`; `full` resends everything (on connect, or when TouchDesigner asks /fx/sync).
  */
 export class OscFeedback {
-  constructor() {this.last = new Map(); this.time = null;}
-  reset() {this.last.clear(); this.time = null;}
+  constructor() {this.last = new Map(); this.time = null; this.rules = new Map();}
+  reset() {this.last.clear(); this.time = null; this.rules.clear();}
+
+  /**
+   * The rule messages for one processor: what the mirroring network must do to match the workbench's rules now.
+   * A processor not seen before (first report, after a connect or /fx/sync) is resynchronised whole: every control's
+   * rules are released, then the current ones are sent. Afterwards only differences are sent. A rule that vanished
+   * (a hand edit, a preset, Clear) releases its control, and the control's remaining rules are sent again, since a
+   * release drops all of them.
+   */
+  collectRules(node, view) {
+    const rules = view.rules(node.id);
+    if (!rules) return [];
+    const model = new Map();   // `${kind}|${path}[|${time}]` -> {path, kind, args | null}
+    const set = (kind, path, time, args) => model.set(time === null ? `${kind}|${path}` : `${kind}|${path}|${time}`, {kind, path, time, args});
+    for (const event of rules.events) {
+      const value = typeof event.value === 'boolean' ? (event.value ? 1 : 0) : event.value;
+      if (isNumber(event.time) && isNumber(value)) set('event', event.parameter, round(event.time, EVENT_TIME_DECIMALS), [round(event.time, EVENT_TIME_DECIMALS), value]);
+    }
+    for (const lane of rules.automation) {
+      const text = JSON.stringify({interpolation: lane.interpolation, keyframes: lane.keyframes.map(frame => ({time: frame.time, value: frame.value}))});
+      set('lane', lane.parameter, null, text.length > MAX_RULE_CHARS ? null : [text]);
+    }
+    for (const mapping of rules.macro) set('macro', `params.${mapping.parameter}`, null, [JSON.stringify({min: mapping.min, max: mapping.max, curve: mapping.curve})]);
+    const before = this.rules.get(node.id);
+    this.rules.set(node.id, model);
+    const released = new Set();
+    if (!before) for (const control of [...describeControls(node, view).ranges, ...describeControls(node, view).switches]) released.add(control.path);
+    else for (const [key, entry] of before) if (!model.has(key) || (model.get(key).args === null) !== (entry.args === null)) released.add(entry.path);
+    const out = [];
+    for (const path of [...released].sort()) out.push({address: ruleAddress(node.id, 'released', path), args: []});
+    const entries = [...model.values()].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : (a.time ?? 0) - (b.time ?? 0));
+    for (const entry of entries) {
+      if (entry.args === null) {   // too large to mirror: the released copy stays released
+        if (!released.has(entry.path) && !before.has(`${entry.kind}|${entry.path}`)) out.push({address: ruleAddress(node.id, 'released', entry.path), args: []});
+        continue;
+      }
+      const key = entry.time === null ? `${entry.kind}|${entry.path}` : `${entry.kind}|${entry.path}|${entry.time}`;
+      const previous = before?.get(key);
+      const unchanged = previous && previous.args !== null && JSON.stringify(previous.args) === JSON.stringify(entry.args);
+      if (unchanged && !released.has(entry.path)) continue;
+      out.push({address: ruleAddress(node.id, entry.kind, entry.path), args: entry.args});
+    }
+    return out;
+  }
 
   collect(view, {full = false} = {}) {
     if (full) this.reset();
@@ -169,6 +227,8 @@ export class OscFeedback {
       for (const control of ranges) emit(nodeAddress(node.id, control.path), [round(valueToNorm(control, view.current(node.id, control.path)), 4)]);
       for (const control of switches) emit(nodeAddress(node.id, control.path), [view.current(node.id, control.path) ? 1 : 0]);
     }
+    // Rules go after the values, so a mirroring network that releases a control has already been given its base value.
+    if (typeof view.rules === 'function') for (const node of fx) out.push(...this.collectRules(node, view));
     const selected = fx.find(node => node.id === view.selectedId);
     emit(`/${OSC_ROOT}/selected`, [selected ? selected.id : '']);
     emit(`/${OSC_ROOT}/selected/type`, [selected ? String(selected.type) : '']);

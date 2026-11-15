@@ -19,7 +19,8 @@ import {listen} from './ws-server.mjs';
 
 export const BRIDGE_PROTOCOL = 1;
 const MAX_ADDRESS = 512;
-const MAX_STRING = 1024;
+/** One string argument. Rule-sync lanes (osc-control.mjs MAX_RULE_CHARS = 8000) are one JSON string; the datagram limit (9216 bytes on macOS) bounds a whole message. */
+export const MAX_STRING = 8192;
 
 /** Validate and normalise one inbound WebSocket message into {address, args}; throws on anything else. */
 export function parseWireMessage(text) {

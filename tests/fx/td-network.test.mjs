@@ -259,6 +259,8 @@ test('validator catches broken specs', () => {
     'select with a dangling reference': spec => { const o = spec.operators.find(op => op.type === 'selectTOP'); Object.keys(o.pars).forEach(k => { o.pars[k] = {ref: 'fx_ghost/out_picture'}; }); },
     'expression naming an undefined parameter': spec => { const o = spec.operators.find(op => op.pars.cross); o.pars.cross = {expr: 'parent().par.Nope', par: 'Nope'}; },
     'custom parameter with a bad name': spec => { spec.operators.find(o => o.node?.type === 'delay').customPars[2].name = 'bad_name'; },
+    'a control without its rule addresses': spec => { delete spec.contract.nodes[0].controls[2].rules.event; spec.operators.find(o => o.text && o.name === 'td_contract').text = JSON.stringify(spec.contract); },
+    'a rule address that is not the workbench\'s': spec => { spec.contract.nodes[0].controls[2].rules.lane += 'x'; spec.operators.find(o => o.text && o.name === 'td_contract').text = JSON.stringify(spec.contract); },
     'contract range differing from the parameter': spec => { spec.contract.nodes[0].controls[2].max += 1; spec.operators.find(o => o.text && o.name === 'td_contract').text = JSON.stringify(spec.contract); },
     'duplicate contract address': spec => { spec.contract.nodes[0].controls[1].address = spec.contract.nodes[0].controls[0].address; spec.operators.find(o => o.name === 'td_contract').text = JSON.stringify(spec.contract); },
     'td_contract text out of step with the contract': spec => { spec.contract.nodes[0].controls[0].default = 0.123; },
