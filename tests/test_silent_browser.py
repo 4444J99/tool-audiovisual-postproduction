@@ -44,6 +44,10 @@ def page_uri(body: str) -> str:
     return 'data:text/html;base64,' + base64.b64encode(html.encode('utf-8')).decode('ascii')
 
 
+# Chromium-only flags: other engines' launchers do not take them.
+CHROMIUM_FLAGS = ['--no-sandbox', '--autoplay-policy=no-user-gesture-required']
+
+
 class FakeEngine:
     def __init__(self, name: str):
         self.name, self.launched = name, None
@@ -174,7 +178,7 @@ class SilentBrowserPageTests(unittest.TestCase):
         engine = getattr(cls.pw, cls.engine_name)
         try:
             options = browser_options() if cls.engine_name == 'chromium' else {}
-            cls.browser = silent_launch(engine, headless=True, args=['--no-sandbox', '--autoplay-policy=no-user-gesture-required'],
+            cls.browser = silent_launch(engine, headless=True, args=CHROMIUM_FLAGS if cls.engine_name == 'chromium' else [],
                                         **options)
         except Exception as error:
             cls.pw.stop()
@@ -208,7 +212,7 @@ class SilentBrowserPageTests(unittest.TestCase):
         engine = getattr(self.pw, self.engine_name)
         options = (browser_options() if self.engine_name == 'chromium' else {})
         with tempfile.TemporaryDirectory() as profile:
-            context = silent_launch_persistent_context(engine, profile, headless=True, args=['--no-sandbox'], **options)
+            context = silent_launch_persistent_context(engine, profile, headless=True, args=['--no-sandbox'] if self.engine_name == 'chromium' else [], **options)
             try:
                 first = context.pages[0]
                 self.assertTrue(first.evaluate('typeof window.__SILENT_BROWSER__ === "object"'))
@@ -259,9 +263,9 @@ class SilentBrowserPageTests(unittest.TestCase):
           const osc = ctx.createOscillator(), level = ctx.createGain(); level.gain.value = 0;
           osc.connect(level);
           const returned = level.connect(ctx.destination);
-          const sink = window.__SILENT_BROWSER__.sink(ctx);
-          const out = {chained: returned === ctx.destination, hasSink: !!sink, sinkGain: sink && sink.gain.value,
-                       sinkIsGain: sink instanceof GainNode, sinkContext: sink && sink.context === ctx};
+          const sink = window.__SILENT_BROWSER__.sinkInfo(ctx);
+          const out = {chained: returned === ctx.destination, hasSink: !!sink, sinkGain: sink && sink.gain,
+                       sinkIsGain: sink.isGain, sinkContext: sink && sink.owner};
           level.disconnect(ctx.destination);
           ctx.close();
           return out;
@@ -276,7 +280,7 @@ class SilentBrowserPageTests(unittest.TestCase):
           source.connect(ctx.destination);
           el.muted = false; el.volume = 0.25;
           const out = {captured: window.__SILENT_BROWSER__.captured(el), native: window.__SILENT_BROWSER__.native(el),
-                       sinkGain: window.__SILENT_BROWSER__.sink(ctx).gain.value};
+                       sinkGain: window.__SILENT_BROWSER__.sinkInfo(ctx).gain};
           ctx.close();
           return out;
         }''')
@@ -292,7 +296,7 @@ class SilentBrowserPageTests(unittest.TestCase):
           const buffer = await offline.startRendering();
           const data = buffer.getChannelData(0);
           let peak = 0; for (const value of data) peak = Math.max(peak, Math.abs(value));
-          return {sink: window.__SILENT_BROWSER__.sink(offline), peak};
+          return {sink: window.__SILENT_BROWSER__.sinkInfo(offline), peak};
         }''')
         self.assertIsNone(result['sink'])
         self.assertGreater(result['peak'], 0.1, 'offline rendering is a buffer, not the device, and must still carry signal')
@@ -320,7 +324,7 @@ class SilentBrowserPageTests(unittest.TestCase):
           }; })();"""
         engine = getattr(self.pw, self.engine_name)
         options = browser_options() if self.engine_name == 'chromium' else {}
-        raw = engine.launch(headless=True, args=silent_args(self.engine_name, ['--no-sandbox']), **options)
+        raw = engine.launch(headless=True, args=silent_args(self.engine_name, ['--no-sandbox'] if self.engine_name == 'chromium' else []), **options)
         self.addCleanup(raw.close)
         context = raw.new_context()
         # One script, so the order is not left to Playwright: the spy is evaluated first, then the silent init wraps it.
@@ -331,7 +335,7 @@ class SilentBrowserPageTests(unittest.TestCase):
           const Context = window.AudioContext || window.webkitAudioContext;
           const ctx = new Context(), osc = ctx.createOscillator(), gain = ctx.createGain();
           osc.connect(gain); gain.connect(ctx.destination);
-          const out = {calls: window.__connectCalls.slice(), sinkGain: window.__SILENT_BROWSER__.sink(ctx).gain.value};
+          const out = {calls: window.__connectCalls.slice(), sinkGain: window.__SILENT_BROWSER__.sinkInfo(ctx).gain};
           ctx.close();
           return out;
         }""")

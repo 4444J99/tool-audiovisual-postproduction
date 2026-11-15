@@ -9,6 +9,9 @@
  *  - Web Audio: every connection to a realtime AudioContext destination goes through a per-context GainNode at
  *    gain 0, so nothing reaches the device. OfflineAudioContext keeps its real destination: it renders to a buffer.
  *  - speechSynthesis utterances are spoken at volume 0, and an utterance whose text carries markup (SSML) is spoken as empty.
+ *
+ * Limit: media parsed inside a closed declarative shadow root (<template shadowrootmode="closed">) has no handle a page
+ * script can reach, so it cannot be pinned here. Chromium covers it with --mute-audio; WebKit and Firefox do not.
  */
 (() => {
   'use strict';
@@ -91,7 +94,8 @@
     // and replaces the root element, so the document watch is armed again after every open.
     const watched = new WeakSet(), observers = [];
     const onMediaEvent = event => { if (event.target instanceof HTMLMediaElement) ensure(event.target); };
-    const MEDIA_EVENTS = ['loadstart', 'loadedmetadata', 'canplay', 'play', 'playing'];
+    // volumechange: native controls (or anything else) that change the native state of a pinned element are put back.
+    const MEDIA_EVENTS = ['loadstart', 'loadedmetadata', 'canplay', 'play', 'playing', 'volumechange'];
     const sweep = root => {
       if (!root || root.nodeType !== 1) return;
       if (root instanceof HTMLMediaElement) ensure(root);
@@ -201,7 +205,12 @@
       version: 1,
       native: element => ({muted: nativeMuted.get.call(element), volume: nativeVolume.get.call(element)}),
       captured: element => captured.has(element),
-      sink: context => (isRealtime(context) ? sinkFor(context) : null),
+      // A description of the sink, never the node: page code must not be able to raise the zero gain.
+      sinkInfo: context => {
+        if (!isRealtime(context)) return null;
+        const sink = sinkFor(context);
+        return {gain: sink.gain.value, isGain: sink instanceof GainNode, owner: sink.context === context};
+      },
     }),
   });
 })();

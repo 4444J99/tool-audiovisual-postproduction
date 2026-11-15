@@ -27,6 +27,8 @@ def files(suffixes):
 
 ENGINE_NAMES = {'chromium', 'webkit', 'firefox', '_electron', 'electron', 'browserType', 'browser_type', 'engine'}
 PLAYWRIGHT_ENGINES = {'chromium', 'webkit', 'firefox'}
+# Owners that are application objects, not browser types (a driver file may drive an app that has its own launch()).
+SAFE_OWNERS = {'self', 'cls', 'this', 'lab', 'e', 'live', 'studio', 'player', 'runtime', 'controller', 'deck', 'app', 'window', 'document', 'console'}
 PY_LAUNCHERS = {'launch', 'launch_persistent_context', 'launch_server', 'connect_over_cdp'}
 NAMES = 'launch|launchPersistentContext|launchServer|connectOverCDP'
 # obj.launch(, obj\n  .launch(, obj['launch'](, and a launch pulled out by destructuring or bound for later.
@@ -39,25 +41,44 @@ JS_ALIAS_IMPORT = re.compile(r"\b(?:chromium|webkit|firefox)\s+as\s+([\w$]+)")  
 # Names such as ``engine`` are Playwright browser types only in a file that deals with a browser driver; application code
 # has its own ``engine.launch(...)``.
 DRIVER_FILE = re.compile(r"playwright|puppeteer|chromium|firefox|browserType|browser_type|\bwebkit\s*[.,)]", re.I)
+JS_COMPUTED = re.compile(r"([\w$]+)\s*\[\s*[^\]'\"\s][^\]]*\]\s*\(")  # engine[method]()
 JS_PUPPETEER = re.compile(r"\bpuppeteer\b\s*\.\s*launch|(?:require\(|from\s+)['\"]puppeteer")
 
 
 def python_launches(source: str, name: str):
-    """Playwright launches in Python: ``p.chromium.launch()``, an alias of an engine, ``getattr(p, name).launch()``."""
+    """Playwright launches in Python: any ``.launch`` style call in a browser-driver file unless its owner is an app object,
+    plus ``getattr(engine, 'launch')`` and an alias of an engine."""
     tree = ast.parse(source, name)
-    aliases = set(ENGINE_NAMES if DRIVER_FILE.search(source) else PLAYWRIGHT_ENGINES)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and isinstance(node.value, (ast.Attribute, ast.Name)):
-            label = node.value.attr if isinstance(node.value, ast.Attribute) else node.value.id
-            if label in PLAYWRIGHT_ENGINES:
-                aliases.update(target.id for target in node.targets if isinstance(target, ast.Name))
+    driver = bool(DRIVER_FILE.search(source))
+    aliases = set(ENGINE_NAMES if driver else PLAYWRIGHT_ENGINES)
+    changed = True
+    while changed:  # chained aliases: runner = bt; bt = pw.chromium
+        changed = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and isinstance(node.value, (ast.Attribute, ast.Name)):
+                label = node.value.attr if isinstance(node.value, ast.Attribute) else node.value.id
+                if label in PLAYWRIGHT_ENGINES or label in aliases:
+                    for target in node.targets:
+                        if isinstance(target, ast.Name) and target.id not in aliases:
+                            aliases.add(target.id); changed = True
     found = []
     for node in ast.walk(tree):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in PY_LAUNCHERS):
+        if not isinstance(node, ast.Call):
             continue
-        owner = node.func.value
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == 'getattr' and len(node.args) >= 2:
+            first = node.args[0]
+            label = first.attr if isinstance(first, ast.Attribute) else first.id if isinstance(first, ast.Name) else ''
+            second = node.args[1]
+            dynamic = not (isinstance(second, ast.Constant) and isinstance(second.value, str))
+            if label in aliases and (dynamic or second.value in PY_LAUNCHERS):
+                found.append(node.lineno)
+            continue
+        if not (isinstance(func, ast.Attribute) and func.attr in PY_LAUNCHERS):
+            continue
+        owner = func.value
         label = owner.attr if isinstance(owner, ast.Attribute) else owner.id if isinstance(owner, ast.Name) else ''
-        if label in aliases or isinstance(owner, (ast.Call, ast.Subscript)):
+        if label in aliases or isinstance(owner, (ast.Call, ast.Subscript)) or (driver and label not in SAFE_OWNERS):
             found.append(node.lineno)
     return sorted(found)
 
@@ -71,13 +92,24 @@ def _blank_comments(source: str) -> str:
 def node_launches(source: str):
     code = _blank_comments(source)
     driver = bool(DRIVER_FILE.search(code))
-    names = set(ENGINE_NAMES if driver else PLAYWRIGHT_ENGINES) | {m.group(1) for m in JS_ALIAS_ASSIGN.finditer(code)} | {m.group(1) for m in JS_ALIAS_DESTRUCTURE.finditer(code)} | {m.group(1) for m in JS_ALIAS_IMPORT.finditer(code)}
+    names = set(ENGINE_NAMES if driver else PLAYWRIGHT_ENGINES)
+    changed = True
+    while changed:  # chained aliases: const bt = playwright.webkit; const runner = bt;
+        before = len(names)
+        pattern = re.compile(r"([\w$]+)\s*=\s*(?:[\w$.()'\"\[\]]*?\.)?(?:" + "|".join(sorted(re.escape(n) for n in names)) + r")\b(?!\s*\.\s*launch)")
+        names |= {m.group(1) for m in pattern.finditer(code)}
+        changed = len(names) != before
+    names |= {m.group(1) for m in JS_ALIAS_DESTRUCTURE.finditer(code)} | {m.group(1) for m in JS_ALIAS_IMPORT.finditer(code)}
     found = set()
     for match in JS_CALL.finditer(code):
         owner = match.group('owner') or match.group('owner2')
         tail = re.search(r"([\w$]+)$", owner)
-        if (driver and owner.endswith(']')) or (tail and tail.group(1) in names):
+        tail_name = tail.group(1) if tail else ''
+        if (driver and owner.endswith(']')) or tail_name in names or (driver and tail_name not in SAFE_OWNERS):
             found.add(code.count('\n', 0, match.start() + len(match.group(0)) - len(re.search(rf"(?:{NAMES})\b.*$", match.group(0), re.S).group(0))) + 1)
+    for match in JS_COMPUTED.finditer(code):  # chromium[method]()
+        if match.group(1) in names:
+            found.add(code.count('\n', 0, match.start()) + 1)
     for match in (JS_DESTRUCTURED.finditer(code) if driver else []):
         found.add(code.count('\n', 0, match.start()) + 1)
     puppeteer = JS_PUPPETEER.search(code)
@@ -112,6 +144,11 @@ class SilentLaunchLintTests(unittest.TestCase):
         self.assertEqual(node_launches("await chromium['launch']();\n"), [1])
         self.assertEqual(node_launches("const {launch} = chromium;\nawait launch();\n"), [1])
         self.assertEqual(node_launches("import { chromium as chrome } from 'playwright';\nawait chrome.launch();\n"), [2])
+        self.assertEqual(node_launches("const bt = playwright.webkit; const runner = bt; await runner.launch();\n"), [1])
+        self.assertEqual(node_launches("const method = 'launch'; await chromium[method]();\n"), [1])
+        self.assertEqual(node_launches("const pw = require('playwright'); await thing.launch();\n"), [1])
+        self.assertEqual(python_launches("import playwright\nlaunch = getattr(pw.chromium, 'launch')\n", 'x.py'), [2])
+        self.assertEqual(python_launches("import playwright\nbt = pw.chromium\nrunner = bt\nrunner.launch()\n", 'x.py'), [4])
         self.assertEqual(node_launches('/* webkit.launch() */ const x = 1;\n'), [])
         self.assertEqual(node_launches('await engine.launch(id);\n'), [])
         self.assertEqual(python_launches('p.chromium.launch()\n', 'x.py'), [1])
