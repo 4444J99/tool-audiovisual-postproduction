@@ -228,7 +228,7 @@ functions at the catalog's extremes, and `tests/test_td_latency.py` sweeps `reve
 ahead than the bound and that the bound is reached: Reverse reads at most `span` ahead (5 s at the catalog maximum), Stutter at most `window x (1 - 1 / rate)` (1 s).
 
 - **Capped.** The default cap is 2.5 s (`maxLatency` option of the generator): at 60 frames per second the Reverse cache holds 5 s, 302 frames, which is already
-  gigabytes at 1080p. A Reverse whose Span the cap cannot cover has its resolved Span limited to the latency (`limits` in the resolve block, and a warning in the spec);
+  gigabytes at 1080p. Every latency cache is sized by an expression of `project.cookRate` (the rate its read indices use), so it covers the delay at any cook rate, at a proportional memory cost. A Reverse whose Span the cap cannot cover has its resolved Span limited to the latency (`limits` in the resolve block, and a warning in the spec);
   Stutter's 1 s is under the cap. A Stutter whose bound the cap cannot cover reads the newest frame instead of one it has not got.
 - **A path sum.** Every stream has a lag, the seconds its newest frame is behind the live edge (the source: 0). A processor without look-ahead keeps its inputs' lag;
   one with look-ahead adds its own. Where wires of different lag meet (a mix, a processor with several inputs) the shorter ones are delayed to the longest: picture through a Cache TOP read back,
@@ -240,6 +240,7 @@ ahead than the bound and that the bound is reached: Reverse reads at most `span`
 - **How the workbench compensates.** The output at rack Time T shows workbench time T minus the latency. When the rack reports its count (and on every `/fx/sync`) the network
   sends `/fx/latency <seconds>`; the workbench then reports `/fx/time` as the playhead plus that many seconds, immediately and from then on, and forgets it on reconnect.
   A latency outside 0 to 60 s is ignored. A rack with no latency sends 0, which clears what an earlier rack on the same link declared (a patch replaced without reconnecting).
+- **Sidechain.** A look-ahead processor resolves at its own clock, so it reads the sidechain level delayed by the same look-ahead (`dry_control`), not the one arriving now.
 - **What a processor does not target.** A signal a look-ahead processor does not process (the voice of a picture-only Reverse, the picture of a voice-only Stutter) is delayed by the same latency on its wet branch, so it leaves the processor as late as the one that is processed.
 - **Stutter's frozen endpoint.** The repeat cache stops at the end of the captured window and holds what it held; the resolver remembers that endpoint (per processor) so a Window edited or automated during the hold does not move it. A repeat that reaches past what was captured shows the last captured frame.
 - **What the resolver names.** For Reverse, `depth` (seconds behind the input's live edge) and `shift`; for Stutter, `pick`, `depth` and `record`. The tests compare them with the engine's source time over grids of

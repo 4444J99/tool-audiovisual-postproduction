@@ -436,7 +436,9 @@ def tick(rack):
     for node in contract['nodes']:
         comp = rack.op(node['comp'])
         bases[node['id']] = base_values(node, lambda par, comp=comp: getattr(comp.par, par).eval())
-        channel = comp.op('in_control')
+        # behind a look-ahead buffer the parameters are evaluated at the processor's own clock, so the sidechain level that goes with them is the
+        # one delayed by the same look-ahead (`dry_control`), not the one arriving now
+        channel = comp.op('dry_control') if node['resolve'].get('lookahead', 0.0) > 0 else comp.op('in_control')
         controls[node['id']] = float(channel[0].eval()) if channel is not None and channel.numChans else 0.0
     resolved = resolve_rack(contract, bases, time, controls, _HOLD.setdefault(rack.path, {}))
     for node in contract['nodes']:

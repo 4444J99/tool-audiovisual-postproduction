@@ -15,7 +15,7 @@
  * `expr(template)` turns a template into {expr, resolved, rack, siblings} so the validator can check that every row,
  * rack parameter and sibling the expression reads exists.
  */
-import {HISTORY, cacheFrames} from './latency.mjs';
+import {HISTORY, cacheSizeText, cacheIndexText} from './latency.mjs';
 
 /** Rows every processor's `resolved` table can carry besides `param.<key>`: `epoch` (Feedback), and for a processor behind a
  *  look-ahead buffer `clock` (its own time) plus the derived reads of Reverse (`depth`, `shift`) and Stutter (`pick`, `depth`, `record`). */
@@ -204,10 +204,10 @@ function freeze(add, ctx = {}) {
  * it needs a per-sample read of a history buffer that this version does not build.
  */
 function reverse(add, ctx) {
-  const frames = cacheFrames(HISTORY.reverse(ctx.lookahead));
+  const history = HISTORY.reverse(ctx.lookahead);
   const picture = () => {
-    add('rv_cache', 'cacheTOP', {inputs: ['in_picture'], pars: {cachesize: frames, active: 1}});
-    add('rv_frame', 'cacheselectTOP', {pars: {cachetop: {ref: 'rv_cache'}, index: expr(`-min(${frames - 1}, int(round({depth} * project.cookRate)))`)}});
+    add('rv_cache', 'cacheTOP', {inputs: ['in_picture'], pars: {cachesize: expr(cacheSizeText(history)), active: 1}});
+    add('rv_frame', 'cacheselectTOP', {pars: {cachetop: {ref: 'rv_cache'}, index: expr(cacheIndexText('{depth}', history))}});
     add('rv_move', 'transformTOP', {inputs: ['rv_frame'], pars: {tx: expr('{shift}'), extend: 'zero'}});
     return 'rv_move';
   };
@@ -225,12 +225,12 @@ function reverse(add, ctx) {
  * The voice is delayed only (as in Reverse).
  */
 function stutter(add, ctx) {
-  const live = cacheFrames(ctx.lookahead), held = cacheFrames(HISTORY.stutter());
+  const L = ctx.lookahead, held = HISTORY.stutter();
   const picture = () => {
-    add('st_live_cache', 'cacheTOP', {inputs: ['in_picture'], pars: {cachesize: live, active: 1}});
-    add('st_live', 'cacheselectTOP', {pars: {cachetop: {ref: 'st_live_cache'}, index: expr(`-min(${live - 1}, int(round(${ctx.lookahead} * project.cookRate)))`)}});
-    add('st_cache', 'cacheTOP', {inputs: ['in_picture'], pars: {cachesize: held, active: expr('int({record})')}});
-    add('st_frame', 'cacheselectTOP', {pars: {cachetop: {ref: 'st_cache'}, index: expr(`-min(${held - 1}, int(round({depth} * project.cookRate)))`)}});
+    add('st_live_cache', 'cacheTOP', {inputs: ['in_picture'], pars: {cachesize: expr(cacheSizeText(L)), active: 1}});
+    add('st_live', 'cacheselectTOP', {pars: {cachetop: {ref: 'st_live_cache'}, index: expr(cacheIndexText(L, L))}});
+    add('st_cache', 'cacheTOP', {inputs: ['in_picture'], pars: {cachesize: expr(cacheSizeText(held)), active: expr('int({record})')}});
+    add('st_frame', 'cacheselectTOP', {pars: {cachetop: {ref: 'st_cache'}, index: expr(cacheIndexText('{depth}', held))}});
     add('st_blank', 'constantTOP', {pars: {colorr: 0, colorg: 0, colorb: 0, alpha: 0}});
     add('st_pick', 'switchTOP', {inputs: ['st_live', 'st_frame', 'st_blank'], pars: {index: expr('int({pick})')}});
     return 'st_pick';

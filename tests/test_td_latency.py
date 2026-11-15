@@ -280,7 +280,7 @@ class LatencyPlanTests(unittest.TestCase):
         """The generated expressions read the cache at depth * cookRate frames, bounded by the cache."""
         spec = spec_of(fixture("demo-reverse.json"))
         by_name = {o["name"]: o for o in spec["operators"] if o["parent"] == "fx_fx_1"}
-        frames = by_name["rv_cache"]["pars"]["cachesize"]
+        frames = evaluate(by_name["rv_cache"]["pars"]["cachesize"]["expr"], {})
         self.assertEqual(frames, 302)   # 5 s of history (2.5 s look-ahead + 2.5 s span) at 60 fps, plus two
         for depth in (0.0, 0.5, 2.5, 5.0, 9.0):
             rows = rows_for(None, {})
@@ -306,6 +306,101 @@ class LatencyPlanTests(unittest.TestCase):
         self.assertEqual(evaluate(by_name["st_cache"]["pars"]["active"]["expr"], rows), 0)
         self.assertEqual(evaluate(by_name["st_live"]["pars"]["index"]["expr"], {}), -60)   # one second of look-ahead at 60 fps
         self.assertEqual(spec["contract"]["latency"]["seconds"], 1.0)
+
+
+class CookRateTests(unittest.TestCase):
+    """Codex on #157: the caches are sized from the project's cook rate, the same rate the read indices use."""
+    def test_every_cache_holds_the_delay_its_reads_ask_for_at_any_cook_rate(self):
+        import tests.test_td_effects as effects
+        stutter = fixture("demo-stutter.json")
+        reverse = fixture("demo-reverse.json")
+        checked = 0
+        original = effects.Project.cookRate
+        try:
+            for rate in (24.0, 30.0, 60.0, 120.0, 240.0):
+                effects.Project.cookRate = rate
+                for patch in (stutter, reverse):
+                    spec = spec_of(patch)
+                    by_path = {o["path"]: o for o in spec["operators"]}
+                    for path, operator in by_path.items():
+                        if operator["type"] == "cacheselectTOP" and "cachetop" in operator["pars"]:
+                            cache = by_path[operator["pars"]["cachetop"]["ref"]]
+                            size = evaluate(cache["pars"]["cachesize"]["expr"], {})
+                            for depth in (0.0, 0.3, 1.0, 2.5, 5.0):
+                                rows = rows_for(None, {})
+                                rows.update({"depth": depth, "shift": 0.0})
+                                index = evaluate(operator["pars"]["index"]["expr"], rows)
+                                self.assertLessEqual(-index, size - 1, (rate, path, depth))
+                                checked += 1
+        finally:
+            effects.Project.cookRate = original
+        self.assertGreater(checked, 50)
+
+    def test_the_stutter_live_picture_is_delayed_by_the_full_latency_at_120_fps(self):
+        import tests.test_td_effects as effects
+        spec = spec_of(fixture("demo-stutter.json"))
+        by_name = {o["name"]: o for o in spec["operators"] if o["parent"] == "fx_fx_1"}
+        original = effects.Project.cookRate
+        effects.Project.cookRate = 120.0
+        try:
+            self.assertEqual(evaluate(by_name["st_live"]["pars"]["index"]["expr"], {}), -120, "one second at 120 frames per second, not the 61 a 60 fps cache would allow")
+            self.assertGreaterEqual(evaluate(by_name["st_live_cache"]["pars"]["cachesize"]["expr"], {}), 121)
+        finally:
+            effects.Project.cookRate = original
+
+
+class SidechainClockTests(unittest.TestCase):
+    """Codex on #157: a look-ahead processor resolves at its own clock, so it must read the sidechain level delayed with it."""
+    class Par:
+        def __init__(self, value):
+            self.value = value
+
+        def eval(self):
+            return self.value
+
+    class Chan(list):
+        numChans = 1
+
+        def __init__(self, value):
+            super().__init__([SidechainClockTests.Par(value)])
+
+    class Table:
+        def __init__(self):
+            self.rows = []
+
+        def clear(self):
+            self.rows = []
+
+        def appendRow(self, row):
+            self.rows.append(row)
+
+    class Comp:
+        def __init__(self, pars, now, delayed):
+            outer = SidechainClockTests
+            self.par = type("Ns", (), {key: outer.Par(value) for key, value in pars.items()})()
+            self.table, self.channels = outer.Table(), {"in_control": outer.Chan(now), "dry_control": outer.Chan(delayed)}
+
+        def op(self, name):
+            return self.table if name == "resolved" else self.channels.get(name)
+
+    class Dat:
+        def __init__(self, text):
+            self.text = text
+
+    def test_the_resolver_reads_the_delayed_control_for_a_lookahead_processor_and_the_live_one_otherwise(self):
+        spec = spec_of(fixture("demo-reverse.json"))
+        contract = spec["contract"]
+        node = next(n for n in contract["nodes"] if n["id"] == "fx-1")
+        node["resolve"].update({"modulation": {"parameter": "intensity", "mode": "add", "amount": 0.5}, "automation": [], "events": [], "macro": []})
+        pars = {control["par"]: control["value"] for control in node["controls"]}
+        pars.update({"Intensity": 0.0, "Wet": 1.0, "Bypass": 0, "Solo": 0})
+        comp = self.Comp(pars, now=1.0, delayed=0.2)
+        rack = type("Rack", (), {"path": "/rack", "par": type("Ns", (), {"Time": self.Par(5.0)})(),
+                                 "op": lambda self_, name: self.Dat(json.dumps(contract)) if name == "td_contract" else comp})()
+        resolve.reset()
+        out = resolve.tick(rack)
+        self.assertAlmostEqual(out["fx-1"]["intensity"], 0.1, msg="0.5 x the delayed level 0.2, not the live 1.0")
+        self.assertEqual(out["fx-1"]["clock"], 2.5)
 
 
 class Backend:

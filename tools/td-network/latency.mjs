@@ -23,8 +23,6 @@
 import {CATALOG_BY_TYPE} from '../../web/fx/catalog.mjs';
 
 export const DEFAULT_MAX_LATENCY = 2.5;
-/** Cache frames are counted at this many per second; at a lower cook rate the same frames cover a longer time. */
-export const CACHE_FPS = 60;
 const STRUCTURAL = new Set(['source', 'mix', 'output']);
 const range = (type, key) => CATALOG_BY_TYPE[type].params.find(item => item.key === key);
 
@@ -84,5 +82,11 @@ export function planLatency(patch, maxLatency = DEFAULT_MAX_LATENCY) {
   return {nodes: lags, wires, seconds: output ? lags.get(output.id).lag : 0};
 }
 
-/** Frames a delay of `seconds` takes in a cache counted at CACHE_FPS, with room for the frame being cached. */
-export const cacheFrames = seconds => Math.max(2, Math.ceil(seconds * CACHE_FPS) + 2);
+/**
+ * The frames a Cache TOP needs to hold `seconds`: an expression of the project's cook rate, so the cache always covers the delay
+ * the read indices ask for (`round(seconds * project.cookRate)` frames back) however fast the project cooks. Two frames are added
+ * for the frame being cached.
+ */
+export const cacheSizeText = seconds => `max(2, int(math.ceil(${seconds} * project.cookRate)) + 2)`;
+/** The read index for a delay of `seconds` into a cache sized by cacheSizeText(cacheSeconds): negative, never past the oldest frame. */
+export const cacheIndexText = (seconds, cacheSeconds) => `-min(int(math.ceil(${cacheSeconds} * project.cookRate)) + 1, int(round(${seconds} * project.cookRate)))`;

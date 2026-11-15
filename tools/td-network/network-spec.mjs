@@ -21,7 +21,7 @@ import {describeControls} from '../../web/fx/controller-map.mjs';
 import {validatePatch} from '../../web/fx/core.mjs';
 import {OSC_ROOT, ECHO_TOLERANCE, RULE_KINDS, encodeSegment, nodeAddress, ruleAddress} from '../../web/fx/osc-control.mjs';
 import {EFFECTS, expr} from './effects.mjs';
-import {planLatency, cacheFrames, LIMITED, LOOKAHEAD, DEFAULT_MAX_LATENCY, CACHE_FPS} from './latency.mjs';
+import {planLatency, cacheSizeText, cacheIndexText, LIMITED, LOOKAHEAD, DEFAULT_MAX_LATENCY} from './latency.mjs';
 import {VOCABULARY, PORT_FAMILY, SELECT, NULL, CUSTOM_PAR_NAME, OPERATOR_NAME} from './vocabulary.mjs';
 
 export const SPEC_SCHEMA = 'amps.td-network.v1';
@@ -151,9 +151,8 @@ export function buildNetworkSpec(patch, options = {}) {
   /** Delay a wire by `seconds` so it meets wires of greater lag (picture: a cache read back; audio and control: a Delay CHOP). Text has no delay. */
   const alignWire = (comp, name, tail, family, seconds, warn, label) => {
     if (family === 'TOP') {
-      const frames = cacheFrames(seconds);
-      add(comp, `${name}_cache`, 'cacheTOP', {inputs: [tail], pars: {cachesize: frames, active: 1}});
-      return add(comp, name, 'cacheselectTOP', {pars: {cachetop: {ref: `${comp}/${name}_cache`}, index: expr(`-min(${frames - 1}, int(round(${seconds} * project.cookRate)))`)}}).name;
+      add(comp, `${name}_cache`, 'cacheTOP', {inputs: [tail], pars: {cachesize: expr(cacheSizeText(seconds)), active: 1}});
+      return add(comp, name, 'cacheselectTOP', {pars: {cachetop: {ref: `${comp}/${name}_cache`}, index: expr(cacheIndexText(seconds, seconds))}}).name;
     }
     if (family === 'CHOP') return add(comp, name, 'delayCHOP', {inputs: [tail], pars: {delay: seconds}}).name;
     warn.push(`${label}: a text wire is not delayed, so it runs ${seconds} s ahead of the signals it meets.`);
@@ -300,7 +299,7 @@ export function buildNetworkSpec(patch, options = {}) {
   const contract = {
     schema: CONTRACT_SCHEMA, root: `/${OSC_ROOT}`, echoTolerance: ECHO_TOLERANCE, pictureFps, rack: rackContract,
     latency: {
-      seconds: fixed(plan.seconds), maxLatency, cacheFps: CACHE_FPS, address: `/${OSC_ROOT}/latency`,
+      seconds: fixed(plan.seconds), maxLatency, address: `/${OSC_ROOT}/latency`,
       compensation: 'the output at rack Time T shows workbench time T - seconds, so the rack reports its playhead to the network as the playhead + seconds',
       nodes: [...plan.nodes].map(([id, entry]) => ({id, lagIn: fixed(entry.lagIn), lookahead: fixed(entry.lookahead), lag: fixed(entry.lag)})).filter(entry => entry.lag > 0),
     },
