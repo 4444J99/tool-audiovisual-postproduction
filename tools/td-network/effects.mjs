@@ -242,7 +242,6 @@ function stutter(add, ctx) {
   return {picture, audio, audioAlignedOnly: true};
 }
 
-||||||| parent of 034bf35 (feat(td): Routing picture chain checked against the workbench's own draw calls)
 /** The most trace copies Routing draws (the catalog's maximum), and how far apart in source time they read (visual-engine.mjs: t - k x 0.085). */
 const MAX_COPIES = 8;
 const COPY_LAG = 0.085;
