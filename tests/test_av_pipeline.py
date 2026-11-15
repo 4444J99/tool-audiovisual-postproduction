@@ -253,9 +253,27 @@ class ChainTests(unittest.TestCase):
         manifest["stages"] = [s for s in manifest["stages"] if s["stage"] != "burnin"]
         manifest["chain_sha256"] = pc.chain_hash(manifest)
         (target / "pipeline-manifest.json").write_text(json.dumps(manifest))
-        self.assertEqual(pc.verify_chain(target), [], "a shorter manifest is internally consistent")
-        self.assertEqual([s["stage"] for s in manifest["stages"]][-1], "captions")
-        self.assertNotEqual([s["stage"] for s in manifest["stages"]], list(pc.STAGES))
+        problems = pc.verify_chain(target)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("missing burnin", problems[0])
+
+    def test_a_chain_with_the_optional_blender_stage_still_names_every_required_stage(self):
+        manifest = json.loads((self.out / "pipeline-manifest.json").read_text())
+        manifest["stages"].append({"stage": "blender", "inputs": {}, "outputs": {}})
+        manifest["chain_sha256"] = pc.chain_hash(manifest)
+        target = self.copy()
+        (target / "pipeline-manifest.json").write_text(json.dumps(manifest))
+        self.assertEqual([p for p in pc.verify_chain(target) if "stages are" in p], [])
+
+    def test_crlf_caption_files_hash_as_their_bytes_and_a_line_ending_change_is_caught(self):
+        target = self.copy()
+        lf = (target / "captions" / "captions.srt").read_bytes()
+        crlf = lf.replace(b"\n", b"\r\n")
+        self.reseal(target, "captions/captions.srt", crlf)
+        report = json.loads((target / "captions" / "burnin-report.json").read_text())
+        self.assertEqual(report["params"]["srt_sha256"], pc.sha256_bytes(lf))
+        problems = pc.cross_checks(target)
+        self.assertTrue(any("caption file is not the one the frames were burned from" in p for p in problems), problems)
 
     def test_declared_spec_must_match_the_recorded_one(self):
         self.assertEqual(pc.cross_checks(self.out, "ebu_r128"), [])

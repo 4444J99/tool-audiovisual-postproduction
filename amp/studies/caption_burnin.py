@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
 import numpy as np
@@ -267,6 +268,11 @@ def chain_links(params: Mapping[str, Any], frame_digests: Sequence[str]) -> list
     return links
 
 
+def read_captions(path: Any) -> str:
+    """The caption file as text, decoded from its *bytes* (no newline translation), so ``sha256(text)`` is the file's SHA-256."""
+    return Path(path).read_bytes().decode("utf-8")
+
+
 def burn(srt_text: str, fps: Any, frames: int, geometry: Mapping[str, Any] | None = None,
          segments: Sequence[Mapping[str, Any]] | None = None) -> tuple[bytes, dict[str, Any]]:
     """Burn the cues of ``srt_text`` (SRT or WebVTT) into ``frames`` frames; returns (frame bytes, report)."""
@@ -339,10 +345,10 @@ def verify(payload: bytes, report: Mapping[str, Any], srt_text: str) -> list[str
         shown = sorted({f for c in cues for f in range(c["start"], c["end"])})
         if report["captioned_frames"] != len(shown):
             problems.append("captioned frame count does not match the caption file")
-    except (KeyError, TypeError, ValueError, IndexError, AttributeError) as error:
-        problems.append(f"burn-in report cannot be checked ({type(error).__name__}: {error})")
     except cap.CaptionError as error:
         problems.append(f"captions: {error}")
+    except (KeyError, TypeError, ValueError, IndexError, AttributeError) as error:
+        problems.append(f"burn-in report cannot be checked ({type(error).__name__}: {error})")
     return problems
 
 

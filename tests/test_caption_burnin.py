@@ -230,6 +230,32 @@ class TamperTests(unittest.TestCase):
         self.assertTrue(cb.verify(self.payload, {"params": {"schema": "other"}}, SRT)[0].startswith("burn-in report: schema"))
 
 
+class FileBytesTests(unittest.TestCase):
+    def test_the_recorded_hash_is_the_hash_of_the_file_bytes_even_with_crlf(self):
+        crlf = SRT.replace("\n", "\r\n").encode("utf-8")
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "c.srt"
+            path.write_bytes(crlf)
+            text = cb.read_captions(path)
+            payload, report = cb.burn(text, FPS, FRAMES, GEOMETRY)
+            self.assertEqual(report["params"]["srt_sha256"], cb.sha256_bytes(crlf))
+            self.assertEqual(payload, cb.burn(SRT, FPS, FRAMES, GEOMETRY)[0], "the same cues give the same frames")
+            self.assertEqual(cb.verify(payload, report, text), [])
+            path.write_bytes(SRT.encode("utf-8"))                    # the line endings change, the cues do not
+            problems = cb.verify(payload, report, cb.read_captions(path))
+            self.assertTrue(any("hash differs" in p for p in problems), problems)
+
+    def test_the_cli_hashes_the_bytes(self):
+        crlf = SRT.replace("\n", "\r\n").encode("utf-8")
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "c.srt").write_bytes(crlf)
+            ran = cli("burn", "--captions", str(Path(d) / "c.srt"), "--output", str(Path(d) / "o"), "--frames", "120", "--width", "240", "--height", "48")
+            self.assertEqual(ran.returncode, 0, ran.stdout)
+            report = json.loads((Path(d) / "o" / "burnin-report.json").read_text())
+            self.assertEqual(report["params"]["srt_sha256"], cb.sha256_bytes(crlf))
+            self.assertEqual(cli("verify", "--captions", str(Path(d) / "c.srt"), "--output", str(Path(d) / "o")).returncode, 0)
+
+
 class RefusalTests(unittest.TestCase):
     def expect(self, text, needle, frames=FRAMES, geometry=GEOMETRY, fps=FPS):
         with self.assertRaises(cb.BurnError) as raised:

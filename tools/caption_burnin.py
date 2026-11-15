@@ -59,7 +59,7 @@ def preview(out, report):
 
 
 def burn_to(captions_path, out, fps, frames, geometry, with_preview):
-    text = Path(captions_path).read_text(encoding="utf-8")
+    text = cb.read_captions(captions_path)
     payload, report = cb.burn(text, fps, frames, geometry)
     out.mkdir(parents=True, exist_ok=True)
     (out / cb.FRAMES_FILE).write_bytes(payload)
@@ -117,7 +117,7 @@ def main(argv=None):
             return 0
         if not args.captions:
             parser.error("verify needs --captions")
-        problems = cb.verify(payload, report, Path(args.captions).read_text(encoding="utf-8"))
+        problems = cb.verify(payload, report, cb.read_captions(args.captions))
         if problems:
             emit({"errors": problems})
             return 2
