@@ -145,6 +145,19 @@ class LoudnessCliTests(unittest.TestCase):
             self.assertAlmostEqual(summary["after_lufs"], -23.0, delta=0.05)
             self.assertAlmostEqual(json.loads(run("measure", "--input", f"{d}/o.wav").stdout)["integrated_lufs"], -23.0, delta=0.05)
 
+    def test_written_file_honours_the_requested_ceiling_after_integer_rounding(self):
+        with tempfile.TemporaryDirectory() as d:
+            tone(f"{d}/q.wav", -64.0, 10)              # about 20 LSB: a gain to -50 dBTP lands between two integers and rounds up (-49.96 without the back-off)
+            out = f"{d}/o.wav"
+            result = run("normalize", "--input", f"{d}/q.wav", "--output", out, "--target-lufs", "-23", "--ceiling-dbtp", "-50",
+                         "--on-ceiling", "cap", "--report", f"{d}/r.json")
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertLessEqual(json.loads(run("measure", "--input", out).stdout)["true_peak_dbtp"], -50.0)
+            report = json.loads(Path(f"{d}/r.json").read_text())
+            self.assertLessEqual(report["after"]["true_peak_dbtp"], -50.0)
+            self.assertEqual(report["problems"], [])
+            self.assertEqual(report["output_sha256"], sha(out))
+
     def test_silent_measure_prints_strict_json(self):
         with tempfile.TemporaryDirectory() as d:
             wavfile.write(f"{d}/s.wav", SR, np.zeros((SR * 2, 2), dtype=np.int16))

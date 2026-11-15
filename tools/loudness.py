@@ -138,16 +138,25 @@ def main(argv=None):
             write_report(args.report, report)
             emit({"problems": report["problems"]})
             return 2
-        scaled = ld.apply_gain(audio, plan["gain_db"])
-        if kind != np.float32 and float(np.abs(scaled).max()) >= 1.0:
-            report["problems"] = ["the gain would clip the sample format; nothing was written"]
-            write_report(args.report, report)
-            emit({"problems": report["problems"]})
-            return 2
-        write_wav(args.output, sr, scaled, kind)
-        after = ld.measure(read_wav(args.output)[1], sr, args.layout)
+        gain = plan["gain_db"]
+        for attempt in range(1, 5):
+            scaled = ld.apply_gain(audio, gain)
+            if kind != np.float32 and float(np.abs(scaled).max()) >= 1.0:
+                report["problems"] = ["the gain would clip the sample format; nothing was written"]
+                write_report(args.report, report)
+                emit({"problems": report["problems"]})
+                return 2
+            write_wav(args.output, sr, scaled, kind)
+            after = ld.measure(read_wav(args.output)[1], sr, args.layout)
+            excess = after["true_peak_dbtp"] - ceiling if ceiling is not None else 0.0
+            if excess <= 1e-9:
+                break
+            gain -= excess + 0.002        # integer rounding put a sample over the ceiling: back off and rewrite
+        plan["gain_db"], plan["write_attempts"] = round(gain, 4), attempt
         report.update(output=args.output, output_sha256=sha256_file(args.output), after=after)
         problems = ld.check(after, spec) if spec else ([] if plan.get("capped") else ld.check(after, {"integrated_lufs": {"target": target, "tolerance": 0.1}}))
+        if ceiling is not None and after["true_peak_dbtp"] > ceiling + 1e-9 and not any("true peak" in p for p in problems):
+            problems.append(f"true peak {after['true_peak_dbtp']} dBTP is over the {ceiling} dBTP ceiling after writing")
         report["problems"] = problems
         write_report(args.report, report)
         emit({"gain_db": plan["gain_db"], "capped": plan.get("capped", False), "shortfall_lu": plan.get("shortfall_lu", 0.0), "before_lufs": measurement["integrated_lufs"],
