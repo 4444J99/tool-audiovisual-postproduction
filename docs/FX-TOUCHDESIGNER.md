@@ -85,6 +85,7 @@ From the rack (TouchDesigner OSC In), sent when the link opens, on `/fx/sync`, a
 | `/fx/selected`, `/fx/selected/type` | selected id and type, strings |
 | `/fx/transport/play`, `/record`, `/loop` | 0 or 1 |
 | `/fx/time` | playhead seconds, at most about 25 messages per second |
+| `/fx/node/<id>/released/...`, `/event/...`, `/lane/...`, `/macro/...` | rule changes: see Rule sync below |
 
 `<id>` and `<key>` are percent-encoded for anything outside `A-Z a-z 0-9 _ . -` (a space becomes `%20`, a slash `%2F`),
 so no address segment holds a character OSC reserves. Unknown addresses, wrong argument types and ids that do not exist
@@ -165,13 +166,42 @@ resolver that moves any value fails there. The sidechain level is produced insid
 and sends it down the control wires; the Lag CHOP's two values are attack and release as that operator defines them, and
 its default unit is assumed to be seconds. The envelope is computed with a per-sample Python expression, which costs CPU at audio rates. Only the first channel is read.
 
-The rules in the contract (automation, events, macros) are a snapshot of the patch the network was generated from. Editing
-a control by hand in TouchDesigner removes that control's rules in the network exactly as the workbench's `setParameter`
-removes them, because the edit is sent to the rack, which does it there. The reverse is not mirrored: editing an automated
-control in the workbench, or recording events while the network runs, does not change the network's rules, so regenerate
-the network after changing a patch's rules (the rack reports evaluated values at the playhead, which cannot tell a hand edit
-from playing automation). Editing a base parameter in TouchDesigner never sends the resolved value back
-over OSC: only edits made to the custom parameters are exchanged.
+**Rule sync (the workbench's automation, events and macros reach the network).** The rules in the contract (automation
+lanes, recorded events, macro mappings) are the network's copy of the patch's rules, and the workbench keeps it
+current. Evaluated values at the playhead cannot tell a hand edit from playing automation, so the rack reports rule
+changes explicitly, after the control values, on addresses the contract lists for every control (`rules` in each
+control entry):
+
+| Address (from the rack) | Arguments | Meaning |
+|---|---|---|
+| `/fx/node/<id>/released/<path>` | none | the control's events, automation lane and macro mapping are gone (`<path>` is `intensity`, `wet`, `bypass`, `solo` or `params/<key>`) |
+| `/fx/node/<id>/event/<path>` | time (s, 4 decimals), value (booleans as 0 / 1) | one recorded event: added, or its value replaced at that time |
+| `/fx/node/<id>/lane/<path>` | one JSON string `{interpolation, keyframes}` | the control's automation lane, replacing any lane it had |
+| `/fx/node/<id>/macro/params/<key>` | one JSON string `{min, max, curve}` | the processor parameter's macro mapping, replacing any mapping it had |
+
+A release drops *all* of a control's rules, so when only some vanished (Clear removes events but not lanes, a preset
+swaps a lane) the rack follows the release with the control's remaining rules. A processor the rack has not reported
+since the link opened (the first report, a reconnect, `/fx/sync`) is resynchronised whole: every control released,
+then every current rule sent, so a network generated from an older version of the patch converges on connect. After
+that only differences are sent, so an unchanged rack is silent. The page computes the differences from the patch itself
+(`web/fx/parameter-rules.mjs`, `processorRules`), the same code path the parameter setter uses (`applyParameterEdit`),
+so recording, a hand edit, the automation form, Clear and a preset restore are all mirrored. In the network,
+`td_osc` hands a rule message to `td_resolve.apply`, which edits the rules the next frame resolves from; a malformed
+message is refused and changes nothing. A hand edit made in TouchDesigner is also applied to the workbench (which then
+reports the release back, a no-op), and an edit made while the workbench records becomes an event there and arrives
+here as one.
+
+`tests/test_td_rulesync.py` checks the whole path: `tools/td-network/oracle-rulesync.mjs` edits a stressed patch the way
+the workbench does (a hand edit of an automated control, of a macro-driven parameter and of a recorded control; recording
+with a merged re-edit; the automation form; Clear; a preset restore), collects the rack's real feedback after every
+edit, and samples `evaluatedNode`; the generated Python module receives those messages from a network generated
+before the patch had its rules, and its resolver must return the same values after every step.
+
+Not mirrored: sidechain modulation and clip scope (set by editing the graph, not by a control edit; regenerate the network
+after changing them), event times beyond 4 decimals (a sub-millisecond rounding), and a lane longer than 32,000
+characters (about 900 keyframes), which does not fit one bridge frame: the control is released in the network and stays so.
+Editing a base parameter in TouchDesigner never sends the resolved value back over OSC: only edits made to the custom
+parameters are exchanged.
 
 **Effects (five of thirteen).** Between `in_<port>` and `proc_<port>` a processor now holds the effect chain
 (`tools/td-network/effects.mjs`). Every effect parameter is an expression over the processor's resolved values, so

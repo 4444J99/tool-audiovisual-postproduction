@@ -189,6 +189,60 @@ def release_rules(spec, path):
     return before != (len(spec['events']), len(spec['automation']), len(spec['macro']))
 
 
+EVENT_TIME_DECIMALS = 4
+LANE_INTERPOLATIONS = ('linear', 'step')
+MACRO_CURVES = ('linear', 'ease-in', 'ease-out', 'smoothstep')
+
+
+def apply_rule(spec, kind, path, payload):
+    """Mirror one rule change the workbench reported (web/fx/osc-control.mjs, OscFeedback) onto a node's `resolve` block.
+
+    kind 'released': drop the control's events, lane and macro (payload ignored).
+    kind 'event':    payload (time, value): insert the event, or replace the value of the event at that time; a later
+                     entry wins a tie, as in the workbench.
+    kind 'lane':     payload {interpolation, keyframes}: replace the control's lane.
+    kind 'macro':    payload {min, max, curve}: replace the processor parameter's mapping.
+    Returns True when the block changed; a malformed payload changes nothing and returns False."""
+    if kind == 'released':
+        return release_rules(spec, path)
+    if kind == 'event':
+        if not isinstance(payload, (list, tuple)) or len(payload) != 2 or not all(_finite(v) for v in payload):
+            return False
+        time, value = round(float(payload[0]), EVENT_TIME_DECIMALS), payload[1]
+        events = spec['events']
+        for event in events:
+            if event['parameter'] == path and round(event['time'], EVENT_TIME_DECIMALS) == time:
+                event['value'] = value
+                return True
+        index = len(events)
+        while index > 0 and events[index - 1]['time'] > time:
+            index -= 1
+        events.insert(index, {'time': time, 'parameter': path, 'value': value})
+        return True
+    if kind == 'lane':
+        if not isinstance(payload, dict):
+            return False
+        frames = payload.get('keyframes')
+        if payload.get('interpolation') not in LANE_INTERPOLATIONS or not isinstance(frames, list) or not frames:
+            return False
+        if not all(isinstance(f, dict) and _finite(f.get('time')) and _finite(f.get('value')) for f in frames):
+            return False
+        spec['automation'] = [lane for lane in spec['automation'] if lane['parameter'] != path]
+        spec['automation'].append({'parameter': path, 'interpolation': payload['interpolation'],
+                                   'keyframes': [{'time': f['time'], 'value': f['value']} for f in frames]})
+        return True
+    if kind == 'macro':
+        if not path.startswith('params.') or not isinstance(payload, dict) or payload.get('curve') not in MACRO_CURVES:
+            return False
+        if not _finite(payload.get('min')) or not _finite(payload.get('max')):
+            return False
+        key = path[7:]
+        spec['macro'] = [m for m in spec['macro'] if m['parameter'] != key]
+        spec['macro'].append({'parameter': key, 'min': payload['min'], 'max': payload['max'], 'curve': payload['curve']})
+        return True
+    return False
+
+
 # --- TouchDesigner glue ----------------------------------------------------------------------------
 _LAST = {}
 _RULES = {}   # rack path -> {processor id: the node's resolve block, edited live}
@@ -211,6 +265,19 @@ def release(rack, comp, path):
     for node in contract['nodes']:
         if node['comp'] == comp:
             changed = release_rules(node['resolve'], path)
+            if changed:
+                _LAST.pop((rack.path, comp), None)
+            return changed
+    return False
+
+
+def apply(rack, comp, kind, path, payload):
+    """The workbench reported a rule change for one control of one processor (OSC, `td_osc`): mirror it. Returns True
+    when the processor's rules changed."""
+    contract = _contract_rules(rack)
+    for node in contract['nodes']:
+        if node['comp'] == comp:
+            changed = apply_rule(node['resolve'], kind, path, payload)
             if changed:
                 _LAST.pop((rack.path, comp), None)
             return changed
