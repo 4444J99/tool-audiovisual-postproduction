@@ -1,6 +1,7 @@
 """Validate a set spec and build its Blender scene.
 
-    python tools/set_scene.py demo-spec out/spec.json
+    python tools/set_scene.py demo-spec out/spec.json [--version 1.1]
+    python tools/set_scene.py upgrade --spec v1.json out/v1.1.json   # declare v1.1 (every v1 spec is valid v1.1)
     python tools/set_scene.py validate --spec set.json
     python tools/set_scene.py graph --spec set.json            # scene graph summary, no Blender
     python tools/set_scene.py shot-set --spec set.json         # the `set` block for a shot plan
@@ -60,6 +61,29 @@ def compare(expected, observed):
             problems.append(f"{row['name']}: dimensions expected {row['dimensions']}, Blender measures {seen['dimensions']}")
         if row["materials"] != seen["materials"]:
             problems.append(f"{row['name']}: materials expected {row['materials']}, Blender holds {seen['materials']}")
+        problems += _compare_placement(row, seen)
+    return problems
+
+
+def _compare_placement(row, seen):
+    """World bounds (rotation, axis and location all applied), volume and closedness of one mesh."""
+    problems = []
+    bounds = row.get("world_bounds")
+    if bounds is not None:
+        held = seen.get("world_bounds")
+        if not held:
+            problems.append(f"{row['name']}: world bounds were not measured in Blender")
+        else:
+            for edge in ("min", "max"):
+                if any(abs(a - b) > 1e-4 for a, b in zip(bounds[edge], held[edge])) or len(held[edge]) != 3:
+                    problems.append(f"{row['name']}: world {edge} expected {bounds[edge]}, Blender holds {held[edge]}")
+    if "volume" in row:
+        if "volume" not in seen:
+            problems.append(f"{row['name']}: volume was not measured in Blender")
+        elif abs(row["volume"] - seen["volume"]) > 1e-4 * max(1.0, abs(row["volume"])):
+            problems.append(f"{row['name']}: volume expected {row['volume']}, Blender measures {seen['volume']}")
+        if seen.get("watertight") is False:
+            problems.append(f"{row['name']}: Blender reports open or non-manifold edges")
     return problems
 
 
@@ -75,6 +99,10 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     demo = sub.add_parser("demo-spec")
     demo.add_argument("output")
+    demo.add_argument("--version", choices=("1", "1.1"), default="1")
+    upgrade = sub.add_parser("upgrade")
+    upgrade.add_argument("--spec", required=True)
+    upgrade.add_argument("output")
     for name in ("validate", "graph", "shot-set", "build"):
         p = sub.add_parser(name)
         p.add_argument("--spec", required=True)
@@ -90,18 +118,29 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.command == "demo-spec":
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.output).write_text(json.dumps(set_spec.synthetic_spec(), indent=2, sort_keys=True) + "\n")
+        Path(args.output).write_text(json.dumps(set_spec.synthetic_spec(args.version), indent=2, sort_keys=True) + "\n")
         return 0
     spec, problem = load_spec(args.spec)
     if problem:
         print(json.dumps({"error": problem}))
         return 2
+    if args.command == "upgrade":
+        if not isinstance(spec, dict) or spec.get("schema") not in set_spec.SUPPORTED_SCHEMAS:
+            print(json.dumps({"errors": [f"spec: schema must be one of {', '.join(set_spec.SUPPORTED_SCHEMAS)}"]}))
+            return 2
+        spec = {**spec, "schema": set_spec.SCHEMA_V11}
     report = set_spec.validate_spec(spec)
     if report["errors"]:
-        print(json.dumps({"errors": report["errors"], "warnings": report["warnings"]}, indent=2))
+        print(json.dumps({"errors": report["errors"], "warnings": report["warnings"], "negotiation": set_spec.negotiate(spec)}, indent=2))
         return 2
+    if args.command == "upgrade":
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output).write_text(json.dumps(spec, indent=2, sort_keys=True) + "\n")
+        print(json.dumps({"ok": True, "schema": spec["schema"]}))
+        return 0
     if args.command == "validate":
-        print(json.dumps({"ok": True, "warnings": report["warnings"], "spec_sha256": set_spec.spec_hash(spec)}, indent=2))
+        print(json.dumps({"ok": True, "warnings": report["warnings"], "spec_sha256": set_spec.spec_hash(spec),
+                          "schema": spec["schema"], "required_schema": set_spec.required_schema(spec)}, indent=2))
         return 0
     if args.command == "graph":
         print(json.dumps(set_spec.graph_summary(set_spec.scene_graph(spec)), indent=2, sort_keys=True))

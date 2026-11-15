@@ -1,4 +1,5 @@
 import copy
+import math
 import unittest
 
 from amp.studies import set_spec as ss
@@ -350,5 +351,280 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertNotEqual(a["graph_sha256"], b["graph_sha256"])
 
 
+V1_GRAPH_HASH = "3b177162f029adcb70db815e45a9fc6c039946a909e72717a4390256e905f330"
+
+
+def spec11():
+    return ss.synthetic_spec("1.1")
+
+
+def element(s, eid):
+    return next(e for e in s["elements"] if e["id"] == eid)
+
+
+def mesh_of(s, eid):
+    return next(o for o in ss.scene_graph(s)["objects"] if o["name"] == eid)
+
+
+class VersionNegotiationTests(unittest.TestCase):
+    def test_a_v1_spec_still_builds_the_same_graph(self):
+        self.assertEqual(ss.scene_graph(spec())["graph_sha256"], V1_GRAPH_HASH)
+
+    def test_a_v1_spec_is_valid_when_redeclared_v1_1(self):
+        s = spec()
+        s["schema"] = ss.SCHEMA_V11
+        self.assertEqual(ss.validate_spec(s), {"errors": [], "warnings": []})
+        graph, base = ss.scene_graph(s), ss.scene_graph(spec())
+        self.assertEqual([o["mesh"] for o in graph["objects"] if o["type"] == "mesh"],
+                         [o["mesh"] for o in base["objects"] if o["type"] == "mesh"])
+
+    def test_the_v1_1_demo_is_valid_and_declares_what_it_needs(self):
+        s = spec11()
+        self.assertEqual(ss.validate_spec(s), {"errors": [], "warnings": []})
+        self.assertEqual(ss.required_schema(s), ss.SCHEMA_V11)
+        self.assertEqual(ss.required_schema(spec()), ss.SCHEMA_V1)
+        self.assertTrue(ss.negotiate(s)["ok"])
+
+    def test_v1_declaring_a_v1_1_feature_is_refused_with_the_feature_named(self):
+        s = spec11()
+        s["schema"] = ss.SCHEMA_V1
+        found = errors(s)
+        self.assertTrue(any("element rail: axis" in e and ss.SCHEMA_V11 in e for e in found), found)
+        self.assertTrue(any("element obelisk: kind 'cone'" in e for e in found), found)
+        self.assertFalse(ss.negotiate(s)["ok"])
+        with self.assertRaises(ss.SpecError):
+            ss.scene_graph(s)
+        with self.assertRaises(ss.SpecError):
+            ss.shot_plan_set(s)
+
+    def test_a_stray_axis_on_a_v1_spec_is_a_v1_1_feature(self):
+        s = spec()
+        s["elements"][2]["axis"] = "y"
+        self.assertTrue(any("axis" in e and ss.SCHEMA_V11 in e for e in errors(s)))
+
+    def test_unknown_schemas_list_the_supported_ones(self):
+        s = spec()
+        s["schema"] = "amps.set_spec.v2"
+        found = errors(s)
+        self.assertEqual(len(found), 1)
+        self.assertIn(ss.SCHEMA_V1, found[0])
+        self.assertIn(ss.SCHEMA_V11, found[0])
+        self.assertFalse(ss.negotiate(s)["ok"])
+
+    def test_negotiation_tolerates_malformed_specs(self):
+        for bad in ({}, {"schema": None}, {"schema": ss.SCHEMA_V11, "elements": "x"}, {"elements": [3, None]}):
+            self.assertFalse(ss.negotiate(bad)["ok"] and bad.get("schema") is None)
+        self.assertEqual(ss.v11_features({"elements": [3, None, {"id": "a", "kind": "box"}]}), [])
+
+
+class NewPrimitiveValidationTests(unittest.TestCase):
+    def test_axis_rules(self):
+        s = spec11()
+        element(s, "rail")["axis"] = "w"
+        self.assertTrue(any("axis must be one of x, y, z" in e for e in errors(s)))
+        s = spec11()
+        element(s, "steps")["axis"] = "x"                      # stairs have no axis
+        self.assertTrue(any("applies only to" in e for e in errors(s)))
+        s = spec11()
+        element(s, "finial")["axis"] = "x"                     # nor do spheres
+        self.assertTrue(any("applies only to" in e for e in errors(s)))
+
+    def test_sphere_cone_torus_stairs_shape_rules(self):
+        cases = [("finial", "radius", 0, "radius must be positive"), ("finial", "rings", 3, "rings must be an integer >= 4"),
+                 ("obelisk", "height", -1, "radius and height must be positive"), ("obelisk", "top_radius", -0.1, "top_radius"),
+                 ("obelisk", "segments", 4, "segments must be an integer >= 8"),
+                 ("hoop", "minor_radius", 1.2, "must be smaller than major_radius"), ("hoop", "major_radius", 0, "must be positive"),
+                 ("hoop", "tube_segments", 3, "tube_segments"), ("steps", "steps", 1, "steps must be an integer from 2"),
+                 ("steps", "steps", 201, "steps must be an integer from 2"), ("steps", "steps", 3.5, "steps must be an integer"),
+                 ("steps", "size", [1, 0, 1], "size must be [width, height, depth]")]
+        for eid, key, value, message in cases:
+            s = spec11()
+            element(s, eid)[key] = value
+            self.assertTrue(any(message in e for e in errors(s)), (eid, key, errors(s)))
+
+    def test_new_kinds_need_a_material_and_stay_inside_the_set(self):
+        s = spec11()
+        del element(s, "finial")["material"]
+        self.assertTrue(any("material is required" in e for e in errors(s)))
+        s = spec11()
+        element(s, "rail")["y"] = 6.95                          # lying cylinder: top is the underside plus the diameter
+        self.assertTrue(any("exceeds the set height" in e for e in errors(s)))
+        s = spec11()
+        element(s, "rail")["height"] = 20.0                     # length along x pokes through the side walls
+        self.assertTrue(any("outside the set bounds" in e for e in errors(s)))
+        s = spec11()
+        element(s, "post")["height"] = 20.0                     # and along z through the front and back
+        self.assertTrue(any("outside the set bounds" in e for e in errors(s)))
+
+    def test_horizontal_cylinder_extent_follows_axis_and_rotation(self):
+        rail = {"kind": "cylinder", "axis": "x", "radius": 0.5, "height": 4.0, "center": [0, 0]}
+        self.assertEqual(ss.element_extent(rail), (2.0, 0.5))
+        self.assertEqual(ss.element_extent({**rail, "axis": "z"}), (0.5, 2.0))
+        hx, hz = ss.element_extent({**rail, "rotation_deg": 90.0})
+        self.assertAlmostEqual(hx, 0.5)
+        self.assertAlmostEqual(hz, 2.0)
+        self.assertEqual(ss.element_extent({**rail, "axis": "y"}), (0.5, 0.5))
+        self.assertEqual(ss.local_size({**rail, "axis": "y"}), (1.0, 4.0, 1.0))
+        self.assertEqual(ss.local_size({"kind": "torus", "axis": "x", "major_radius": 1.0, "minor_radius": 0.25}), (0.5, 2.5, 2.5))
+
+    def test_round_primitives_keep_a_circular_footprint_under_rotation(self):
+        for eid, key in (("finial", "radius"), ("obelisk", "radius"), ("post", None)):
+            el = dict(element(spec11(), eid))
+            if eid == "post":
+                el["axis"] = "y"                                # upright, so round
+            el["rotation_deg"] = 45.0
+            hx, hz = ss.element_extent(el)
+            self.assertAlmostEqual(hx, hz)
+            self.assertAlmostEqual(hx, ss.local_size(el)[0] / 2.0)
+        flat = {"kind": "torus", "major_radius": 1.0, "minor_radius": 0.2, "rotation_deg": 45.0, "center": [0, 0]}
+        self.assertEqual(ss.element_extent(flat), (1.2, 1.2))
+        s = spec11()
+        s["elements"] = [{"id": "ball", "kind": "sphere", "center": [4.9, 0.0], "radius": 1.0, "material": "wood", "rotation_deg": 45.0}]
+        self.assertEqual(errors(s), [])
+        self.assertEqual(ss.shot_plan_set(s)["elements"][0]["radius"], 1.0)
+        s["elements"][0]["center"] = [5.1, 0.0]
+        self.assertTrue(any("outside the set bounds" in e for e in errors(s)))
+        lying = {"kind": "torus", "axis": "z", "major_radius": 1.0, "minor_radius": 0.2, "rotation_deg": 45.0, "center": [0, 0]}
+        self.assertAlmostEqual(ss.element_extent(lying)[0], (2.4 + 0.4) / 2 * math.sqrt(0.5))
+
+    def test_the_v1_1_kinds_do_not_raise_on_bad_types(self):
+        for kind in ("sphere", "cone", "torus", "stairs"):
+            for bad in (None, "x", [], {"radius": "r"}):
+                s = spec11()
+                s["elements"] = [{"id": "e", "kind": kind, "center": [0, 0], "material": "wood", "radius": bad,
+                                  "major_radius": bad, "minor_radius": bad, "size": bad, "steps": bad}]
+                self.assertTrue(errors(s))
+
+
+class NewPrimitiveGeometryTests(unittest.TestCase):
+    def test_every_mesh_is_closed_outward_wound_and_resting_on_its_base(self):
+        graph = ss.scene_graph(spec11())
+        for obj in graph["objects"]:
+            if obj["type"] != "mesh":
+                continue
+            count, edges = len(obj["mesh"]["verts"]), {}
+            for face in obj["mesh"]["faces"]:
+                self.assertTrue(all(0 <= i < count for i in face), obj["name"])
+                for a, b in zip(face, face[1:] + face[:1]):
+                    edges[(a, b)] = edges.get((a, b), 0) + 1
+            for (a, b), n in edges.items():
+                self.assertEqual(n, 1, (obj["name"], a, b))
+                self.assertIn((b, a), edges, f"{obj['name']} edge {a}-{b} has no opposite half-edge")
+            self.assertGreater(ss.mesh_volume(obj["mesh"]), 0.0, f"{obj['name']} is wound inside out")
+            if obj["name"] != "FLOOR" and obj["role"] != "architecture" or obj["name"] in ("obelisk", "steps"):
+                self.assertAlmostEqual(ss.mesh_bounds(obj["mesh"])["min"][2], 0.0, places=6, msg=obj["name"])
+
+    def test_axis_turns_the_dimensions_not_the_volume(self):
+        base = {"id": "c", "kind": "cylinder", "center": [0.0, 0.0], "radius": 0.5, "height": 3.0, "material": "wood", "segments": 48}
+        volumes = {}
+        for axis, dims in (("y", [1.0, 1.0, 3.0]), ("x", [3.0, 1.0, 1.0]), ("z", [1.0, 3.0, 1.0])):
+            s = spec11()
+            s["elements"] = [{**base, "axis": axis}]
+            mesh = mesh_of(s, "c")["mesh"]
+            self.assertEqual(ss.mesh_bounds(mesh)["dimensions"], dims, axis)     # Blender order: x, depth, up
+            volumes[axis] = ss.mesh_volume(mesh)
+        self.assertEqual(len(set(volumes.values())), 1)
+        self.assertAlmostEqual(volumes["x"], 48 / 2 * 0.25 * math.sin(2 * math.pi / 48) * 3.0, places=5)
+
+    def test_axis_x_cylinder_lies_along_world_x_and_sits_on_its_underside(self):
+        s = spec11()
+        rail = mesh_of(s, "rail")
+        self.assertEqual(rail["location"], [0.0, -2.0, 0.9])
+        bounds = ss.world_bounds(rail)
+        self.assertEqual(bounds["min"], [-2.0, -2.12, 0.9])
+        self.assertEqual(bounds["max"], [2.0, -1.88, 1.14])
+
+    def test_rotation_turns_world_bounds_about_the_element_centre(self):
+        s = spec11()
+        element(s, "rail")["rotation_deg"] = 90.0
+        bounds = ss.world_bounds(mesh_of(s, "rail"))
+        self.assertEqual(bounds["min"], [-0.12, -4.0, 0.9])
+        self.assertEqual(bounds["max"], [0.12, 0.0, 1.14])
+
+    def test_sphere_cone_torus_volumes_match_their_formulas(self):
+        s = spec11()
+        sphere = ss.mesh_volume(mesh_of(s, "finial")["mesh"])
+        self.assertAlmostEqual(sphere, 4 / 3 * math.pi * 0.35 ** 3, delta=0.03 * sphere)
+        r0, r1, h = 0.6, 0.1, 2.4
+        cone = ss.mesh_volume(mesh_of(s, "obelisk")["mesh"])
+        poly = math.sin(2 * math.pi / 24) * 24 / (2 * math.pi)            # a 24-gon holds this fraction of its circle
+        self.assertAlmostEqual(cone, poly * math.pi * h / 3 * (r0 * r0 + r0 * r1 + r1 * r1), places=5)
+        torus = ss.mesh_volume(mesh_of(s, "hoop")["mesh"])
+        self.assertAlmostEqual(torus, 2 * math.pi ** 2 * 1.2 * 0.1 ** 2, delta=0.12 * torus)         # 8 tube facets and 32 ring facets sit inside the true ring
+
+    def test_point_cone_has_an_apex_and_a_cap(self):
+        s = spec11()
+        element(s, "obelisk")["top_radius"] = 0.0
+        mesh = mesh_of(s, "obelisk")["mesh"]
+        self.assertEqual(len(mesh["verts"]), 25)
+        self.assertEqual(len(mesh["faces"]), 25)
+        self.assertEqual(ss.mesh_bounds(mesh)["dimensions"], [1.2, 1.2, 2.4])
+        self.assertAlmostEqual(ss.mesh_volume(mesh), poly_cone(0.6, 2.4, 24), places=5)
+
+    def test_cone_without_top_radius_is_a_point_and_an_inverted_frustum_is_allowed(self):
+        s = spec11()
+        del element(s, "obelisk")["top_radius"]
+        self.assertEqual(len(mesh_of(s, "obelisk")["mesh"]["verts"]), 25)
+        element(s, "obelisk")["top_radius"] = 0.9
+        self.assertEqual(errors(s), [])
+        self.assertEqual(ss.element_extent(element(s, "obelisk")), (0.9, 0.9))
+        self.assertGreater(ss.mesh_volume(mesh_of(s, "obelisk")["mesh"]), 0.0)
+
+    def test_stairs_rise_toward_the_back_and_hold_the_stair_volume(self):
+        s = spec11()
+        stairs = mesh_of(s, "steps")
+        mesh = stairs["mesh"]
+        self.assertEqual(ss.mesh_bounds(mesh)["dimensions"], [2.4, 1.6, 0.9])
+        self.assertEqual(len(mesh["verts"]), 2 * (2 * 4 + 2))
+        self.assertEqual(len(mesh["faces"]), 2 + 2 * 4 + 2)
+        self.assertAlmostEqual(ss.mesh_volume(mesh), 2.4 * 1.6 * 0.9 * (4 + 1) / (2 * 4), places=6)
+        front = [v for v in mesh["verts"] if v[1] < -0.79 and v[2] > 0]
+        back = [v for v in mesh["verts"] if v[1] > 0.79]
+        self.assertAlmostEqual(max(v[2] for v in front), 0.9 / 4)          # first tread is one rise high
+        self.assertAlmostEqual(max(v[2] for v in back), 0.9)
+
+    def test_stairs_extent_and_rotation(self):
+        s = spec11()
+        turned = element(s, "steps-turned")
+        hx, hz = ss.element_extent(turned)
+        self.assertAlmostEqual(hx, 0.6)
+        self.assertAlmostEqual(hz, 1.0)
+        bounds = ss.world_bounds(mesh_of(s, "steps-turned"))
+        self.assertAlmostEqual(bounds["min"][0], -4.5 - 0.6, places=5)
+        self.assertAlmostEqual(bounds["max"][1], -3.0 + 1.0, places=5)
+
+    def test_every_new_primitive_changes_the_graph_hash_and_summary(self):
+        graph = ss.scene_graph(spec11())
+        summary = ss.graph_summary(graph)
+        self.assertEqual(summary["mesh_count"], 16)
+        rows = {r["name"]: r for r in summary["objects"] if r["type"] == "mesh"}
+        for name in ("rail", "post", "obelisk", "finial", "hoop", "steps", "steps-turned"):
+            self.assertIn("world_bounds", rows[name])
+            self.assertGreater(rows[name]["volume"], 0)
+        s = spec11()
+        element(s, "rail")["axis"] = "z"
+        self.assertNotEqual(ss.scene_graph(s)["graph_sha256"], graph["graph_sha256"])
+
+    def test_shot_plan_set_accepts_the_new_kinds(self):
+        block = ss.shot_plan_set(spec11())
+        radii = {e["id"]: e["radius"] for e in block["elements"]}
+        self.assertEqual(radii["rail"], 2.0)
+        self.assertEqual(radii["finial"], 0.35)
+        self.assertEqual(radii["hoop"], 1.3)
+        plan = sp.synthetic_plan()
+        plan["set"] = block
+        plan["set"]["caches"] = [{"id": "flame", "frames": [1, 240], "kind": "physical"}]
+        for shot in plan["shots"]:
+            for use in shot["uses"]:
+                use["id"] = {"door": "arch", "window": "rail"}.get(use["id"], use["id"])
+        plan["shots"][1]["uses"].append({"id": "brazier", "contribution": "shadow"})
+        plan["performers"] = [{"id": "A", "position": [-1.0, 0.0]}, {"id": "B", "position": [1.0, 0.0]}]
+        self.assertEqual(sp.validate_plan(plan)["errors"], [])
+
+def poly_cone(radius, height, segments):
+    return math.sin(2 * math.pi / segments) * segments / (2 * math.pi) * math.pi * radius * radius * height / 3.0
+
+
 if __name__ == "__main__":
     unittest.main()
+
