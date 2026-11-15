@@ -467,6 +467,26 @@ class NewPrimitiveValidationTests(unittest.TestCase):
         self.assertEqual(ss.local_size({**rail, "axis": "y"}), (1.0, 4.0, 1.0))
         self.assertEqual(ss.local_size({"kind": "torus", "axis": "x", "major_radius": 1.0, "minor_radius": 0.25}), (0.5, 2.5, 2.5))
 
+    def test_round_primitives_keep_a_circular_footprint_under_rotation(self):
+        for eid, key in (("finial", "radius"), ("obelisk", "radius"), ("post", None)):
+            el = dict(element(spec11(), eid))
+            if eid == "post":
+                el["axis"] = "y"                                # upright, so round
+            el["rotation_deg"] = 45.0
+            hx, hz = ss.element_extent(el)
+            self.assertAlmostEqual(hx, hz)
+            self.assertAlmostEqual(hx, ss.local_size(el)[0] / 2.0)
+        flat = {"kind": "torus", "major_radius": 1.0, "minor_radius": 0.2, "rotation_deg": 45.0, "center": [0, 0]}
+        self.assertEqual(ss.element_extent(flat), (1.2, 1.2))
+        s = spec11()
+        s["elements"] = [{"id": "ball", "kind": "sphere", "center": [4.9, 0.0], "radius": 1.0, "material": "wood", "rotation_deg": 45.0}]
+        self.assertEqual(errors(s), [])
+        self.assertEqual(ss.shot_plan_set(s)["elements"][0]["radius"], 1.0)
+        s["elements"][0]["center"] = [5.1, 0.0]
+        self.assertTrue(any("outside the set bounds" in e for e in errors(s)))
+        lying = {"kind": "torus", "axis": "z", "major_radius": 1.0, "minor_radius": 0.2, "rotation_deg": 45.0, "center": [0, 0]}
+        self.assertAlmostEqual(ss.element_extent(lying)[0], (2.4 + 0.4) / 2 * math.sqrt(0.5))
+
     def test_the_v1_1_kinds_do_not_raise_on_bad_types(self):
         for kind in ("sphere", "cone", "torus", "stairs"):
             for bad in (None, "x", [], {"radius": "r"}):

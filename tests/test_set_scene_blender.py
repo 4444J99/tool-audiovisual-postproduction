@@ -107,6 +107,12 @@ class SetSceneCliTests(unittest.TestCase):
             refused = run("upgrade", "--spec", self.write_spec(d, bad), str(Path(d) / "no.json"))
             self.assertEqual(refused.returncode, 2)
             self.assertFalse((Path(d) / "no.json").exists())
+            for payload in ("null", "[]", "3", '"text"'):
+                odd = Path(d) / "odd.json"
+                odd.write_text(payload)
+                result = run("upgrade", "--spec", str(odd), str(Path(d) / "no.json"))
+                self.assertEqual(result.returncode, 2, (payload, result.stderr))
+                self.assertIn("errors", json.loads(result.stdout))
             unknown = set_spec.synthetic_spec()
             unknown["schema"] = "other"
             self.assertEqual(run("upgrade", "--spec", self.write_spec(d, unknown), str(Path(d) / "no.json")).returncode, 2)

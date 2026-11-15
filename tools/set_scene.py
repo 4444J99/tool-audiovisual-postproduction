@@ -125,7 +125,7 @@ def main(argv=None):
         print(json.dumps({"error": problem}))
         return 2
     if args.command == "upgrade":
-        if spec.get("schema") not in set_spec.SUPPORTED_SCHEMAS:
+        if not isinstance(spec, dict) or spec.get("schema") not in set_spec.SUPPORTED_SCHEMAS:
             print(json.dumps({"errors": [f"spec: schema must be one of {', '.join(set_spec.SUPPORTED_SCHEMAS)}"]}))
             return 2
         spec = {**spec, "schema": set_spec.SCHEMA_V11}

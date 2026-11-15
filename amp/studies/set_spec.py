@@ -123,8 +123,8 @@ def hex_to_linear(value: str) -> list[float]:
 def element_extent(element: Mapping[str, Any]) -> tuple[float, float]:
     """Half-extent (x, z) of the element footprint around its centre, for bounds and plan use."""
     width, _, depth = local_size(element)
-    if element["kind"] == "cylinder" and element.get("axis", "y") == "y":
-        return element["radius"], element["radius"]          # a vertical cylinder is round: rotation changes nothing
+    if element["kind"] == "sphere" or (element["kind"] in AXIS_KINDS and element.get("axis", "y") == "y"):
+        return width / 2.0, depth / 2.0                      # round about the vertical: rotation cannot change the footprint
     angle = math.radians(element.get("rotation_deg", 0.0))
     c, s = abs(math.cos(angle)), abs(math.sin(angle))
     return (width * c + depth * s) / 2.0, (width * s + depth * c) / 2.0
