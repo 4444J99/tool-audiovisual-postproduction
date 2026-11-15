@@ -293,6 +293,8 @@ process.stdout.write(JSON.stringify(out));
         return json.loads(result.stdout)
 
     def test_freeze_holds_exactly_where_the_workbench_holds_and_reads_the_same_source_times(self):
+        """Checks the model: every scalar expression is evaluated afresh at each tested timestamp. In TouchDesigner they are evaluated once
+        per cook, so the envelope steps at the cook rate (a known limit, issue 151)."""
         combos = [{"capture": 2.92, "duration": 4.4, "grain": 0.08, "decay": 0.12, "release": 0.05, "motion": 0, "capture_": 0},
                   {"capture": 1.0, "duration": 2.0, "grain": 0.3, "decay": 1.0, "release": 0.5},
                   {"capture": 0.0, "duration": 8.0, "grain": 0.025, "decay": 0.0, "release": 0.005},
