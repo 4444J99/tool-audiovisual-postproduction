@@ -52,6 +52,10 @@ The eight-layout comparison's placement rules are a pure module (`web/fx/layout-
 
 No force pushes (including `--force-with-lease`); update open branches with `git merge origin/main` and land with a rebase-merge: [docs/BRANCH-RULES.md](docs/BRANCH-RULES.md).
 
+## Delivery QC
+
+`tools/delivery_qc.py` and the pipeline's final `qc` stage judge the sealed artefacts (caption timing against the delivered dialogue, frame rate and timecode across set spec, shot plan and burned frames, loudness against its spec) and write a hashed `qc-report.json` that `verify` re-derives ([guide](docs/DELIVERY-QC.md)).
+
 ## Reverse-angle ledger
 
 `tools/reverse_angle.py` plans a same-side reverse camera and reports which reverse-view pixels the source recording genuinely shows ([guide](docs/REVERSE-ANGLE.md)).

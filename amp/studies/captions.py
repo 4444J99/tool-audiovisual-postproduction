@@ -352,6 +352,8 @@ def words_in_spans(sentences: Sequence[str], spans: Sequence[tuple[float, float]
     Used where the speech timing comes from audio the caller measured (an energy detector, an aligner) instead of the
     invented ``synthetic_words``.  A sentence that cannot be read inside its span at ``max_cps`` raises ``CaptionError``,
     so the caller finds out before any file is written."""
+    if not spans:
+        raise CaptionError("no speech spans were found to lay words into")
     if len(sentences) < len(spans):
         raise CaptionError(f"{len(spans)} speech spans but only {len(sentences)} sentences")
     words: list[dict[str, Any]] = []

@@ -58,7 +58,7 @@ python tools/caption_burnin.py show --output outputs/caption-burnin --frame 60
 
 **Optional preview.** `--preview` wraps the frames in a lossless FFV1 `preview.mkv` and checks that ffmpeg decodes it back to the same bytes. The file is not hashed into anything and is not evidence; it is for looking at.
 
-**In the pipeline.** `tools/av_pipeline.py` adds a `captions` and a `burnin` stage after `colour` ([PIPELINE-CHAIN](PIPELINE-CHAIN.md)): the SRT/WebVTT are hashed outputs, the burn-in's input is the SRT hash, and `verify` re-derives the frames. The caption words there are the invented demo timing, not a transcript of the pipeline's dialogue stand-in.
+**In the pipeline.** `tools/av_pipeline.py` adds a `captions` and a `burnin` stage after `colour` ([PIPELINE-CHAIN](PIPELINE-CHAIN.md)): the SRT/WebVTT are hashed outputs, the burn-in's input is the SRT hash, and `verify` re-derives the frames. The caption words there are invented sentences laid into the dialogue-active spans measured on the delivered WAV (`words_in_spans`), not a transcript of the pipeline's dialogue stand-in; the `qc` stage then checks the cues against those spans ([DELIVERY-QC](DELIVERY-QC.md)).
 
 What this does not show: that the text is placed where a broadcaster's safe-area rules want it, that the bitmap font is legible at a real delivery size (it is a 5x7 test font, one pixel per font pixel at scale 1), or how a player renders the same cues. It proves the cues in the file are the cues on the frames.
 

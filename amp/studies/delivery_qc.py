@@ -184,7 +184,18 @@ def _json(files: Mapping[str, bytes], label: str) -> Any:
 
 
 def derive(root: Path | str, locations: Mapping[str, str], spec: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """The QC report for the artefacts under ``root``; ``locations`` maps each label in ``INPUT_LABELS`` to its path."""
+    """The QC report for the artefacts under ``root``; ``locations`` maps each label in ``INPUT_LABELS`` to its path.
+
+    Raises ``QcError`` when an artefact is missing, malformed or lacks a field the checks read."""
+    try:
+        return _derive(Path(root), locations, spec)
+    except (KeyError, TypeError, IndexError, ValueError, ZeroDivisionError, StopIteration) as error:
+        if isinstance(error, QcError):
+            raise
+        raise QcError(f"an artefact is malformed: {error!r}") from error
+
+
+def _derive(root: Path, locations: Mapping[str, str], spec: Mapping[str, Any] | None) -> dict[str, Any]:
     root = Path(root)
     spec = normalize_spec(spec)
     files = _load(root, locations)

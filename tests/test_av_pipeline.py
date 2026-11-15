@@ -167,6 +167,8 @@ class ChainTests(unittest.TestCase):
                         entry[side][label] = digest
             if entry["stage"] == "delivery":
                 entry["outputs"]["delivery-report"] = report_h
+            if "delivery-report" in entry["inputs"]:
+                entry["inputs"]["delivery-report"] = report_h
         manifest["chain_sha256"] = pc.chain_hash(manifest)
         (target / "pipeline-manifest.json").write_text(json.dumps(manifest))
         for rel, keys in (("colour/layer-plan.json", None), ("plan/final-ledger.json", None)):
@@ -201,9 +203,10 @@ class ChainTests(unittest.TestCase):
 
     def test_captions_and_burned_frames_are_stages_with_linked_hashes(self):
         names = [s["stage"] for s in self.manifest["stages"]]
-        self.assertEqual(names[-2:], ["captions", "burnin"])
+        self.assertEqual(names[-3:], ["captions", "burnin", "qc"])
         caps, burn = self.stage("captions"), self.stage("burnin")
-        self.assertEqual(caps["inputs"], {"final-ledger": self.stage("final_ledger")["outputs"]["final-ledger"]})
+        self.assertEqual(caps["inputs"], {"dialogue-delivered": self.stage("delivery")["outputs"]["dialogue-delivered"],
+                                          "final-ledger": self.stage("final_ledger")["outputs"]["final-ledger"]})
         self.assertEqual(burn["inputs"]["captions-srt"], caps["outputs"]["captions-srt"])
         self.assertEqual(burn["frames"], self.stage("final_ledger")["total_frames"])
         report = json.loads((self.out / "captions" / "burnin-report.json").read_text())
@@ -253,7 +256,7 @@ class ChainTests(unittest.TestCase):
         manifest["stages"] = [s for s in manifest["stages"] if s["stage"] != "burnin"]
         manifest["chain_sha256"] = pc.chain_hash(manifest)
         (target / "pipeline-manifest.json").write_text(json.dumps(manifest))
-        problems = pc.verify_chain(target)
+        problems = [p for p in pc.verify_chain(target) if not p.startswith("qc")]
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("missing burnin", problems[0])
 
@@ -345,7 +348,8 @@ class ChainTests(unittest.TestCase):
         cplan["sources"]["plate-s01"]["sha256"] = "1" * 64
         cplan_path.write_text(json.dumps(cplan, indent=2, sort_keys=True) + "\n")
         problems = pc.cross_checks(target)
-        self.assertEqual(problems, ["plate for S01 is not derived from the set graph and its ledger row"])
+        self.assertEqual([p for p in problems if not p.startswith("qc")], ["plate for S01 is not derived from the set graph and its ledger row"])
+        self.assertTrue(any("qc-report.json was made from a different layer-plan" in p for p in problems), problems)
 
     def test_missing_file_is_reported_not_raised(self):
         target = self.copy()
