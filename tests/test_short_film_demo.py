@@ -107,7 +107,7 @@ class ShortFilmDemoTests(unittest.TestCase):
         report = json.loads((self.first / demo.DEMO_QC).read_text())
         self.assertTrue(report["ok"])
         ids = {check["id"] for check in report["checks"]}
-        self.assertEqual(ids, {"mp4.streams", "mp4.video_geometry", "mp4.audio_format", "mp4.duration", "mp4.frame_count", "mp4.luma_equals_burnin", "mp4.audio_loudness"})
+        self.assertEqual(ids, {"mp4.streams", "mp4.video_geometry", "mp4.video_pixel_format", "mp4.audio_format", "mp4.duration", "mp4.frame_count", "mp4.luma_equals_burnin", "mp4.chroma_flat", "mp4.audio_loudness", "mp4.audio_matches_delivered", "mp4.audio_blocks_match_delivered", "mp4.audio_padding_silent"})
         luma = next(c for c in report["checks"] if c["id"] == "mp4.luma_equals_burnin")
         self.assertEqual(luma["decoded_luma_sha256"], self.hashes(self.first)["deterministic"]["frames_sha256"])
 
