@@ -60,6 +60,8 @@ jobs:
           python -m pip install --disable-pip-version-check --no-input setuptools==84.0.0 wheel==0.48.0
           python -m pip install --disable-pip-version-check --no-input --no-build-isolation --editable . --requirement requirements-direction.txt
           npm ci --ignore-scripts --no-audit --no-fund
+          python -m pip install --disable-pip-version-check --no-input playwright==1.57.0
+          python -m playwright install --with-deps chromium
           test -s "$AMP_TEST_FONT"
           ffmpeg -version
           ffprobe -version
@@ -73,6 +75,7 @@ jobs:
       - name: Run the complete project checks
         env:
           PIP_NO_INDEX: "1"
+          SILENT_BROWSER_REQUIRE_PAGE: "1"
         run: python tools/check.py
 
       - name: Build the Python distribution without network resolution
