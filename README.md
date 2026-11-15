@@ -56,6 +56,10 @@ The eight-layout comparison's placement rules are a pure module (`web/fx/layout-
 
 `tools/set_scene.py` validates a set spec (bounds, materials, boxes, cylinders, stepped arch bands, lights, cameras) and builds it in headless Blender, then compares Blender's measured scene with the spec's scene graph ([guide](docs/SET-SCENE.md)). `shot-set` exports the same environment as a shot plan's `set` block.
 
+## End-to-end chain
+
+`tools/av_pipeline.py` runs set spec, shot plan, coverage matrix, room-tone fill and colour plan on synthetic inputs and pins each hand-off by hash ([guide](docs/PIPELINE-CHAIN.md)).
+
 ## Room-tone fill
 
 `tools/room_tone_fill.py` finds digital-silence holes in edited dialogue, borrows steady room tone from the same recording, builds it into a loop-matched bed with equal-power crossfades, and fills each hole level-matched to the nearest real tone, leaving every other sample bit-identical ([guide](docs/ROOM-TONE-FILL.md)).
