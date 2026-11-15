@@ -72,6 +72,7 @@ class Reconstruction:
     status: np.ndarray      # uint8 (h, w)
     face: np.ndarray        # uint8 (h, w) index into FACE_NAMES
     stretched: np.ndarray   # bool (h, w): observed but magnified beyond the stated limit
+    geometry_sha256: str    # canonical room box and both camera parameter sets this was computed from
 
 
 def source_camera(width: int, height: int, hfov_deg: float = 65.0,
@@ -264,6 +265,17 @@ def _bilinear(image: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
             + image[v1, u0] * (1 - fu) * fv + image[v1, u1] * fu * fv)
 
 
+def _geometry_digest(box: RoomBox, source: Camera, target: Camera) -> str:
+    """Identity of the room and the two cameras, independent of what the performer mask hides."""
+    def camera(cam: Camera) -> dict[str, Any]:
+        return {"position": [float(v) for v in cam.position],
+                "rotation": [[float(v) for v in row] for row in cam.rotation],
+                "fx": float(cam.fx), "fy": float(cam.fy), "width": int(cam.width), "height": int(cam.height)}
+    payload = {"box": {"lo": [float(v) for v in box.lo], "hi": [float(v) for v in box.hi]},
+               "source": camera(source), "target": camera(target)}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def reproject_observed(frame: np.ndarray, source: Camera, target: Camera, box: RoomBox,
                        subject_mask: Optional[np.ndarray] = None, mask_margin_px: int = 2,
                        max_magnification: float = 4.0) -> Reconstruction:
@@ -296,11 +308,16 @@ def reproject_observed(frame: np.ndarray, source: Camera, target: Camera, box: R
     status = np.full(face.shape, OUTSIDE_FRUSTUM, dtype=np.uint8)
     status[inside] = OBSERVED
     if subject_mask is not None:
-        ui = np.clip(np.rint(u).astype(int), 0, source.width - 1)
-        vi = np.clip(np.rint(v).astype(int), 0, source.height - 1)
-        status[inside & subject_mask[vi, ui]] = SUBJECT_OCCLUDED
+        # The bilinear sample mixes up to four source pixels; any masked contributor taints it,
+        # whatever the mask margin, so performer colour is never carried onto a room surface.
+        uc = np.clip(u, 0, source.width - 1)
+        vc = np.clip(v, 0, source.height - 1)
+        u0, v0 = np.floor(uc).astype(int), np.floor(vc).astype(int)
+        u1, v1 = np.minimum(u0 + 1, source.width - 1), np.minimum(v0 + 1, source.height - 1)
+        tainted = subject_mask[v0, u0] | subject_mask[v0, u1] | subject_mask[v1, u0] | subject_mask[v1, u1]
+        status[inside & tainted] = SUBJECT_OCCLUDED
     observed = status == OBSERVED
-    image = np.zeros(frame.shape[:2] + (3,), dtype=np.float32)
+    image = np.zeros(status.shape + (3,), dtype=np.float32)
     if observed.any():
         image[observed] = _bilinear(frame, u[observed], v[observed]).astype(np.float32)
     du_dy, du_dx = np.gradient(u)
@@ -310,7 +327,7 @@ def reproject_observed(frame: np.ndarray, source: Camera, target: Camera, box: R
     for shift, axis in ((1, 0), (-1, 0), (1, 1), (-1, 1)):
         stable &= face == np.roll(face, shift, axis=axis)
     stretched = observed & stable & (area > 0) & (area < 1.0 / (max_magnification ** 2))
-    return Reconstruction(image, status, face, stretched)
+    return Reconstruction(image, status, face, stretched, _geometry_digest(box, source, target))
 
 
 def fill_unobserved(reconstruction: Reconstruction, mode: str = "face_mean") -> tuple[np.ndarray, np.ndarray]:
@@ -342,14 +359,15 @@ def build_ledger(reconstruction: Reconstruction, fill_mode: str = "none", plan: 
             faces[name][label] = int(((reconstruction.status == code) & on_face).sum())
         faces[name]["observed_fraction"] = round(faces[name]["observed"] / count, 6)
     observed = int((reconstruction.status == OBSERVED).sum())
-    identity = hashlib.sha256(reconstruction.status.tobytes() + reconstruction.face.tobytes()).hexdigest()
+    visibility = hashlib.sha256(reconstruction.status.tobytes() + reconstruction.face.tobytes()).hexdigest()
     ledger = {"schema": SCHEMA, "kind": "reconstruction_ledger", "pixels": total,
               "observed": observed, "observed_fraction": round(observed / total, 6),
               "unobserved": {label: int((reconstruction.status == code).sum()) for code, label in STATUS_NAMES.items() if code},
               "stretched_observed": int(reconstruction.stretched.sum()),
               "faces": faces, "fill": {"mode": fill_mode, "pixels_filled": 0 if fill_mode == "none" else total - observed,
                                       "status": "placeholder; filled pixels are not reconstruction"},
-              "geometry_identity_sha256": identity,
+              "geometry_identity_sha256": reconstruction.geometry_sha256,
+              "visibility_identity_sha256": visibility,
               "acceptance": "pending; geometry carries observed pixels only, performers and unseen surfaces are not reconstructed"}
     if plan is not None:
         ledger["plan"] = {k: v for k, v in plan.items() if not k.startswith("_")}

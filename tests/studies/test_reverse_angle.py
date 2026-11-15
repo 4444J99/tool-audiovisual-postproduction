@@ -123,6 +123,42 @@ class ReconstructionTests(unittest.TestCase):
         c = ra.build_ledger(ra.reproject_observed(self.frame, self.source, other, self.box))
         self.assertNotEqual(a["geometry_identity_sha256"], c["geometry_identity_sha256"])
 
+    def test_target_resolution_may_differ_from_the_source_frame(self):
+        target = ra.source_camera(160, 90, hfov_deg=100.0, position=self.target.position)
+        target = ra.Camera(self.target.position, self.target.rotation, target.fx, target.fy, 160, 90)
+        rec = ra.reproject_observed(self.frame, self.source, target, self.box)
+        self.assertEqual(rec.image.shape, (90, 160, 3))
+        self.assertEqual(rec.status.shape, (90, 160))
+        self.assertGreater((rec.status == ra.OBSERVED).sum(), 0)
+        image, filled = ra.fill_unobserved(rec, "face_mean")
+        self.assertEqual(image.shape, rec.image.shape)
+
+    def test_every_bilinear_neighbour_is_checked_against_the_mask_even_without_margin(self):
+        mask = np.zeros(self.frame.shape[:2], dtype=bool)
+        mask[40:140, 120:200] = True
+        rec = ra.reproject_observed(self.frame, self.source, self.target, self.box,
+                                    subject_mask=mask, mask_margin_px=0)
+        paint = np.zeros(self.frame.shape, dtype=np.float32)
+        paint[mask] = 1e6  # performer pixels carry a colour no room pixel can have
+        poisoned = ra.reproject_observed(self.frame + paint, self.source, self.target, self.box,
+                                         subject_mask=mask, mask_margin_px=0)
+        seen = poisoned.status == ra.OBSERVED
+        self.assertTrue((poisoned.image[seen] < 1e5).all())
+        self.assertTrue((rec.status == poisoned.status).all())
+
+    def test_geometry_identity_names_the_room_and_cameras_not_the_mask(self):
+        plain = ra.build_ledger(ra.reproject_observed(self.frame, self.source, self.target, self.box))
+        mask = np.zeros(self.frame.shape[:2], dtype=bool)
+        mask[40:140, 120:200] = True
+        masked = ra.build_ledger(ra.reproject_observed(self.frame, self.source, self.target, self.box,
+                                                       subject_mask=mask))
+        self.assertEqual(plain["geometry_identity_sha256"], masked["geometry_identity_sha256"])
+        self.assertNotEqual(plain["visibility_identity_sha256"], masked["visibility_identity_sha256"])
+        # a farther back wall with the same cameras: every pixel keeps its status and face, geometry differs
+        wider = ra.RoomBox(self.box.lo, (self.box.hi[0], self.box.hi[1], self.box.hi[2] + 1.0))
+        moved = ra.build_ledger(ra.reproject_observed(self.frame, self.source, self.target, wider))
+        self.assertNotEqual(plain["geometry_identity_sha256"], moved["geometry_identity_sha256"])
+
     def test_same_camera_reprojection_is_identity(self):
         rec = ra.reproject_observed(self.frame, self.source, self.source, self.box)
         self.assertTrue((rec.status == ra.OBSERVED).all())
