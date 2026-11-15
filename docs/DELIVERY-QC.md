@@ -28,7 +28,7 @@ Deterministic JSON (no clock, no host): `schema`, `spec`, `status` (`pass` or `f
 | `captions.max_length` | no cue is longer than `max_cue_frames` |
 | `captions.reading_rate` | no cue reads faster than `max_cps` characters per second, measured from the SRT file (line breaks not counted) |
 | `captions.inside_edit` | cues are ordered, do not overlap and lie inside the edit |
-| `captions.burned_frames` | the frames whose pixels differ from a caption-less render of the same background are exactly the frames the cues name |
+| `captions.burned_frames` | the frames whose pixels differ from a caption-less render of the same background are exactly the frames the cues name, and every frame equals a re-render of the SRT's text (other text on the right frames fails; a caption the renderer cannot draw fails instead of raising) |
 | `audio.within_edit` | the delivered dialogue is not longer than the edit |
 | `loudness.spec` | the delivered WAV, measured again here (BS.1770-4), meets the spec recorded in the delivery report; deviation from target and true-peak headroom are reported |
 | `loudness.report_agreement` | the new measurement matches the delivery report's (`report_tolerance`, default 0.01) and the report describes the delivered file |

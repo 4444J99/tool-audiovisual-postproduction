@@ -337,12 +337,18 @@ def _derive(root: Path, locations: Mapping[str, str], spec: Mapping[str, Any] | 
     order = [f"cue {b['index']} starts before cue {a['index']} ends" for a, b in zip(cues, cues[1:]) if b["start"] < a["end"]]
     checks.append(_check("captions.inside_edit", not edit_problems and not order, "cues are ordered, do not overlap and lie inside the edit",
                          problems=edit_problems + order))
-    burned = _burned_frames(files["burnin-frames"], burn_report, total)
+    burned, mismatch, render_problems = _burned_frames(files["burnin-frames"], burn_report, total, cues)
     expected = sorted({f for c in cues for f in range(c["start"], c["end"])})
-    checks.append(_check("captions.burned_frames", burned == expected,
-                         "the frames whose pixels differ from a caption-less render of the same background are exactly the frames the cues name",
+    owner = {f: c["index"] for c in cues for f in range(c["start"], c["end"])}
+    text_problems = [f"cue {owner.get(f, '?')}: frame {f} shows other text than the caption file gives it" for f in mismatch[:5]]
+    if len(mismatch) > 5:
+        text_problems.append(f"{len(mismatch) - 5} more frames show other text than the caption file")
+    checks.append(_check("captions.burned_frames", burned == expected and not mismatch and not render_problems,
+                         "the frames whose pixels differ from a caption-less render of the same background are exactly the frames the cues name, and every frame equals a re-render of the caption file's text",
                          burned_count=len(burned), expected_count=len(expected),
-                         first_difference=next((f for f in sorted(set(burned) ^ set(expected))), None)))
+                         first_difference=next((f for f in sorted(set(burned) ^ set(expected))), None),
+                         text_mismatch_first_frame=mismatch[0] if mismatch else None,
+                         problems=render_problems + text_problems))
 
     # -- audio length and loudness -----------------------------------------------------------------
     audio_seconds = Fraction(len(audio), rate_wav)
@@ -378,14 +384,22 @@ def _derive(root: Path, locations: Mapping[str, str], spec: Mapping[str, Any] | 
                      "not a distributor's acceptance and not a check that the captions say what was said"}
 
 
-def _burned_frames(payload: bytes, burn_report: Mapping[str, Any], total: int) -> list[int]:
-    """Frame numbers whose pixels differ from the same background rendered with no captions."""
+def _burned_frames(payload: bytes, burn_report: Mapping[str, Any], total: int,
+                   cues: list[dict[str, Any]]) -> tuple[list[int], list[int], list[str]]:
+    """``(frames that differ from the caption-less render, frames that differ from the render of ``cues``, problems)``.
+
+    The first list says which frames carry pixels, the second says whether those pixels are the caption file's text."""
     params = burn_report["params"]
     size = params["geometry"]["width"] * params["geometry"]["height"]
     if len(payload) != size * params["frames"] or params["frames"] != total:
-        return [-1]                      # a marker no cue can equal: the frame file is not the burn-in's shape
+        return [-1], [], []              # a marker no cue can equal: the frame file is not the burn-in's shape
     blank = b"".join(cb.frame_stream(params, []))
-    return [i for i in range(params["frames"]) if payload[i * size:(i + 1) * size] != blank[i * size:(i + 1) * size]]
+    burned = [i for i in range(params["frames"]) if payload[i * size:(i + 1) * size] != blank[i * size:(i + 1) * size]]
+    try:
+        drawn = b"".join(cb.frame_stream(params, cues))
+    except cb.BurnError as error:
+        return burned, [], [f"the caption file cannot be re-rendered: {'; '.join(error.errors[:3])}"]
+    return burned, [i for i in range(params["frames"]) if payload[i * size:(i + 1) * size] != drawn[i * size:(i + 1) * size]], []
 
 
 def verify(root: Path | str, locations: Mapping[str, str], recorded: bytes, spec: Mapping[str, Any] | None = None) -> list[str]:
