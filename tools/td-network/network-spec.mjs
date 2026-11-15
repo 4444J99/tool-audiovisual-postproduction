@@ -19,7 +19,7 @@ import {dirname, join} from 'node:path';
 import {CATALOG_BY_TYPE, PORTS} from '../../web/fx/catalog.mjs';
 import {describeControls} from '../../web/fx/controller-map.mjs';
 import {validatePatch} from '../../web/fx/core.mjs';
-import {OSC_ROOT, ECHO_TOLERANCE, encodeSegment, nodeAddress} from '../../web/fx/osc-control.mjs';
+import {OSC_ROOT, ECHO_TOLERANCE, RULE_KINDS, encodeSegment, nodeAddress, ruleAddress} from '../../web/fx/osc-control.mjs';
 import {EFFECTS, expr} from './effects.mjs';
 import {VOCABULARY, PORT_FAMILY, SELECT, NULL, CUSTOM_PAR_NAME, OPERATOR_NAME} from './vocabulary.mjs';
 
@@ -65,7 +65,10 @@ function controlPars(node, patch) {
     const value = current(control.path);
     const entry = {
       path: control.path, par, label: control.label, kind: control.kind, slot: `${group}:${slot[group]++}`,
-      address: nodeAddress(node.id, control.path), default: control.kind === 'toggle' ? false : control.default,
+      address: nodeAddress(node.id, control.path),
+      // where the workbench reports changes to the rules that govern this control (see osc-control.mjs, OscFeedback)
+      rules: Object.fromEntries(RULE_KINDS.filter(kind => kind !== 'macro' || control.path.startsWith('params.')).map(kind => [kind, ruleAddress(node.id, kind, control.path)])),
+      default: control.kind === 'toggle' ? false : control.default,
       value: control.kind === 'toggle' ? Boolean(value) : value,
     };
     if (control.kind === 'range') Object.assign(entry, {min: control.min, max: control.max, step: control.step, integer: control.step === 1 && Number.isInteger(control.min) && Number.isInteger(control.max)});
@@ -399,6 +402,10 @@ export function validateNetworkSpec(spec) {
     if (!definition) fail(`contract: ${node.id} has unknown type ${node.type}`);
     for (const control of node.controls) {
       claim(control.address, `${node.id}.${control.path}`);
+      const expectedKinds = RULE_KINDS.filter(kind => kind !== 'macro' || control.path.startsWith('params.'));
+      if (JSON.stringify(Object.keys(control.rules ?? {})) !== JSON.stringify(expectedKinds)) fail(`contract: ${node.id}.${control.path} lists rule addresses ${Object.keys(control.rules ?? {}).join(',')}, not ${expectedKinds.join(',')}`);
+      for (const kind of expectedKinds) if (control.rules?.[kind] !== ruleAddress(node.id, kind, control.path)) fail(`contract: ${node.id}.${control.path} rule address for ${kind} is not the workbench's`);
+      for (const kind of expectedKinds) claim(ruleAddress(node.id, kind, control.path), `${node.id}.${control.path} ${kind}`);
       const par = comp.customPars.find(item => item.name === control.par);
       if (!par) {fail(`contract: ${node.id} lacks custom parameter ${control.par}`); continue;}
       if (control.kind === 'range') {

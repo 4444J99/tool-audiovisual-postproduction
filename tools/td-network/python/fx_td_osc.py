@@ -7,7 +7,8 @@ methods, so the same code is exercised by the repository tests against a fake ne
     backend.get(comp, par)            current value of a custom parameter ('' = the rack component)
     backend.set(comp, par, value)     write a custom parameter
     backend.send(address, args)       send one OSC message to the bridge
-    backend.release(comp, path)       optional: a control was edited here, so its automation, events and macro go (td_resolve)
+    backend.rule(comp, kind, path, payload)   optional: the workbench changed a control's rules (td_resolve apply); kind is
+                                      'released', 'event' (payload [time, value]), 'lane' or 'macro' (payload a dict)
 
 The contract (`td_contract` DAT) is generated from the patch and lists every address with its own range,
 so this module does no address parsing: an address either is in the contract or it is ignored.
@@ -16,6 +17,11 @@ Direction. The rack reports its state to TouchDesigner on exactly the addresses 
 control the rack, so one table serves both ways. `receive()` applies a rack report to the parameters.
 `par_changed()` turns an edit made in TouchDesigner into the control message. A value that only repeats
 what was last exchanged on that address (within the contract's tolerance) is an echo and is not sent.
+
+Rules. A parameter edit made here does not change this network's automation, events or macros: the rack decides what
+the edit does to them (it drops them, or, while recording, adds an event) and reports it with rule messages (`released`,
+`event`, `lane`, `macro`), which `receive()` forwards to the backend. The rack is the single authority, so the network's
+rules cannot diverge from the workbench's.
 """
 import json
 import math
@@ -63,11 +69,14 @@ class RackLink:
         self.by_address = {}    # control address -> (node, control)
         self.by_par = {}        # (comp, par) -> (node, control)
         self.types = {}         # type address -> node
+        self.rule_addresses = {}   # rule address -> (node, control, kind)
         for node in contract['nodes']:
             self.types[node['typeAddress']] = node
             for control in node['controls']:
                 self.by_address[control['address']] = (node, control)
                 self.by_par[(node['comp'], control['par'])] = (node, control)
+                for kind, address in control.get('rules', {}).items():
+                    self.rule_addresses[address] = (node, control, kind)
         rack = contract['rack']
         self.transport_by_address = {item['address']: item for item in rack['transport']}
         self.transport_by_par = {item['par']: item for item in rack['transport']}
@@ -99,6 +108,9 @@ class RackLink:
                 self.last[address] = _clamp(args[0], 0.0, 1.0) if not control.get('integer') else _round_half_up(value_to_norm(control, value), NORM_DECIMALS)
                 self.backend.set(node['comp'], control['par'], value)
             return True
+        rule = self.rule_addresses.get(address)
+        if rule:
+            return self._rule(rule, args)
         node = self.types.get(address)
         if node:
             if args and args[0] != node['type']:
@@ -135,6 +147,30 @@ class RackLink:
             return True
         return False
 
+    def _rule(self, rule, args):
+        """A rule message from the rack: the workbench changed the events, lane or macro of one control. It is forwarded to
+        the backend's resolver; nothing here touches a parameter, and it is never echoed back. Returns True when understood."""
+        node, control, kind = rule
+        if kind == 'released':
+            payload = None
+        elif kind == 'event':
+            if len(args) != 2 or not all(_number(v) for v in args):
+                return False
+            payload = [float(args[0]), float(args[1])]
+        else:   # lane and macro carry one JSON string
+            if len(args) != 1 or not isinstance(args[0], str):
+                return False
+            try:
+                payload = json.loads(args[0])
+            except ValueError:
+                return False
+            if not isinstance(payload, dict):
+                return False
+        handler = getattr(self.backend, 'rule', None)
+        if handler:
+            handler(node['comp'], kind, control['path'], payload)
+        return True
+
     def _status(self):
         expected = len(self.contract['nodes'])
         if self.mismatches:
@@ -167,7 +203,6 @@ class RackLink:
                 args = [norm]
             self.last[control['address']] = args[0]
             self.backend.send(control['address'], args)
-            self._released(node['comp'], control['path'])
             return (control['address'], args)
         if comp != '':
             return None
@@ -187,13 +222,6 @@ class RackLink:
             self.backend.send(item['address'], args)
             return (item['address'], args)
         return None
-
-    def _released(self, comp, path):
-        """An edit sent to the rack removes that control's automation, events and macro there, so it does here too
-        (the resolver, td_resolve). A backend without a resolver ignores it."""
-        release = getattr(self.backend, 'release', None)
-        if release:
-            release(comp, path)
 
     def pulse(self, comp, par):
         item = self.pulses.get(par) if comp == '' else None
@@ -225,8 +253,8 @@ class TDBackend:
     def send(self, address, args):
         self.rack.op('osc_out').sendOSC(address, *args)   # values are positional arguments, not a list
 
-    def release(self, comp, path):
-        self.rack.op('td_resolve').module.release(self.rack, comp, path)
+    def rule(self, comp, kind, path, payload):
+        self.rack.op('td_resolve').module.apply(self.rack, comp, kind, path, payload)
 
 
 _LINKS = {}

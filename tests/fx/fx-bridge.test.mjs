@@ -105,7 +105,8 @@ test('wire messages are validated strictly', () => {
   assert.deepEqual(parseWireMessage('{"address":"/a","args":[1,"x",true,null]}'), {address: '/a', args: [1, 'x', true, null]});
   assert.deepEqual(parseWireMessage('{"address":"/a"}'), {address: '/a', args: []});
   assert.throws(() => parseWireMessage('{"address":"/a","args":[1e999]}'), /finite|Not JSON/);
-  assert.throws(() => parseWireMessage(`{"address":"/a","args":["${'s'.repeat(2000)}"]}`), /short strings/);
+  assert.throws(() => parseWireMessage(`{"address":"/a","args":["${'s'.repeat(9000)}"]}`), /short strings/);
+  assert.deepEqual(parseWireMessage(`{"address":"/a","args":["${'s'.repeat(8192)}"]}`).args[0].length, 8192);
   assert.throws(() => parseWireMessage('{"address":"/a","args":["a\\u0000b"]}'), /short strings/);
   assert.equal(toWireMessage({address: '/a', args: [Infinity, 1]}), '{"address":"/a","args":[null,1]}');
   assert.equal(toWireMessage({address: '/a', args: [Uint8Array.of(1)]}), null);
