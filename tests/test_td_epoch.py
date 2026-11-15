@@ -129,6 +129,39 @@ class EpochTests(unittest.TestCase):
         self.assertAlmostEqual(latch.at(2 / 12, 0.0), 2 / 12, msg="the same history after a seek and a return")
         self.assertEqual(latch.levels[1], 1.0)
 
+    def test_a_backward_seek_replays_from_a_saved_state_and_gives_the_same_epoch(self):
+        """CodeRabbit on #150: every backward seek replayed from frame 0, so scrubbing backward cost quadratic time. The latch now keeps
+        a state every CHECKPOINT frames; the answers must equal a latch that replays from the start, and a seek must walk at most
+        CHECKPOINT frames."""
+        spec = {"order": ["reset"], "params": {"reset": {"min": 0, "max": 12, "step": 0.01}}, "macro": [], "automation": [
+            {"parameter": "params.reset", "interpolation": "step", "keyframes": [{"time": 0, "value": 0}, {"time": 7.0, "value": 40}, {"time": 14.0, "value": 0},
+                                                                              {"time": 21.0, "value": 40}, {"time": 28.0, "value": 0}]}], "events": []}
+        base = {"intensity": 1.0, "wet": 1.0, "params": {"reset": 0.0}, "bypass": False, "solo": False}
+        fps = 12.0
+        walked = []
+        original = resolve.resolve_node
+
+        def counting(*args, **kwargs):
+            walked.append(1)
+            return original(*args, **kwargs)
+
+        fast, slow = resolve.EpochLatch(spec, base, fps), resolve.EpochLatch(spec, base, fps)
+        slow.CHECKPOINT = 10 ** 9   # never saves a state: every backward seek replays from the start
+        resolve.resolve_node = counting
+        try:
+            fast.at(40.0)
+            slow.at(40.0)
+            for time in (35.5, 35.0, 29.9, 28.0, 22.2, 14.01, 13.9, 7.5, 6.9, 0.0, 12.0, 30.0, 27.99, 40.0):
+                before, was = len(walked), fast.frame
+                answer = fast.at(time)
+                cost = len(walked) - before
+                self.assertEqual(answer, slow.at(time), msg=time)
+                target = int(max(0.0, time) * fps + 1e-6)
+                if target < was:   # a backward seek; going forward walks the frames in between
+                    self.assertLessEqual(cost, resolve.EpochLatch.CHECKPOINT, msg=time)
+        finally:
+            resolve.resolve_node = original
+
     def test_the_epoch_row_is_written_for_feedback_only(self):
         ramp = self.data["ramp"]
         node = {"order": ramp["resolve"]["order"]}

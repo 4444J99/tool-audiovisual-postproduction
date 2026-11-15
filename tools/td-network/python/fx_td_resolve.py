@@ -185,20 +185,25 @@ class EpochLatch:
     each time the resolved Reset time becomes reached (`time >= reset`) after not being reached, the epoch moves to that frame's
     time; it stays there until the next crossing. It is 0 before the first. The epoch cannot be derived from the current Reset
     time alone (an automated Reset that tracks the playhead never crosses), so the latch remembers; a backward seek replays from
-    the start, so the answer never depends on the order the playhead moved in.
+    the nearest saved state (every CHECKPOINT frames), so the answer never depends on the order the playhead moved in.
 
     `at(time, control)` returns the epoch at `time`. The sidechain level each frame was judged on is recorded the first time that
     frame is walked and never changed afterwards: a frame that is the one asked about takes the level passed in, a frame walked on the
     way there takes the level of the frame before it (the level held until the next observation), and a replay after a backward seek
     uses exactly the recorded levels, so a sidechain-modulated Reset time gives the same epoch however the playhead moved, as the
     workbench's per-frame history does. The first frame walked takes the level passed in."""
+    CHECKPOINT = 64    # frames between saved states; a backward seek restarts from the nearest one at or before its frame
+
     def __init__(self, spec, base, fps=EPOCH_FPS):
         self.spec, self.base, self.fps = spec, base, fps
         self.levels = {}       # frame -> the sidechain level that frame was judged on
+        self.checkpoints = {}  # frame (a multiple of CHECKPOINT, or -1) -> (active, epoch) after that frame was walked
         self._restart()
 
-    def _restart(self):
-        self.frame, self.active, self.epoch = -1, False, 0.0
+    def _restart(self, frame=-1):
+        """Return to the state after `frame` (-1: before the first frame). Only a frame whose state was saved can be returned to."""
+        self.frame = frame
+        self.active, self.epoch = self.checkpoints.get(frame, (False, 0.0))
 
     def _step(self, frame, control):
         time = frame / self.fps
@@ -213,12 +218,16 @@ class EpochLatch:
             raise ValueError('epoch time must be finite')
         frame = int(math.floor(max(0.0, time) * self.fps + 1e-6))
         if frame < self.frame:
-            self._restart()
+            # a state is saved every CHECKPOINT frames as the walk passes, so the replay starts there, not at frame 0: scrubbing
+            # backward costs at most CHECKPOINT steps per seek instead of the whole history
+            self._restart(max((c for c in self.checkpoints if c <= frame), default=-1))
         while self.frame < frame:
             self.frame += 1
             if self.frame not in self.levels:
                 self.levels[self.frame] = control if self.frame == frame or self.frame - 1 not in self.levels else self.levels[self.frame - 1]
             self._step(self.frame, self.levels[self.frame])
+            if self.frame % self.CHECKPOINT == 0:
+                self.checkpoints[self.frame] = (self.active, self.epoch)
         return self.epoch
 
 

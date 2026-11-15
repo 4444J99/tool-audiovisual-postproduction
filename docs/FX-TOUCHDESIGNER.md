@@ -236,6 +236,8 @@ Sample-wise expressions (Signal Damage's hold, the source's sidechain envelope) 
 
 **Known limits, stateful operations in a live network:** (1) Signal Damage's sample-rate hold is an Expression CHOP, which sees one time slice at a time: the hold phase and the held sample do not carry from one cook to the next, so a hold longer than a slice (reduction under about 3 kHz at a 60 Hz cook) restarts at each slice boundary; a faithful hold needs a stateful operator (a trigger at the reduced rate into a Hold CHOP). (2) Freeze / Hold's picture is the newest frame the Cache TOP held when it stopped taking frames, so the playhead moving into a hold from outside it (a seek) shows the cache's newest frame, not the frame at the capture time; the workbench re-samples the capture time. (3) The voice envelope is block-rate, above. All three are in issue 151.
 
+**Scrubbing backward through Feedback's reset epoch.** `EpochLatch` keeps its state every 64 picture frames as the walk passes, so a backward seek replays at most 64 frames from the nearest saved state instead of the whole history; measured on a 2,000-frame walk, 200 backward single-frame seeks took 1.40 s before and 0.023 s after, with identical answers (`tests/test_td_epoch.py`).
+
 **Not applied by this network:** the effects of the other seven processors (Routing, Stutter, Granular, Reverse,
 Queue / Overflow, Exchange, Typography), which pass signal through unchanged and are named in the
 spec's `warnings` (Reverse and part of Stutter read source time ahead of the playhead, which a live network cannot);
