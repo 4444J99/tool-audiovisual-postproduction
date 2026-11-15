@@ -422,7 +422,7 @@ def _derive(root: Path, locations: Mapping[str, str], spec: Mapping[str, Any] | 
             lo, hi = Fraction(a, rate_wav), Fraction(b, rate_wav)
             share = _covered(lo, hi, cue_ranges) / (hi - lo)
             if share < floor:
-                uncovered.append(f"dialogue span {float(lo):.3f}-{float(hi):.3f} s ({label} detector) is {float(share):.0%} covered by cues, under {float(floor):.0%}")
+                uncovered.append(f"dialogue span {float(lo):.3f}-{float(hi):.3f} s ({label} detector) is {float(share):.1%} covered by cues, under {float(floor):.1%}")
     checks.append(_check("captions.covers_dialogue", bool(spans) and bool(other) and not uncovered,
                          "every dialogue-active span, under the placement detector and under the independent one, is covered by cues to at least independent_overlap_min",
                          independent_overlap_min=spec["independent_overlap_min"],
@@ -435,7 +435,7 @@ def _derive(root: Path, locations: Mapping[str, str], spec: Mapping[str, Any] | 
         share = _covered(begin, end, heard) / (end - begin) if end > begin else Fraction(0)
         overlaps.append(round(float(share), 4))
         if share < floor:
-            unheard.append(f"cue {c['index']} ({float(begin):.3f}-{float(end):.3f} s) is only {float(share):.0%} inside speech heard by the independent detector, under {float(floor):.0%}")
+            unheard.append(f"cue {c['index']} ({float(begin):.3f}-{float(end):.3f} s) is only {float(share):.1%} inside speech heard by the independent detector, under {float(floor):.1%}")
     checks.append(_check("captions.placement_independent", bool(cues) and bool(other) and not unheard,
                          "every cue lies mostly inside speech found by a detector whose constants neither the QC spec nor the captions stage sets",
                          independent_overlap_min=spec["independent_overlap_min"], overlaps=overlaps, problems=unheard))
