@@ -107,7 +107,7 @@ node tools/fx-td-network.mjs web/fx/fixtures/closed-inbox.json --out outputs/td 
 ```
 
 This writes `<id>.network.json` (the spec: operators, parameters, wiring, contract), `<id>.build.py` (self-contained,
-with the spec embedded) and `modules/` (the Python that ends up in Text DATs, for reading). Options: `--source-file`,
+with the spec embedded) and `modules/` (the Python that ends up in Text DATs, for reading). Options: `--picture-fps` (12, the workbench's picture bank rate: the grid Feedback's reset epoch is latched on), `--source-file`,
 `--osc-in-port` (7000), `--osc-out-port` (7001), `--host`, `--root-name` (`fx_rack`). Output is deterministic: the
 same patch gives the same bytes.
 
@@ -146,7 +146,7 @@ that is not in it is ignored.
 **Resolved parameters (macros, automation, events, sidechain, Solo).** A custom parameter is a processor's *base* value.
 What its blend, bypass (and the effects, as they are added) read is the **resolved** value in the processor's own
 `resolved` Table DAT (rows `intensity`, `wet`, `bypass`, `solo`, `active`, then `param.<key>` for each catalog
-parameter). An Execute DAT (`frame_exec`) calls `td_resolve` at the start of every frame, which reproduces the
+parameter, and `epoch` for a processor with a Reset time, see Feedback below). An Execute DAT (`frame_exec`) calls `td_resolve` at the start of every frame, which reproduces the
 workbench's `evaluatedNode` at the rack's playhead (`Time`, reported by the workbench on `/fx/time`):
 
 1. Intensity and Wet: base, then the automation lane, then the patch's events, clamped to 0 to 1, then sidechain modulation.
@@ -205,7 +205,7 @@ is released in the network and stays so.
 Editing a base parameter in TouchDesigner never sends the resolved value back over OSC: only edits made to the custom
 parameters are exchanged.
 
-**Effects (five of thirteen).** Between `in_<port>` and `proc_<port>` a processor now holds the effect chain
+**Effects (six of thirteen).** Between `in_<port>` and `proc_<port>` a processor now holds the effect chain
 (`tools/td-network/effects.mjs`). Every effect parameter is an expression over the processor's resolved values, so
 macros, automation, events and sidechain drive it; the chain stays inside the processor, keeps the input's resolution,
 and the network stays static (a count parameter is a fixed maximum of stages switched by its resolved value).
@@ -213,9 +213,10 @@ and the network stays static (a count parameter is a fixed maximum of stages swi
 | Processor | Picture | Audio |
 |---|---|---|
 | Delay / Echo | Cache TOP with eight Cache Select TOPs at `n x Tap delay` frames back, Level TOP gain `Tap decay^n` while `n <= Echo taps`, summed with the input; the cache holds 240 frames (4 s at 60 fps) and a tap that would reach further back is switched off, not collapsed onto the oldest frame | eight Delay CHOPs at `n x Tap delay`, same gains, the delayed returns only (the processor's dry branch carries the direct signal, so a fully wet delay is silent before its first tap) |
+| Freeze / Hold | for `Hold duration` seconds from `Capture time`: a Cache TOP stops taking frames and its newest frame is shown through a Switch TOP, faded by a Level TOP toward 0.2 by `Hold decay`, shaken sideways by a Transform TOP (`Micro motion`) | two Delay CHOPs at the age of two grains of `Voice hold grain` seconds started a half grain apart, Hann-weighted (`0.5 - 0.5 cos`) and complementary, decaying by `exp(-Hold decay x elapsed)` with a 6 ms onset and a `Release edge` tail; outside the hold the input passes. The first half grain of a hold reads the live signal for the second grain, where the workbench reads ahead |
 | Gate / Erase | Level TOP opacity from the gate | Math CHOP gain from the gate: periodic (`Open fraction`, `Gate period`, `Gate phase` against the playhead) or sidechain threshold (with no control cable the gate reads zero and stays closed); `Edge time` smooths it with a Lag CHOP; `Closed-state residue` is its floor |
-| Signal Damage | Level TOP stepping (`1 / Picture tone levels`), then Fit TOP down to the requested mosaic cells and back up to the input size, both nearest | drive (Math CHOP), bit-depth quantise (Expression CHOP), bandwidth limit (Lag CHOP, `1 / (2 pi band)`), independent output level |
-| Feedback | Feedback TOP returned through a Transform TOP (`Scale per recurrence`, `Rotation per recurrence`) and a Level TOP (`Return gain`), added to the input | none |
+| Signal Damage | Level TOP stepping (`1 / Picture tone levels`), then Fit TOP down to the requested mosaic cells and back up to the input size, both nearest | drive (Math CHOP), sample-rate hold (Expression CHOP: a new sample every `sample rate / Audio sample-rate reduction` samples, taken where the workbench's hold phase reaches 1, within one sample), bit-depth quantise (Expression CHOP), bandwidth limit (Lag CHOP, `1 / (2 pi band)`), independent output level |
+| Feedback | up to 16 returns, each a Cache Select tap `k x Feedback delay` back, a Transform TOP (`Scale per recurrence^k`, `Rotation per recurrence x k`, `extend` zero so the area outside the scaled picture is transparent), a Level TOP whose opacity is `Return gain^k`, and an Over TOP laying it over the picture so far (source-over, as the workbench draws it); return k exists while `k <= min(Maximum recurrences, floor((time - epoch) / delay))`, `Return gain^k >= Tail threshold`, and the tap is inside the 240-frame cache; `epoch` is the playhead time at which `Reset time` was last reached (0 before), a resolved row the resolver latches frame by frame as the workbench does, so a Reset time that tracks the playhead never cuts the returns off | none |
 | Displacement | moving Noise TOP (`Field scale`, `Field movement`) pulling the picture through a Displace TOP along `Direction` | none |
 
 Like the workbench, a processor builds its audio chain only when it targets `voice` and its picture chain only when it targets `picture`, `body`, `objects` or `room`; otherwise that signal passes through and the spec's `warnings` say so.
@@ -224,10 +225,21 @@ Like the workbench, a processor builds its audio chain only when it targets `voi
 at each parameter's minimum, default and maximum, and checks the arithmetic: tap gains and delays, the gate's duty
 cycle, the bit-depth step grid, the mosaic cell counts, the displaced axis and the feedback transform.
 
-**Not applied by this network:** the effects of the other eight processors (Routing, Stutter, Granular, Reverse,
-Freeze / Hold, Queue / Overflow, Exchange, Typography), which pass signal through unchanged and are named in the
-spec's `warnings`; the audio of Feedback and Displacement; Signal Damage's sample-rate reduction and picture `Signal drive`;
-Feedback's `Maximum recurrences`, `Tail threshold` and `Reset time`; Displacement's `Boundary spill`, audio warp and ring
+`tests/test_td_epoch.py` runs the real `VisualEngine.feedbackEpoch` and the resolver's `EpochLatch` over the same sequences of times (ramped, crossing, stepped, constant and never-reached Reset time, with backward seeks): they agree. `tests/test_td_effects.py` also compares the network against the workbench's own engines: Freeze's hold window against
+`freezeSourceTime` and its voice against `processAudioModule('freeze')` run over a ramp (each output sample then names the
+source time it read, so the delays and grain weights are checked sample by sample), Feedback's return rule over a grid of
+every parameter's extremes, and Damage's hold positions against the engine's hold phase.
+
+Sample-wise expressions (Signal Damage's hold, the source's sidechain envelope) use the Expression CHOP's `me.sampleIndex`, `me.chanIndex` and `me.inputVal`, the members its class documents (an earlier `me.inputIndex` is not one; the test stand-in now has only the documented members) and read the channel they are evaluated for, so a stereo signal keeps its right channel.
+
+**Known limit, Freeze / Hold voice:** the grain weights, decay and 6 ms onset are Math CHOP gains and the grain positions Delay CHOP delays, each evaluated once per cook from the playhead, not per audio sample. At a 60 Hz cook the 6 ms onset and the 25 ms minimum grain crossfade step instead of ramping, so the voice hold is a block-rate approximation of the workbench's sample-accurate overlap (the test checks the model at each tested timestamp, not the cook-rate stepping). Sample-rate envelopes need a CHOP-generated ramp chain that can only be verified in TouchDesigner.
+
+**Known limits, stateful operations in a live network:** (1) Signal Damage's sample-rate hold is an Expression CHOP, which sees one time slice at a time: the hold phase and the held sample do not carry from one cook to the next, so a hold longer than a slice (reduction under about 3 kHz at a 60 Hz cook) restarts at each slice boundary; a faithful hold needs a stateful operator (a trigger at the reduced rate into a Hold CHOP). (2) Freeze / Hold's picture is the newest frame the Cache TOP held when it stopped taking frames, so the playhead moving into a hold from outside it (a seek) shows the cache's newest frame, not the frame at the capture time; the workbench re-samples the capture time. (3) The voice envelope is block-rate, above. All three are in issue 151.
+
+**Not applied by this network:** the effects of the other seven processors (Routing, Stutter, Granular, Reverse,
+Queue / Overflow, Exchange, Typography), which pass signal through unchanged and are named in the
+spec's `warnings` (Reverse and part of Stutter read source time ahead of the playhead, which a live network cannot);
+the audio of Feedback and Displacement; Signal Damage's picture `Signal drive`; Displacement's `Boundary spill`, audio warp and ring
 blend; the source excerpt offset (`Offset`, read-only); and audio device output. Text wires carry no gain, and several
 text wires at one mix read only the first. The menu values these chains set (`custom` resolution, `nearest` filtering,
 `add` combining) are not in the application's parameter reference, which lists parameters but not menu tokens, so they stay

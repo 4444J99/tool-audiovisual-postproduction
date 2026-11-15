@@ -271,6 +271,7 @@ test('validator catches broken specs', () => {
     'a processor without its resolve block': spec => { delete spec.contract.nodes[0].resolve; spec.operators.find(o => o.name === 'td_contract').text = JSON.stringify(spec.contract); },
     'resolve range differing from the catalog': spec => { const block = spec.contract.nodes[0].resolve; block.params[block.order[0]].max += 1; spec.operators.find(o => o.name === 'td_contract').text = JSON.stringify(spec.contract); },
     'resolved table missing a row': spec => { const o = spec.operators.find(op => op.name === 'resolved'); o.table = o.table.slice(1); },
+    'a contract without a picture rate': spec => { spec.contract.pictureFps = 0; spec.operators.find(o => o.name === 'td_contract').text = JSON.stringify(spec.contract); },
     'select given an input': spec => { const o = spec.operators.find(op => op.type === 'selectCHOP'); o.inputs = ['in_audio']; },
   };
   assert.deepEqual(validateNetworkSpec(base()), []);
@@ -283,7 +284,7 @@ test('validator catches broken specs', () => {
   const effectCases = {
     'effect expression reading a sibling that is not in its processor': spec => { const o = spec.operators.find(op => op.name === 'gate_picture'); o.pars.opacity = {expr: "float(parent().op('nowhere')[0].eval())", resolved: [], rack: [], siblings: ['nowhere']}; },
     'effect expression reading a rack parameter the rack lacks': spec => { const o = spec.operators.find(op => op.name === 'gate_raw'); o.pars.const0value = {expr: 'parent().parent().par.Nope', resolved: [], rack: ['Nope'], siblings: []}; },
-    'reference to a missing operator inside a processor': spec => { const o = spec.operators.find(op => op.type === 'feedbackTOP'); o.pars.top = {ref: o.parent + '/ghost'}; },
+    'reference to a missing operator inside a processor': spec => { const o = spec.operators.find(op => op.name === 'fb_frame_1'); o.pars.cachetop = {ref: o.parent + '/ghost'}; },
   };
   for (const [label, mutate] of Object.entries(effectCases)) {
     const spec = structuredClone(buildNetworkSpec(createPatch('closed-inbox')));
@@ -493,4 +494,11 @@ test('the processors read their wet, bypass and parameters from the resolved tab
   const table = inside.find(o => o.name === 'resolved');
   assert.deepEqual(table.table.slice(0, 5).map(row => row[0]), ['intensity', 'wet', 'bypass', 'solo', 'active']);
   assert.ok(spec.operators.find(o => o.name === 'frame_exec' && o.type === 'executeDAT' && o.pars.framestart === 1));
+});
+
+test('the picture rate the feedback epoch is latched on defaults to the workbench\'s 12 and can be set', () => {
+  const patch = createPatch('closed-inbox');
+  assert.equal(buildNetworkSpec(patch).contract.pictureFps, 12);
+  assert.equal(buildNetworkSpec(patch, {pictureFps: 24}).contract.pictureFps, 24);
+  for (const bad of [0, -1, Number.NaN, Infinity]) assert.throws(() => buildNetworkSpec(patch, {pictureFps: bad}), /pictureFps/, String(bad));
 });
