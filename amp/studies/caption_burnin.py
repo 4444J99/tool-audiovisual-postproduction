@@ -121,7 +121,10 @@ def normalize_segments(segments: Sequence[Mapping[str, Any]] | None, frames: int
 
 def make_params(srt_text: str, fps: Any, frames: int, geometry: Mapping[str, Any] | None = None,
                 segments: Sequence[Mapping[str, Any]] | None = None) -> dict[str, Any]:
-    rate = cap.parse_fps(fps)
+    try:
+        rate = cap.parse_fps(fps)
+    except cap.CaptionError as error:
+        raise BurnError(f"fps: {error}") from error
     if not isinstance(frames, int) or isinstance(frames, bool) or frames < 1 or frames > 100_000:
         raise BurnError("frames must be a whole number between 1 and 100000")
     return {"schema": SCHEMA, "pixel_format": "gray", "fps": str(rate), "frames": frames, "geometry": normalize_geometry(geometry),

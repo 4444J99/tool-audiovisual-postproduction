@@ -185,6 +185,78 @@ class ChainTests(unittest.TestCase):
         self.assertTrue(any("not the filled dialogue at the recorded gain" in p for p in problems), problems)
         self.assertTrue(any("measured now" in p and "LUFS" in p for p in problems), problems)
 
+    def reseal(self, target, rel, data):
+        """Write ``data`` to ``rel`` and rewrite every manifest hash (stage outputs, later inputs, chain hash) to agree."""
+        old = pc.sha256_file(target / rel)
+        (target / rel).write_bytes(data)
+        new = pc.sha256_bytes(data)
+        manifest = json.loads((target / "pipeline-manifest.json").read_text())
+        for entry in manifest["stages"]:
+            for side in ("inputs", "outputs"):
+                for label, value in entry[side].items():
+                    if value == old:
+                        entry[side][label] = new
+        manifest["chain_sha256"] = pc.chain_hash(manifest)
+        (target / "pipeline-manifest.json").write_text(json.dumps(manifest))
+
+    def test_captions_and_burned_frames_are_stages_with_linked_hashes(self):
+        names = [s["stage"] for s in self.manifest["stages"]]
+        self.assertEqual(names[-2:], ["captions", "burnin"])
+        caps, burn = self.stage("captions"), self.stage("burnin")
+        self.assertEqual(caps["inputs"], {"final-ledger": self.stage("final_ledger")["outputs"]["final-ledger"]})
+        self.assertEqual(burn["inputs"]["captions-srt"], caps["outputs"]["captions-srt"])
+        self.assertEqual(burn["frames"], self.stage("final_ledger")["total_frames"])
+        report = json.loads((self.out / "captions" / "burnin-report.json").read_text())
+        self.assertEqual(report["chain_head"], burn["chain_head"])
+        self.assertEqual(len(report["frame_sha256"]), burn["frames"])
+        self.assertEqual([s["seed"] for s in report["params"]["segments"]][:1], [pc.plate_hash(self.stage("set")["graph_sha256"], json.loads((self.out / "plan" / "final-ledger.json").read_text())["shots"][0])])
+        self.assertGreater(burn["captioned_frames"], 0)
+        self.assertEqual(pc.cross_checks(self.out), [])
+
+    def test_a_flipped_burned_pixel_is_named_by_the_manifest_and_by_rederiving_after_a_reseal(self):
+        target = self.copy()
+        frames = target / "captions" / "frames.y8"
+        data = bytearray(frames.read_bytes())
+        size = 240 * 48
+        data[300 * size + 11] ^= 1
+        self.reseal(target, "captions/frames.y8", bytes(data))
+        self.assertEqual(pc.verify_chain(target), [], "the manifest alone no longer objects")
+        problems = pc.cross_checks(target)
+        self.assertTrue(any("burn-in: frame 300 differs" in p for p in problems), problems)
+        plain = Path(self.tmp.name) / "plain-burnin-copy"
+        shutil.copytree(self.out, plain)
+        (plain / "captions" / "frames.y8").write_bytes(bytes(data))
+        self.assertTrue(any("output burnin-frames on disk" in p for p in pc.verify_chain(plain)))
+
+    def test_a_reworded_caption_is_caught_after_a_reseal(self):
+        target = self.copy()
+        srt = (target / "captions" / "captions.srt").read_bytes()
+        self.assertIn(b"Welcome", srt)
+        self.reseal(target, "captions/captions.srt", srt.replace(b"Welcome", b"Welcame"))
+        self.assertEqual(pc.verify_chain(target), [])
+        problems = pc.cross_checks(target)
+        self.assertTrue(any("caption file is not the one the frames were burned from" in p for p in problems), problems)
+        self.assertTrue(any("captions report was not made from the caption file" in p for p in problems), problems)
+        self.assertTrue(any("WebVTT file does not carry the same cues" in p for p in problems), problems)
+
+    def test_a_burn_report_rewritten_to_other_backgrounds_is_caught(self):
+        target = self.copy()
+        report = json.loads((target / "captions" / "burnin-report.json").read_text())
+        report["params"]["segments"][0]["seed"] = "ab" * 32
+        self.reseal(target, "captions/burnin-report.json", pc.dumps(report).encode())
+        problems = pc.cross_checks(target)
+        self.assertTrue(any("backgrounds are not the shot segments" in p for p in problems), problems)
+
+    def test_the_manifest_cannot_drop_the_burn_in_stage_unnoticed(self):
+        target = self.copy()
+        manifest = json.loads((target / "pipeline-manifest.json").read_text())
+        manifest["stages"] = [s for s in manifest["stages"] if s["stage"] != "burnin"]
+        manifest["chain_sha256"] = pc.chain_hash(manifest)
+        (target / "pipeline-manifest.json").write_text(json.dumps(manifest))
+        self.assertEqual(pc.verify_chain(target), [], "a shorter manifest is internally consistent")
+        self.assertEqual([s["stage"] for s in manifest["stages"]][-1], "captions")
+        self.assertNotEqual([s["stage"] for s in manifest["stages"]], list(pc.STAGES))
+
     def test_declared_spec_must_match_the_recorded_one(self):
         self.assertEqual(pc.cross_checks(self.out, "ebu_r128"), [])
         problems = pc.cross_checks(self.out, "podcast")

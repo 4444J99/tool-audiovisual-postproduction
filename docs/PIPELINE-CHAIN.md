@@ -18,6 +18,8 @@ python tools/av_pipeline.py verify --output outputs/av-pipeline [--delivery ebu_
 | `delivery` | filled dialogue | delivered dialogue and delivery report ([LOUDNESS](LOUDNESS.md)) |
 | `final_ledger` | the suggested plan, delivered dialogue | per-shot ledger and edit timeline, naming the delivered audio |
 | `colour` | final ledger, set graph hash, delivered dialogue | layer plan and ledger ([COLOUR-AND-LAYERS](COLOUR-AND-LAYERS.md)) |
+| `captions` | final ledger (frame rate) | SRT, WebVTT and report from invented word timing, laid out on the edit's frame grid ([CAPTIONS](CAPTIONS.md)) |
+| `burnin` | SRT, final ledger, set graph hash | the cues drawn onto 240x48 luma frames (one per edit frame, background tinted per shot) and a hash-chained frame ledger ([CAPTIONS](CAPTIONS.md#burn-in)) |
 
 `pipeline-manifest.json` lists each stage's input and output hashes and a hash over the whole manifest. `verify` reports, by name, an artefact whose bytes differ from the manifest, a stage input that is not an earlier stage's output, and a manifest edited after the fact. It also checks content links a hash cannot show: the final ledger was derived from the suggested plan, the colour plan's dialogue source is the filled WAV, and each plate's identity is derived from the set graph hash and its ledger row.
 
@@ -44,3 +46,7 @@ The Blender build, when requested, is recorded as a final `blender` stage with t
 Plate identities are declared, not rendered: no render exists in this chain, and the manifest says so. `--blender` additionally builds the set spec headless and requires Blender's graph hash to equal the `set` stage's.
 
 Everything is invented. A real set spec stays with the set it describes, never in this repository; build it with `tools/set_scene.py` from a private path.
+
+### Burn-in tamper detection
+
+`verify` re-renders all frames of the `burnin` stage from the SRT file, the final ledger and the recorded parameters and compares them with `captions/frames.y8` byte for byte, so a forger who edits a frame, the digest list, the chain head, the report and the manifest together is still named by the first frame that differs. The caption file must be the one the report was made from, the WebVTT file must carry the same cues as the SRT file, and the burn-in background segments must be the final ledger's shots. Tests cover a flipped pixel, a re-sealed forgery, a reworded caption and rewritten backgrounds.
