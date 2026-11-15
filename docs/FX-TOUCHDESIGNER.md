@@ -318,32 +318,42 @@ instead of the fixed sequence. Without the flag it behaves as before. Nothing he
 ## First in-app check for the owner
 
 Not yet done. Do this once, in this order, and stop at the first step that fails; record what you saw (a screenshot of the
-network and the Textport output is enough) before changing anything.
+network and the Textport output is enough) before changing anything. Do not run `tools/fx-td-simulator.mjs` during this
+check: it binds UDP 7000 (it stands in for TouchDesigner) and would collide with the real `osc_in`; keep it for the
+no-TouchDesigner procedure above.
 
-1. Generate the network without opening TouchDesigner:
-   `node tools/fx-td-network.mjs web/fx/fixtures/closed-inbox.json --out outputs/td` (needs Node 22 or newer). Confirm
-   `outputs/td/closed-inbox.build.py` and `closed-inbox.network.json` exist.
+1. Prepare, without TouchDesigner (Node 22 or newer):
+   `node tools/fx-td-network.mjs web/fx/fixtures/closed-inbox.json --out outputs/td --source-file /absolute/path/to/any-short-clip-with-audio.mp4`
+   (without `--source-file`, `fx_source.Sourcefile` is empty and nothing flows, so there is no picture or audio to judge).
+   Confirm `outputs/td/closed-inbox.build.py` and `closed-inbox.network.json` exist. For the workbench side also run
+   `node tools/make-synthetic-asset-pack.mjs web/fx/assets` and `python3 -m http.server 8765 --bind 127.0.0.1` from the
+   repository root.
 2. Open TouchDesigner and a new empty project. Open **Dialogs > Textport and DATs** (Alt+T).
 3. In the Textport run
    `exec(open("/absolute/path/to/outputs/td/closed-inbox.build.py", encoding="utf-8").read(), {"FX_PARENT": "/project1"})`.
    Look for: no Python traceback, and a component named `fx_rack` appearing in `/project1`. A traceback names the operator or
    parameter that does not exist in your build: copy it verbatim.
 4. Open `fx_rack`. Look for: one `fx_<id>` Base COMP per processor in the patch, `osc_in` and `osc_out` DATs, `td_osc` and
-   `td_contract` Text DATs, and `video_out` / `audio_out` Nulls. Check no operator is red (error) or yellow (warning).
+   `td_contract` Text DATs, and `video_out` / `audio_out` Nulls. Check no operator is red (error) or yellow (warning),
+   and that `fx_source` shows the clip on its picture output.
 5. Confirm the menu tokens the network sets but that the parameter reference does not list (the only values not verified
    against the application): `chopop` = `add` on the Math CHOPs (`mixin_*`, `blend_audio`, `dly_sum`, `fz_sum`);
-   `inputfiltertype` = `nearest` on the two Text-adjacent effect TOPs set in `tools/td-network/effects.mjs` (lines 47 and 52);
+   `inputfiltertype` = `nearest` on the two operators set in `tools/td-network/effects.mjs` (lines 47 and 52);
    and that the Delay and Lag CHOPs' unit menus read seconds by default (the expressions assume seconds). A wrong token
    shows as a parameter error on that operator; note the token the menu actually offers.
-6. Run the bridge in a terminal: `node tools/fx-td-bridge.mjs`. Check `osc_in` listens on 7000 and `osc_out` targets 7001
-   (Info CHOP/DAT or the operator's own parameters).
-7. Send the OSC contract. Easiest first: `node tools/fx-td-simulator.mjs outputs/bridge-e2e.json --spec outputs/td/closed-inbox.network.json`
-   (stand-in media pack: see "Try the bridge without TouchDesigner"); then, from TouchDesigner, change a processor's `Intensity`
-   custom parameter and watch the bridge log (`[fx-bridge]` lines) a `/fx/node/<id>/intensity` message in the 0 to 1 range, and send
-   `/fx/sync` and `/fx/node/<id>/bypass 1` into port 7000 and watch the matching parameter change.
-8. Look for: the rack's `Status` parameter reading `linked: N processors` (not `mismatch`), the playhead `Time` following `/fx/time`,
-   the picture and audio outputs changing when Intensity/Wet/Bypass change, and no feedback loop (a parameter wired to its own
-   report must settle, not oscillate).
+6. Start the bridge in a terminal: `node tools/fx-td-bridge.mjs`. In a browser open
+   `http://127.0.0.1:8765/web/fx/index.html`, then **Control > TouchDesigner (OSC) > Connect bridge**. The bridge prints
+   only connection lines (`[fx-bridge]`), not OSC messages. In TouchDesigner, `osc_in` should listen on 7000 and
+   `osc_out` target 7001 (see their parameters).
+7. Rack to TouchDesigner: the page reports its state on connect. Look for: rows arriving in the `osc_in` DAT
+   (`/fx/count`, `/fx/node/<id>/type`, ...). Pulse the rack's `Sync` parameter to ask for the state again (it sends
+   `/fx/sync` through `osc_out` to the bridge; do not send `/fx/sync` to port 7000, which ignores it). The rack's
+   `Status` should read `linked: N processors`, not `mismatch`.
+8. TouchDesigner to rack: edit a processor's `Intensity` custom parameter. Look for: the matching knob in the workbench's
+   Control tab moving to the same normalised position (that is the observable result; the bridge does not log it). Then set
+   a processor's `Bypass` to 1 and look for the workbench's Bypass switch turning on. Look also for: the rack's `Time`
+   following the workbench playhead, the picture and audio at `video_out` / `audio_out` changing when Intensity, Wet and
+   Bypass change, and no feedback loop (a parameter wired to its own report must settle, not oscillate).
 9. Report back which step first failed, or that all passed. Until then every TouchDesigner claim in this repository is
    unverified.
 
