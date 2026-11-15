@@ -13,7 +13,7 @@ python tools/delivery_qc.py verify --output outputs/av-pipeline [--qc-spec qc.js
 
 ## The report
 
-Deterministic JSON (no clock, no host): `schema`, `spec`, `status` (`pass` or `fail`), `failed`, `inputs` (SHA-256 of each of the eleven artefacts read: caption report, SRT, WebVTT, burned frames, burn-in report, delivery report, delivered dialogue, final ledger, colour plan, set spec, shot plan, suggested plan), and `checks`: fifteen entries, each with `id`, `ok`, `detail` and the measured facts.
+Deterministic JSON (no clock, no host): `schema`, `spec`, `status` (`pass` or `fail`), `failed`, `inputs` (SHA-256 of each of the twelve artefacts read: caption report, SRT, WebVTT, burned frames, burn-in report, delivery report, delivered dialogue, final ledger, colour plan, set spec, shot plan, suggested plan), and `checks`: seventeen entries, each with `id`, `ok`, `detail`, `independence` (see below) and the measured facts; and `cannot_fail_independently`, the ids of the checks that pass by construction on an unmodified chain.
 
 | Check | What it re-derives and requires |
 |---|---|
@@ -25,6 +25,8 @@ Deterministic JSON (no clock, no host): `schema`, `spec`, `status` (`pass` or `f
 | `timebase.set_caches` | each cache named by a shot exists in the set spec and covers the shot's render frames **including handles**; the plan's set block lists the same caches. The set spec has no frame rate of its own, so its frame numbers are read at the plan's rate |
 | `timebase.timecode` | shot boundaries convert to non-drop `HH:MM:SS:FF` and back (the label uses the nominal integer rate; the exact rate is recorded); every SRT stamp converts to the frame the caption and burn-in reports record; the WebVTT stamps stand for the same frames and its text equals the SRT's |
 | `captions.inside_dialogue` | every cue lies inside one dialogue-active span of the **delivered WAV**, within `span_tolerance_frames` |
+| `captions.covers_dialogue` | every dialogue-active span, found by the placement detector and by the independent detector, is covered by cues to at least `independent_overlap_min` (0.75): a spoken line with its cue deleted fails, even when every hash, report and the burn-in are re-derived |
+| `captions.placement_independent` | every cue lies at least `independent_overlap_min` inside speech heard by the independent detector (below), with a fixed two-frame tolerance a spec cannot widen |
 | `captions.max_length` | no cue is longer than `max_cue_frames` |
 | `captions.reading_rate` | no cue reads faster than `max_cps` characters per second, measured from the SRT file (line breaks not counted) |
 | `captions.inside_edit` | cues are ordered, do not overlap and lie inside the edit |
@@ -45,7 +47,20 @@ The captions are no longer laid on a timeline unrelated to the audio. The `capti
 
 ## Independence of the clean pass
 
-On the clean chain the caption placement and `captions.inside_dialogue` use the same detector at its default setting, so a clean pass is close to tautological: it shows that the stage did what it was written to do, not that the placement is right in any independent sense. The check earns its keep under change: a cue moved after the fact, a different `--qc-spec` detector, a swapped WAV or an edited caption file all fail it, because the judgement is re-derived from the bytes on disk rather than read from the stage's record.
+On the clean chain the caption placement and `captions.inside_dialogue` use the same detector at its default setting, so a clean pass shows that the stage did what it was written to do, not that the placement is right in any independent sense. The report now says so itself: every check carries `independence: {class, note}` and `cannot_fail_independently` lists the checks whose class is not `independent`:
+
+| Class | Meaning | Checks |
+|---|---|---|
+| `independent` | can fail for a reason the stage it judges did not guard against | the six `timebase` checks other than `timecode`, `captions.covers_dialogue`, `captions.placement_independent` |
+| `shared-detector` | same detector at its default as the captions stage | `captions.inside_dialogue` |
+| `shared-limit` | the stage already refuses the same limit | `captions.max_length`, `captions.reading_rate`, `captions.inside_edit` |
+| `shared-renderer` | compared with a re-render by the renderer that wrote the frames | `captions.burned_frames` |
+| `shared-measurer` | same BS.1770 code as the delivery stage | `loudness.report_agreement` |
+| `self-declared` | the spec is read from the artefact being judged | `loudness.spec` |
+| `partly-structural` | one half is an identity | `timebase.timecode`: the shot round trip cannot fail, the stamp comparisons can |
+| `weak` | fails only in one direction | `audio.within_edit`: shorter audio than the edit passes |
+
+The independent detector (`independent_spans`) uses a different method from the placement detector: 30 ms RMS windows on a 10 ms hop and a two-class Otsu split of the live frame levels, with no percentile and no margin. Its constants are fixed in `INDEPENDENT_DETECTOR`, not in the QC spec, so a `--qc-spec` that loosens `vad` or `span_tolerance_frames` cannot move what it hears. Audio whose 5th-to-95th percentile live levels are under 6 dB apart has no two classes and yields no span, which fails both checks that use it. `independent_overlap_min` may be set from 0.5 to 1 (lower is refused). Known limit, failing closed: where the gaps between lines are digital silence, the live frames are all speech and the split falls between loud and quiet speech, so soft word tails can drop out of the detector's active class and a correctly placed cue can fail `captions.placement_independent`; the invented dialogue carries a room-tone floor, so it does not arise on this chain. It still reads the same delivered WAV, so a forger who swaps in audio that suits the captions defeats every audio-based check; that is the limit of a consistency judgement.
 
 ## Tamper detection
 
