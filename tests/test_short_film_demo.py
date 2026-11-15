@@ -13,6 +13,9 @@ sys.path.insert(0, str(ROOT / "tools"))
 import short_film_demo as demo  # noqa: E402
 
 
+DOCUMENTED = ("chain_sha256", "frames_sha256", "delivered_dialogue_sha256", "qc_report_sha256", "captions_srt_sha256")
+
+
 def cli(*args):
     return subprocess.run([sys.executable, str(TOOL), *args], capture_output=True, text=True, cwd=ROOT)
 
@@ -142,5 +145,5 @@ class ShortFilmDemoTests(unittest.TestCase):
         text = DOC.read_text()
         self.assertIn("python tools/short_film_demo.py run --output outputs/short-film-demo", text)
         summary = json.loads(self.run_a.stdout)
-        for key in ("chain_sha256", "frames_sha256", "delivered_dialogue_sha256", "qc_report_sha256", "captions_srt_sha256"):
-            self.assertIn(summary[key], text, f"docs/DEMO.md is stale for {key}")
+        stale = {key: summary[key] for key in DOCUMENTED if summary[key] not in text}
+        self.assertEqual(stale, {}, "docs/DEMO.md does not list these observed hashes")
