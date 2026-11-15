@@ -60,6 +60,10 @@ The eight-layout comparison's placement rules are a pure module (`web/fx/layout-
 
 `tools/av_pipeline.py` runs set spec, shot plan, coverage matrix, room-tone fill and colour plan on synthetic inputs and pins each hand-off by hash ([guide](docs/PIPELINE-CHAIN.md)).
 
+## Loudness and true peak
+
+`tools/loudness.py` measures integrated loudness, loudness range and true peak (BS.1770-4, EBU R128), checks a mix against EBU, ATSC, streaming, podcast or your own spec, and applies one linear gain to reach a target, refusing (or, by choice, stopping short) when the true-peak ceiling forbids it; the written file is read back and measured ([guide](docs/LOUDNESS.md)).
+
 ## Room-tone fill
 
 `tools/room_tone_fill.py` finds digital-silence holes in edited dialogue, borrows steady room tone from the same recording, builds it into a loop-matched bed with equal-power crossfades, and fills each hole level-matched to the nearest real tone, leaving every other sample bit-identical ([guide](docs/ROOM-TONE-FILL.md)).
