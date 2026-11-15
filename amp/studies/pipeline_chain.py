@@ -94,10 +94,13 @@ def pcm16_bytes(audio: np.ndarray, sr: int) -> bytes:
     return header + data
 
 
-def read_pcm16(path: Path) -> tuple[int, np.ndarray]:
-    raw = Path(path).read_bytes()
+def decode_pcm16(raw: bytes) -> tuple[int, np.ndarray]:
     sr = int.from_bytes(raw[24:28], "little")
     return sr, np.frombuffer(raw[44:], dtype="<i2").astype(np.float64) / 32768.0
+
+
+def read_pcm16(path: Path) -> tuple[int, np.ndarray]:
+    return decode_pcm16(Path(path).read_bytes())
 
 
 # ------------------------------------------------------------------------------------------ inputs
@@ -294,9 +297,14 @@ def run_chain(out: Path, *, seed: int = 0, delivery: str | Mapping[str, Any] = D
           errors_after=after["errors"], final_plan_sha256=sp.plan_hash(final_plan))
 
     # 4. room-tone fill on the same dialogue
+    # The fill synthesises float64 samples whose last bits depend on the host's FFT and libm.  Only the 16-bit samples
+    # that are written are the artefact, so the report is derived from those, never from the float intermediate:
+    # a float hash would change the sealed chain between hosts while the WAV stayed byte-identical.
     filled, fill = rt.fill_holes(heard, sr, seed=seed)
-    fill_report = rt.fill_report(heard, filled, sr, fill)
     wav_out = pcm16_bytes(filled, sr)
+    _, stored = decode_pcm16(wav_out)
+    fill = {**fill, "output_sha256": rt.audio_sha256(stored)}
+    fill_report = rt.fill_report(heard, stored, sr, fill)
     (out / "audio" / "dialogue-filled.wav").write_bytes(wav_out)
     filled_h = sha256_bytes(wav_out)
     fill_h = write_json(out / "audio" / "fill-report.json", fill_report)
