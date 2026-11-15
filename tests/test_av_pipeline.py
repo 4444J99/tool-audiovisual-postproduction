@@ -163,6 +163,28 @@ class CliTests(unittest.TestCase):
             manifest = json.loads((Path(d) / "chain" / "pipeline-manifest.json").read_text())
             self.assertEqual(result["blender_graph_sha256"], manifest["stages"][0]["graph_sha256"])
             self.assertTrue((Path(d) / "chain" / "set" / "scene.blend").is_file())
+            self.assertEqual(manifest["stages"][-1]["stage"], "blender")
+            self.assertEqual(manifest["stages"][-1]["graph_sha256"], result["blender_graph_sha256"])
+            self.assertEqual(cli("verify", "--output", str(Path(d) / "chain")).returncode, 0)
+            (Path(d) / "chain" / "set" / "scene.blend").unlink()
+            bad = cli("verify", "--output", str(Path(d) / "chain"))
+            self.assertEqual(bad.returncode, 2)
+            self.assertIn("output scene-blend on disk is missing", bad.stdout)
+
+    def test_blender_stage_refuses_a_different_graph_hash(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "chain"
+            pc.run_chain(out)
+            (out / "set" / "blender-report.json").write_text("{}")
+            (out / "set" / "scene.blend").write_bytes(b"x")
+            with self.assertRaises(pc.ChainError):
+                pc.append_blender_stage(out, "0" * 64)
+            manifest = pc.append_blender_stage(out, json.loads((out / "pipeline-manifest.json").read_text())["stages"][0]["graph_sha256"])
+            self.assertEqual(pc.verify_chain(out), [])
+            manifest["stages"][-1]["graph_sha256"] = "0" * 64
+            manifest["chain_sha256"] = pc.chain_hash(manifest)
+            (out / "pipeline-manifest.json").write_text(json.dumps(manifest))
+            self.assertEqual(pc.cross_checks(out), ["the recorded Blender graph hash is not the set stage's graph hash"])
 
 
 if __name__ == "__main__":

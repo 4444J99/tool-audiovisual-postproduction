@@ -20,6 +20,8 @@ python tools/av_pipeline.py verify --output outputs/av-pipeline
 
 `pipeline-manifest.json` lists each stage's input and output hashes and a hash over the whole manifest. `verify` reports, by name, an artefact whose bytes differ from the manifest, a stage input that is not an earlier stage's output, and a manifest edited after the fact. It also checks content links a hash cannot show: the final ledger was derived from the suggested plan, the colour plan's dialogue source is the filled WAV, and each plate's identity is derived from the set graph hash and its ledger row.
 
+The Blender build, when requested, is recorded as a final `blender` stage with the hashes of its report and `.blend`.
+
 Plate identities are declared, not rendered: no render exists in this chain, and the manifest says so. `--blender` additionally builds the set spec headless and requires Blender's graph hash to equal the `set` stage's.
 
 Everything is invented. A real set spec stays with the set it describes, never in this repository; build it with `tools/set_scene.py` from a private path.

@@ -51,7 +51,13 @@ def main(argv=None):
                 print(json.dumps({"error": "Blender build failed or its graph hash differs", "detail": failure,
                                   "expected": expected, "observed": (built or {}).get("graph_sha256")}))
                 return 2
+            try:
+                pc.append_blender_stage(out, built["graph_sha256"])
+            except pc.ChainError as error:
+                print(json.dumps({"errors": error.errors}, indent=2))
+                return 2
             result["blender_graph_sha256"] = built["graph_sha256"]
+            result["stages"].append("blender")
         problems = pc.verify_chain(out) + pc.cross_checks(out)
         if problems:
             print(json.dumps({"errors": problems}, indent=2))

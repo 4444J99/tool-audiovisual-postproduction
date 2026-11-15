@@ -236,6 +236,23 @@ def run_chain(out: Path, *, seed: int = 0) -> dict[str, Any]:
     return manifest
 
 
+def append_blender_stage(out: Path, blender_graph_sha256: str) -> dict[str, Any]:
+    """Record the optional headless-Blender build (its report and .blend) as a stage and re-seal the manifest."""
+    out = Path(out)
+    manifest = json.loads((out / "pipeline-manifest.json").read_text())
+    first = manifest["stages"][0]
+    if blender_graph_sha256 != first["graph_sha256"]:
+        raise ChainError([f"blender: graph hash {blender_graph_sha256[:12]} differs from the set stage's {first['graph_sha256'][:12]}"])
+    manifest["stages"] = [s for s in manifest["stages"] if s["stage"] != "blender"]
+    manifest["stages"].append({"stage": "blender", "inputs": {"set-spec": first["outputs"]["set-spec"]},
+                               "outputs": {"blender-report": sha256_file(out / LOCATIONS["blender-report"]),
+                                           "scene-blend": sha256_file(out / LOCATIONS["scene-blend"])},
+                               "graph_sha256": blender_graph_sha256})
+    manifest["chain_sha256"] = chain_hash(manifest)
+    write_json(out / "pipeline-manifest.json", manifest)
+    return manifest
+
+
 def chain_hash(manifest: Mapping[str, Any]) -> str:
     body = {k: v for k, v in manifest.items() if k != "chain_sha256"}
     return sha256_bytes(ss.canonical(body).encode())
@@ -247,7 +264,8 @@ LOCATIONS = {"set-spec": "set/set-spec.json", "scene-graph-summary": "set/scene-
              "coverage-report": "coverage/coverage-report.json", "coverage-matrix": "coverage/coverage-matrix.md", "suggested-plan": "coverage/suggested-plan.json",
              "dialogue-filled": "audio/dialogue-filled.wav", "fill-report": "audio/fill-report.json",
              "final-ledger": "plan/final-ledger.json", "layer-plan": "colour/layer-plan.json",
-             "layer-ledger": "colour/layer-ledger.json"}
+             "layer-ledger": "colour/layer-ledger.json", "blender-report": "set/blender-report.json",
+             "scene-blend": "set/scene.blend"}
 
 
 def verify_chain(out: Path) -> list[str]:
@@ -293,6 +311,10 @@ def cross_checks(out: Path) -> list[str]:
     for row in ledger["shots"]:
         if cplan["sources"][f"plate-{row['id'].lower()}"]["sha256"] != plate_hash(summary["graph_sha256"], row):
             problems.append(f"plate for {row['id']} is not derived from the set graph and its ledger row")
+    manifest = json.loads((out / "pipeline-manifest.json").read_text())
+    built = [s for s in manifest["stages"] if s["stage"] == "blender"]
+    if built and built[0]["graph_sha256"] != summary["graph_sha256"]:
+        problems.append("the recorded Blender graph hash is not the set stage's graph hash")
     if {s["id"] for s in plan["shots"]} != {r["id"] for r in ledger["shots"]}:
         problems.append("ledger shots differ from the suggested plan's shots")
     return problems
