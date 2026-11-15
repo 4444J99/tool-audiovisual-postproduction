@@ -58,8 +58,8 @@ class CoverageAndIndependenceTests(Base):
         self.assertGreaterEqual(min(placed["overlaps"]), qc.DEFAULT_SPEC["independent_overlap_min"])
 
     def test_the_independent_detector_shares_no_parameter_with_the_captions_stage_or_the_qc_spec(self):
-        audio = np.zeros(16000 * 4)
-        audio[16000:32000] = 0.3 * np.sin(np.arange(16000) * 0.2)
+        audio = 0.003 * np.random.default_rng(1).standard_normal(16000 * 4)      # a room-tone floor under the burst
+        audio[16000:32000] += 0.3 * np.sin(np.arange(16000) * 0.2)
         spans = qc.independent_spans(audio, 16000)
         self.assertEqual(len(spans), 1)
         self.assertAlmostEqual(spans[0][0] / 16000, 1.0, delta=0.05)

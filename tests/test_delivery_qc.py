@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PIPE = ROOT / "tools" / "av_pipeline.py"
 QC = ROOT / "tools" / "delivery_qc.py"
 CHECK_IDS = ["timebase.frame_rate", "timebase.edit_contiguous", "timebase.edit_length", "timebase.burnin_segments", "timebase.shot_lengths",
-             "timebase.set_caches", "timebase.timecode", "captions.inside_dialogue", "captions.max_length", "captions.reading_rate",
+             "timebase.set_caches", "timebase.timecode", "captions.inside_dialogue", "captions.covers_dialogue", "captions.placement_independent", "captions.max_length", "captions.reading_rate",
              "captions.inside_edit", "captions.burned_frames", "audio.within_edit", "loudness.spec", "loudness.report_agreement"]
 
 
@@ -278,7 +278,7 @@ class ForgeryTests(Base):
         self.reseal_everything(target, "honest")
         report = json.loads((target / "qc" / "qc-report.json").read_text())
         self.assertEqual(report["status"], "fail")
-        self.assertEqual(report["failed"], ["captions.inside_dialogue"])
+        self.assertEqual(report["failed"], ["captions.inside_dialogue", "captions.covers_dialogue", "captions.placement_independent"])
         self.assertTrue(any("captions.inside_dialogue fails" in p for p in pc.qc_checks(target)))
 
     def test_a_pass_report_copied_from_the_clean_chain_does_not_survive(self):
@@ -290,8 +290,10 @@ class ForgeryTests(Base):
 
     def test_a_loosened_spec_written_into_the_report_is_refused_unless_declared(self):
         target = self.copy()
-        self.shift_cue(target, 2, 40)
-        loose = {"name": "forged", "span_tolerance_frames": 500}
+        self.shift_cue(target, 2, 6)
+        loose = {"name": "forged", "span_tolerance_frames": 500, "independent_overlap_min": 0.5}
+        self.assertEqual(self.derive(target, {"name": "forged", "span_tolerance_frames": 500})["status"], "fail",
+                         "loosening the tolerance alone no longer passes: the independent detector has its own fixed tolerance")
         (target / "qc" / "qc-report.json").write_text(qc.dumps(self.derive(target, loose)))
         self.reseal_everything(target)
         self.assertEqual(json.loads((target / "qc" / "qc-report.json").read_text())["status"], "pass")

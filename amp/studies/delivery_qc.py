@@ -47,7 +47,43 @@ DEFAULT_SPEC: dict[str, Any] = {
     "max_cps": 17.0,                  # characters per second, line breaks not counted
     "span_tolerance_frames": 2,       # a cue may start or end this many frames outside its dialogue span
     "report_tolerance": 0.01,         # LU / dB the re-measurement may differ from the delivery report
+    "independent_overlap_min": 0.75,  # share of a cue / span the second detector must agree on
     "vad": {"frame_s": 0.02, "margin_db": 7.0, "merge_gap_s": 0.1, "min_span_s": 0.2},
+}
+
+# The second detector's constants are not part of the QC spec and not shared with the captions stage's detector: a spec
+# (or a caller) that loosens ``vad`` cannot move what this one hears.  It uses a different method (a 30 ms window on a
+# 10 ms hop and a two-class Otsu split of the frame levels, with no percentile and no margin), so a placement error that
+# the percentile-and-margin detector tolerates is not tolerated by construction.
+INDEPENDENT_DETECTOR = {"window_s": 0.03, "hop_s": 0.01, "bins": 64, "merge_gap_s": 0.1, "min_span_s": 0.2,
+                        "min_separation_db": 6.0, "tolerance_frames": 2}
+
+INDEPENDENCE_CLASSES = ("independent", "shared-detector", "shared-limit", "shared-renderer", "shared-measurer",
+                        "self-declared", "partly-structural", "weak")
+# What each check can and cannot show on a chain this repository produced.  ``independent`` means the check can fail
+# for a reason the stage it judges did not itself guard against; every other class is a check that, on the stage's own
+# unmodified output, passes by construction and earns its keep only when artefacts are changed afterwards.
+INDEPENDENCE: dict[str, tuple[str, str]] = {
+    "timebase.frame_rate": ("independent", "five artefacts written by different stages must agree on one exact rate"),
+    "timebase.edit_contiguous": ("independent", "the ledger's shot ranges are judged for gaps and overlaps"),
+    "timebase.edit_length": ("independent", "four artefacts written by different stages must give one length"),
+    "timebase.burnin_segments": ("independent", "the burn-in background tiling is compared with the ledger's own shot boundaries"),
+    "timebase.shot_lengths": ("independent", "plan, ledger, render handles and colour plate layers are written by different stages"),
+    "timebase.set_caches": ("independent", "the set spec's cache ranges are written before any shot is planned against them"),
+    "timebase.timecode": ("partly-structural", "the shot-boundary round trip is an identity (the same nominal-rate function in both directions) and cannot fail; "
+                                              "only the comparison of caption stamps with the caption and burn-in reports can"),
+    "captions.inside_dialogue": ("shared-detector", "the captions stage places cues with the same detector at its default; on an unmodified chain this passes by construction "
+                                                   "and only a later edit, a swapped WAV or a different spec makes it fail"),
+    "captions.covers_dialogue": ("independent", "every dialogue-active span, under the placement detector and under the independent one, must be covered by cues; "
+                                               "the placement half shares its detector with the captions stage, the independent half does not"),
+    "captions.placement_independent": ("independent", "cues are judged against a second detector with fixed constants that neither the QC spec nor the captions stage sets"),
+    "captions.max_length": ("shared-limit", "the captions stage refuses cues over the same default limit, so this passes by construction on unmodified output"),
+    "captions.reading_rate": ("shared-limit", "the captions stage refuses words over the same default reading rate, so this passes by construction on unmodified output"),
+    "captions.inside_edit": ("shared-limit", "the caption and burn-in stages enforce order, overlap and the edit bounds themselves"),
+    "captions.burned_frames": ("shared-renderer", "the frames are compared with a re-render by the same renderer that wrote them; it is independent of the stages' reports, not of the renderer"),
+    "audio.within_edit": ("weak", "fails only when the audio is longer than the edit; audio shorter than the edit passes (the invented dialogue covers a third of its edit)"),
+    "loudness.spec": ("self-declared", "the spec is read from the delivery report being judged; a forger who rewrites it is caught only by a caller who declares the required spec"),
+    "loudness.report_agreement": ("shared-measurer", "the re-measurement uses the same BS.1770 code as the delivery stage; it is independent of the stage's recorded numbers only"),
 }
 
 # Labels the report reads, in the order they are hashed into its ``inputs``.
@@ -95,6 +131,8 @@ def normalize_spec(spec: Mapping[str, Any] | None = None) -> dict[str, Any]:
         raise QcError("span_tolerance_frames must be a non-negative integer")
     if not _number(merged["report_tolerance"]) or merged["report_tolerance"] < 0:
         raise QcError("report_tolerance must be a non-negative number")
+    if not _number(merged["independent_overlap_min"]) or not 0 < merged["independent_overlap_min"] <= 1:
+        raise QcError("independent_overlap_min must be a number above 0 and at most 1")
     for key, value in merged["vad"].items():
         if not _number(value) or value <= 0:
             raise QcError(f"vad.{key} must be a positive number")
@@ -145,6 +183,58 @@ def dialogue_spans(audio: np.ndarray, rate: int, vad: Mapping[str, float]) -> li
     return [(a, b) for a, b in merged if b - a >= vad["min_span_s"] * rate]
 
 
+def independent_spans(audio: np.ndarray, rate: int) -> list[tuple[int, int]]:
+    """Dialogue-active ``(start, end)`` sample ranges from a detector that shares nothing with ``dialogue_spans``.
+
+    Frame RMS over a 30 ms window every 10 ms; digital-silence frames are ignored; the live frame levels (dB) are
+    split into two classes at the Otsu threshold of a 64-bin histogram and the upper class is active.  Runs under
+    0.1 s apart join and runs under 0.2 s drop.  No percentile, no margin, no value from the QC spec.  A recording with
+    levels less than ``min_separation_db`` apart (flat noise, a pure tone) has no two classes and yields nothing."""
+    cfg = INDEPENDENT_DETECTOR
+    window, hop = max(1, int(round(cfg["window_s"] * rate))), max(1, int(round(cfg["hop_s"] * rate)))
+    if len(audio) < window:
+        return []
+    count = (len(audio) - window) // hop + 1
+    index = np.arange(count)[:, None] * hop + np.arange(window)[None, :]
+    levels = np.sqrt(np.mean(np.square(audio[index]), axis=1))
+    live = levels > 1e-9
+    if not live.any():
+        return []
+    db = 20.0 * np.log10(np.maximum(levels, 1e-12))
+    if db[live].max() - db[live].min() < cfg["min_separation_db"]:
+        return []
+    hist, edges = np.histogram(db[live], bins=cfg["bins"])
+    weight = hist / hist.sum()
+    centre = (edges[:-1] + edges[1:]) / 2.0
+    below, mass = np.cumsum(weight), np.cumsum(weight * centre)
+    between = (mass[-1] * below - mass) ** 2 / np.maximum(below * (1.0 - below), 1e-12)
+    threshold = centre[int(np.argmax(between))]
+    active = live & (db > threshold)
+    padded = np.concatenate(([False], active, [False]))
+    edge = np.flatnonzero(padded[1:] != padded[:-1])
+    lead = (window - hop) // 2
+    runs = [[int(a) * hop + lead, int(b) * hop + lead] for a, b in zip(edge[0::2], edge[1::2])]
+    merged: list[list[int]] = []
+    for run in runs:
+        if merged and run[0] - merged[-1][1] < cfg["merge_gap_s"] * rate:
+            merged[-1][1] = run[1]
+        else:
+            merged.append(run)
+    return [(max(0, a), min(len(audio), b)) for a, b in merged if b - a >= cfg["min_span_s"] * rate]
+
+
+def _covered(lo: Fraction, hi: Fraction, intervals: list[tuple[Fraction, Fraction]]) -> Fraction:
+    """Length of ``[lo, hi)`` that lies inside the union of ``intervals``."""
+    total = Fraction(0)
+    reach = lo
+    for a, b in sorted(intervals):
+        a, b = max(a, reach), min(b, hi)
+        if b > a:
+            total += b - a
+            reach = b
+    return total
+
+
 # ------------------------------------------------------------------------------------------ timecode
 
 def timecode(frame: int, rate: Fraction) -> str:
@@ -160,7 +250,8 @@ def frame_of_timecode(label: str, rate: Fraction) -> int:
 
 
 def _check(cid: str, ok: bool, detail: str, **facts: Any) -> dict[str, Any]:
-    return {"id": cid, "ok": bool(ok), "detail": detail, **facts}
+    kind, note = INDEPENDENCE[cid]
+    return {"id": cid, "ok": bool(ok), "detail": detail, "independence": {"class": kind, "note": note}, **facts}
 
 
 # ------------------------------------------------------------------------------------------ derivation
@@ -320,6 +411,32 @@ def _derive(root: Path, locations: Mapping[str, str], spec: Mapping[str, Any] | 
     checks.append(_check("captions.inside_dialogue", bool(cues) and bool(spans) and not outside,
                          "every cue lies inside one dialogue-active span of the delivered audio, within the spec's frame tolerance",
                          tolerance_frames=spec["span_tolerance_frames"], spans=span_list, problems=outside))
+    cue_ranges = [(Fraction(c["start"]) / fps, Fraction(c["end"]) / fps) for c in cues]
+    other = independent_spans(audio, rate_wav)
+    floor = Fraction(spec["independent_overlap_min"]).limit_denominator(10 ** 6)
+    uncovered = []
+    for label, found in (("placement", spans), ("independent", other)):
+        for a, b in found:
+            lo, hi = Fraction(a, rate_wav), Fraction(b, rate_wav)
+            share = _covered(lo, hi, cue_ranges) / (hi - lo)
+            if share < floor:
+                uncovered.append(f"dialogue span {float(lo):.3f}-{float(hi):.3f} s ({label} detector) is {float(share):.0%} covered by cues, under {float(floor):.0%}")
+    checks.append(_check("captions.covers_dialogue", bool(spans) and bool(other) and not uncovered,
+                         "every dialogue-active span, under the placement detector and under the independent one, is covered by cues to at least independent_overlap_min",
+                         independent_overlap_min=spec["independent_overlap_min"],
+                         spans={"placement": span_list, "independent": [{"start_s": round(a / rate_wav, 4), "end_s": round(b / rate_wav, 4)} for a, b in other]},
+                         problems=uncovered))
+    fixed = Fraction(INDEPENDENT_DETECTOR["tolerance_frames"]) / fps        # not the spec's tolerance: a loosened spec cannot widen this
+    heard = [(Fraction(a, rate_wav) - fixed, Fraction(b, rate_wav) + fixed) for a, b in other]
+    overlaps, unheard = [], []
+    for c, (begin, end) in zip(cues, cue_ranges):
+        share = _covered(begin, end, heard) / (end - begin) if end > begin else Fraction(0)
+        overlaps.append(round(float(share), 4))
+        if share < floor:
+            unheard.append(f"cue {c['index']} ({float(begin):.3f}-{float(end):.3f} s) is only {float(share):.0%} inside speech heard by the independent detector, under {float(floor):.0%}")
+    checks.append(_check("captions.placement_independent", bool(cues) and bool(other) and not unheard,
+                         "every cue lies mostly inside speech found by a detector whose constants neither the QC spec nor the captions stage sets",
+                         independent_overlap_min=spec["independent_overlap_min"], overlaps=overlaps, problems=unheard))
     long_cues = [f"cue {c['index']} lasts {c['end'] - c['start']} frames, over {spec['max_cue_frames']}" for c in cues if c["end"] - c["start"] > spec["max_cue_frames"]]
     checks.append(_check("captions.max_length", not long_cues, "no cue is longer than max_cue_frames",
                          max_cue_frames=spec["max_cue_frames"], longest=max((c["end"] - c["start"] for c in cues), default=0), problems=long_cues))
@@ -373,6 +490,7 @@ def _derive(root: Path, locations: Mapping[str, str], spec: Mapping[str, Any] | 
 
     failed = [c["id"] for c in checks if not c["ok"]]
     return {"schema": SCHEMA, "spec": spec, "status": "pass" if not failed else "fail", "failed": failed,
+            "cannot_fail_independently": sorted(c["id"] for c in checks if c["independence"]["class"] != "independent"),
             "inputs": {label: sha256_bytes(files[label]) for label in INPUT_LABELS}, "checks": checks,
             "scope": "consistency of the sealed artefacts with one another and with the declared spec; not a listening test, "
                      "not a distributor's acceptance and not a check that the captions say what was said"}
