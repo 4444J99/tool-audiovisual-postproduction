@@ -259,6 +259,31 @@ class ReviewRegressionTests(unittest.TestCase):
             s["active_camera"] = bad
             self.assertTrue(any("active_camera" in e for e in errors(s)), bad)
 
+    def test_sensor_width_has_blenders_one_millimetre_floor(self):
+        for bad, ok in ((0.5, False), (0.999, False), (1.0, True)):
+            s = spec()
+            s["cameras"][0]["sensor_width_mm"] = bad
+            self.assertEqual(not errors(s), ok, bad)
+
+    def test_empty_material_name_is_refused(self):
+        s = spec()
+        s["materials"][""] = {"color": "123456"}
+        s["floor"] = {"material": ""}
+        self.assertTrue(any("material ''" in e for e in errors(s)), errors(s))
+
+    def test_caches_follow_the_shot_plan_rules(self):
+        s = spec()
+        s["caches"] = [{"id": "flame", "frames": [1, 240]}]
+        self.assertEqual(errors(s), [])
+        self.assertEqual(ss.shot_plan_set(s)["caches"], [{"id": "flame", "frames": [1, 240]}])
+        element_id = s["elements"][0]["id"]
+        for bad in ([{"id": "flame", "frames": [1.5, 2.5]}], [{"id": "flame", "frames": [5, 1]}], [{"id": "flame"}],
+                    [{"id": "f", "frames": [1, 2]}, {"id": "f", "frames": [1, 2]}], [{"id": element_id, "frames": [1, 2]}],
+                    [{"id": "", "frames": [1, 2]}], [{"id": "x", "frames": [True, 2]}], ["flame"], "flame"):
+            s = spec()
+            s["caches"] = bad
+            self.assertTrue(any("cache" in e for e in errors(s)), bad)
+
     def test_sensor_width_must_be_a_finite_positive_number(self):
         for bad in ("bad", None, 0, -36.0, float("nan"), True, [36]):
             s = spec()

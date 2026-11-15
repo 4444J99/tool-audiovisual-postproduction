@@ -49,6 +49,8 @@ def compare(expected, observed):
         if not seen or not seen.get("present"):
             problems.append(f"{row['name']}: missing from the Blender scene")
             continue
+        if any(abs(a - b) > 1e-4 for a, b in zip(row["location"], seen.get("location", []))) or len(seen.get("location", [])) != 3:
+            problems.append(f"{row['name']}: location expected {row['location']}, Blender holds {seen.get('location')}")
         if row["type"] != "mesh":
             continue
         for key in ("vertices", "faces"):

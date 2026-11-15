@@ -61,6 +61,9 @@ class SetSceneCliTests(unittest.TestCase):
         for row in observed["objects"]:
             row["present"] = True
         self.assertEqual(set_scene.compare(expected, observed), [])
+        moved = json.loads(json.dumps(observed))
+        moved["objects"][1]["location"][0] += 3.0
+        self.assertEqual(len(set_scene.compare(expected, moved)), 1)
         observed["objects"][1]["dimensions"][0] += 0.5
         observed["objects"][2]["vertices"] -= 1
         observed["objects"][-1]["present"] = False

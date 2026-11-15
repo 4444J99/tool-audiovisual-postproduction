@@ -61,6 +61,30 @@ def _vec(value, size) -> bool:
     return isinstance(value, (list, tuple)) and len(value) == size and all(_is_num(v) for v in value)
 
 
+MIN_SENSOR_MM = 1.0
+
+
+def _check_caches(spec: Mapping[str, Any], errors: list[str]) -> None:
+    """Caches are forwarded to the shot plan, so they follow its rules: unique string id, integer [first, last]."""
+    caches = spec.get("caches", [])
+    if not isinstance(caches, list):
+        errors.append("caches: must be a list of {id, frames: [first, last]}")
+        return
+    element_ids = {e.get("id") for e in (spec.get("elements") or []) if isinstance(e, dict)}
+    seen: set[str] = set()
+    for cache in caches:
+        cid = cache.get("id") if isinstance(cache, dict) else None
+        frames = cache.get("frames") if isinstance(cache, dict) else None
+        ok_frames = (isinstance(frames, list) and len(frames) == 2
+                     and all(isinstance(v, int) and not isinstance(v, bool) for v in frames) and frames[0] <= frames[1])
+        if not isinstance(cid, str) or not cid or cid in seen or not ok_frames:
+            errors.append(f"cache {cid!r}: needs a unique string id and integer frames [first, last]")
+            continue
+        seen.add(cid)
+        if cid in element_ids:
+            errors.append(f"cache {cid!r}: id is also used by an element")
+
+
 def _positive(value) -> bool:
     return _is_num(value) and value > 0
 
@@ -121,9 +145,9 @@ def validate_spec(spec: Mapping[str, Any]) -> dict[str, list[str]]:
         errors.append("materials: must be an object of name -> {color, roughness, emission}")
         raw_materials = {}
     for name, material in raw_materials.items():
-        if not isinstance(name, str) or name.startswith(GENERATED_PREFIX) or name.endswith(SOFFIT_SUFFIX) or name == FLOOR_DEFAULT:
+        if not isinstance(name, str) or not name or name.startswith(GENERATED_PREFIX) or name.endswith(SOFFIT_SUFFIX) or name == FLOOR_DEFAULT:
             errors.append(f"material {name!r}: names starting with {GENERATED_PREFIX!r}, ending with {SOFFIT_SUFFIX!r} or equal to "
-                          f"{FLOOR_DEFAULT!r} are reserved for generated materials")
+                          f"{FLOOR_DEFAULT!r} are reserved for generated materials, and a name cannot be empty")
             continue
         if _name_bytes(name + SOFFIT_SUFFIX) > BLENDER_NAME_LIMIT:
             errors.append(f"material {name!r}: name plus its {SOFFIT_SUFFIX!r} derivative must fit {BLENDER_NAME_LIMIT} bytes (UTF-8)")
@@ -257,8 +281,8 @@ def validate_spec(spec: Mapping[str, Any]) -> dict[str, list[str]]:
             errors.append(f"{label}: aim has no horizontal direction from the position")
         if not (_is_num(camera.get("lens_mm")) and 8.0 <= camera["lens_mm"] <= 400.0):
             errors.append(f"{label}: lens_mm must be within 8 to 400")
-        if "sensor_width_mm" in camera and not _positive(camera["sensor_width_mm"]):
-            errors.append(f"{label}: sensor_width_mm must be a finite positive number")
+        if "sensor_width_mm" in camera and not (_is_num(camera["sensor_width_mm"]) and camera["sensor_width_mm"] >= MIN_SENSOR_MM):
+            errors.append(f"{label}: sensor_width_mm must be a finite number of at least {MIN_SENSOR_MM} (Blender's minimum)")
         if not (bx[0] <= px <= bx[1] and bz[0] <= pz <= bz[1]):
             warnings.append(f"{label}: stands outside the set bounds")
     active = spec.get("active_camera")
@@ -268,6 +292,7 @@ def validate_spec(spec: Mapping[str, Any]) -> dict[str, list[str]]:
         errors.append(f"spec: active_camera {active!r} is not a defined camera")
     if not cameras:
         warnings.append("spec: no cameras defined")
+    _check_caches(spec, errors)
     return {"errors": errors, "warnings": warnings}
 
 
