@@ -167,6 +167,14 @@ def group_words(words: Sequence[Mapping[str, Any]], spec: Mapping[str, Any]) -> 
     return cues
 
 
+def min_frames(spec: Mapping[str, Any], rate: Fraction) -> int:
+    return int(math.ceil(Fraction(spec["min_duration_s"]).limit_denominator(100000) * rate))
+
+
+def max_frames(spec: Mapping[str, Any], rate: Fraction) -> int:
+    return int(math.floor(Fraction(spec["max_duration_s"]).limit_denominator(100000) * rate))
+
+
 def ms_of(frames: int, fps: Fraction) -> int:
     return int(round(Fraction(frames) * 1000 / fps))
 
@@ -194,9 +202,9 @@ def build(words: Sequence[Mapping[str, Any]], fps: Any, spec: str | Mapping[str,
     for i, cue in enumerate(cues):                 # stretch forward into free space to meet duration and reading speed
         limit = cues[i + 1]["start"] - gap if i + 1 < len(cues) else None
         chars = len("".join(cue["lines"]))
-        want = max(cue["end"] - cue["start"], int(math.ceil(spec["min_duration_s"] * rate)),
+        want = max(cue["end"] - cue["start"], min_frames(spec, rate),
                    int(math.ceil(Fraction(chars) / Fraction(spec["max_cps"]).limit_denominator(1000) * rate)))
-        want = min(want, int(math.floor(spec["max_duration_s"] * rate)))
+        want = min(want, max_frames(spec, rate))
         end = cue["start"] + want
         cue["end"] = max(cue["end"], end if limit is None else min(end, limit))
     for n, cue in enumerate(cues, 1):
@@ -204,7 +212,7 @@ def build(words: Sequence[Mapping[str, Any]], fps: Any, spec: str | Mapping[str,
     problems = check(cues, rate, spec)
     srt, vtt = render_srt(cues), render_vtt(cues)
     return {"schema": SCHEMA, "spec": spec, "fps": str(rate), "cues": cues, "srt": srt, "vtt": vtt, "problems": problems,
-            "words": len(words), "srt_sha256": sha256_text(srt), "vtt_sha256": sha256_text(vtt)}
+            "words": len(words), "warnings": markup_words(words), "srt_sha256": sha256_text(srt), "vtt_sha256": sha256_text(vtt)}
 
 
 def _stamp(ms: int, sep: str) -> str:
@@ -214,34 +222,66 @@ def _stamp(ms: int, sep: str) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}{sep}{milli:03d}"
 
 
+def vtt_escape(text: str) -> str:
+    """Literal caption text for a WebVTT cue payload: ``&``, ``<`` and ``>`` would otherwise start entities or tags."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def vtt_unescape(text: str) -> str:
+    """Cue text as displayed: tags dropped, the three escapes this module writes (and ``&nbsp;``) decoded, ``&amp;`` last."""
+    text = re.sub(r"<[^<>]*>", "", text)
+    return text.replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", "\u00a0").replace("&amp;", "&")
+
+
+def markup_words(words: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Words SRT cannot carry literally: SRT has no escape, and many players read ``<...>`` as styling."""
+    return [f"word {i}: {w['text']!r} contains '<' or '>', which SRT players may read as markup (WebVTT output escapes it)"
+            for i, w in enumerate(words) if "<" in w["text"] or ">" in w["text"]]
+
+
 def render_srt(cues: Sequence[Mapping[str, Any]]) -> str:
     return "".join(f"{c['index']}\n{_stamp(c['start_ms'], ',')} --> {_stamp(c['end_ms'], ',')}\n" + "\n".join(c["lines"]) + "\n\n" for c in cues)
 
 
 def render_vtt(cues: Sequence[Mapping[str, Any]]) -> str:
-    return "WEBVTT\n\n" + "".join(f"{c['index']}\n{_stamp(c['start_ms'], '.')} --> {_stamp(c['end_ms'], '.')}\n" + "\n".join(c["lines"]) + "\n\n" for c in cues)
+    return "WEBVTT\n\n" + "".join(f"{c['index']}\n{_stamp(c['start_ms'], '.')} --> {_stamp(c['end_ms'], '.')}\n"
+                                  + "\n".join(vtt_escape(line) for line in c["lines"]) + "\n\n" for c in cues)
 
 
-_STAMP = r"(\d{2,}):([0-5]\d):([0-5]\d)[,.](\d{3})"
+_SRT_STAMP = r"(\d{2,}):([0-5]\d):([0-5]\d),(\d{3})"
+_VTT_STAMP = r"(?:(\d{2,}):)?([0-5]\d):([0-5]\d)\.(\d{3})"
+
+
+def _ms(hours: str | None, minutes: str, seconds: str, millis: str) -> int:
+    return ((int(hours or 0) * 60 + int(minutes)) * 60 + int(seconds)) * 1000 + int(millis)
 
 
 def parse(text: str, fps: Any) -> list[dict[str, Any]]:
-    """Cues from SRT or WebVTT text, with each time converted back to the nearest frame.  Raises on malformed blocks."""
+    """Cues from SRT or WebVTT text, with each time converted back to the nearest frame.  Raises on malformed blocks.
+
+    SRT needs ``hh:mm:ss,mmm``.  WebVTT may omit the hours, may have any cue identifier (or none), may carry cue
+    settings after the times, and may contain NOTE, STYLE and REGION blocks, which are skipped; cue tags are
+    dropped and the escapes ``&amp;``, ``&lt;``, ``&gt;`` decoded, so the lines are what a viewer reads."""
     rate = parse_fps(fps)
-    body = text.replace("\r\n", "\n").lstrip("﻿")
-    if body.startswith("WEBVTT"):
+    body = text.replace("\r\n", "\n").lstrip("\ufeff")
+    vtt = body.startswith("WEBVTT")
+    if vtt:
         body = body.split("\n\n", 1)[1] if "\n\n" in body else ""
+    stamp = _VTT_STAMP if vtt else _SRT_STAMP
     cues: list[dict[str, Any]] = []
     for block in [b for b in body.split("\n\n") if b.strip()]:
         rows = block.strip("\n").split("\n")
-        if re.fullmatch(r"\d+", rows[0].strip()) and len(rows) > 1:
-            rows = rows[1:]
-        match = re.fullmatch(rf"{_STAMP} --> {_STAMP}(?: .*)?", rows[0].strip())
-        if not match or len(rows) < 2:
+        if vtt and re.match(r"(NOTE|STYLE|REGION)(\s|$)", rows[0]):
+            continue
+        timing = next((i for i, row in enumerate(rows[:2]) if "-->" in row), None) if vtt else \
+            (1 if len(rows) > 1 and re.fullmatch(r"\d+", rows[0].strip()) else 0)
+        match = re.fullmatch(rf"{stamp} --> {stamp}(?: .*)?", rows[timing].strip()) if timing is not None else None
+        if not match or len(rows) < timing + 2:
             raise CaptionError(f"cue block {len(cues) + 1} is malformed: {rows[0][:60]!r}")
-        g = [int(x) for x in match.groups()]
-        start_ms, end_ms = ((g[0] * 60 + g[1]) * 60 + g[2]) * 1000 + g[3], ((g[4] * 60 + g[5]) * 60 + g[6]) * 1000 + g[7]
-        cues.append({"index": len(cues) + 1, "start_ms": start_ms, "end_ms": end_ms, "lines": rows[1:],
+        g = match.groups()
+        start_ms, end_ms = _ms(*g[:4]), _ms(*g[4:])
+        lines = [vtt_unescape(row) for row in rows[timing + 1:]] if vtt else rows[timing + 1:]
+        cues.append({"index": len(cues) + 1, "start_ms": start_ms, "end_ms": end_ms, "lines": lines,
                      "start": int(round(Fraction(start_ms) * rate / 1000)), "end": int(round(Fraction(end_ms) * rate / 1000))})
     return cues
 
@@ -259,7 +299,10 @@ def check(cues: Sequence[Mapping[str, Any]], fps: Any, spec: str | Mapping[str, 
         for key, ms in (("start", start), ("end", end)):
             if abs(ms_of(int(round(Fraction(ms) * rate / 1000)), rate) - ms) > 0:
                 problems.append(f"{tag}: {key} {ms} ms is not on the {rate} fps frame grid")
-        seconds = (end - start) / 1000
+        # Durations are judged on the frames the milliseconds stand for: a cue built to exactly 20 frames at 24 fps
+        # serialises to 833 ms, and must not read as shorter than a minimum of 5/6 s.
+        frames = int(round(Fraction(end) * rate / 1000)) - int(round(Fraction(start) * rate / 1000))
+        seconds = float(Fraction(frames) / rate) if frames > 0 else (end - start) / 1000
         lines = cue["lines"]
         if len(lines) > spec["max_lines"]:
             problems.append(f"{tag}: {len(lines)} lines, over the limit of {spec['max_lines']}")
@@ -269,9 +312,9 @@ def check(cues: Sequence[Mapping[str, Any]], fps: Any, spec: str | Mapping[str, 
         cps = len("".join(lines)) / seconds
         if cps > spec["max_cps"] + 1e-9:
             problems.append(f"{tag}: reads at {cps:.1f} characters per second, over {spec['max_cps']}")
-        if seconds < spec["min_duration_s"] - 1e-9:
+        if frames < min_frames(spec, rate):
             problems.append(f"{tag}: lasts {seconds:.3f} s, under the {spec['min_duration_s']:.3f} s minimum")
-        if seconds > spec["max_duration_s"] + 1e-9:
+        if frames > max_frames(spec, rate):
             problems.append(f"{tag}: lasts {seconds:.3f} s, over the {spec['max_duration_s']} s maximum")
         if i:
             before = cues[i - 1]

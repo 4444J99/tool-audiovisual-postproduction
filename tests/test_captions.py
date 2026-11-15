@@ -214,6 +214,53 @@ class CheckTests(unittest.TestCase):
         self.assertFalse(cap.words_preserved(words, [dict(cues[0], lines=["a"])]))
 
 
+class ReviewRegressionTests(unittest.TestCase):
+    """Codex review of the first head: three P2 findings, each pinned."""
+
+    def test_a_cue_stretched_to_exactly_the_minimum_frames_is_not_reported_short_after_millisecond_rounding(self):
+        built = cap.build([w("Hi", 0.0, 0.1)], 24, "web")           # 5/6 s at 24 fps is exactly 20 frames, written as 833 ms
+        cue = built["cues"][0]
+        self.assertEqual(cue["end"] - cue["start"], 20)
+        self.assertEqual(cue["end_ms"] - cue["start_ms"], 833)
+        self.assertEqual(built["problems"], [])
+        self.assertEqual(cap.check(cap.parse(built["srt"], 24), 24, "web"), [])
+        short = [{"index": 1, "start_ms": 0, "end_ms": 792, "lines": ["Hi"]}]        # 19 frames: genuinely short
+        self.assertTrue(any("under the" in p for p in cap.check(short, 24, "web")))
+
+    def test_the_minimum_holds_at_other_rates_after_rounding(self):
+        for fps in (24, 25, 30, 50, "24000/1001", "30000/1001", "60000/1001"):
+            for spec in ("broadcast", "web"):
+                built = cap.build([w("Hi", 0.0, 0.05)], fps, spec)
+                self.assertEqual(built["problems"], [], (fps, spec))
+                self.assertEqual(cap.check(cap.parse(built["vtt"], fps), fps, spec), [], (fps, spec))
+
+    def test_webvtt_from_other_tools_parses(self):
+        text = ("WEBVTT - made elsewhere\nKind: captions\n\nNOTE a comment\nacross two lines\n\nSTYLE\n::cue { color: red }\n\n"
+                "intro\n00:01.000 --> 00:02.500 align:start position:10%\n<v Ann>Hello <i>there</i>\n\n"
+                "00:00:03.000 --> 00:00:04.500\nNo identifier\n\n2\n01:00:00.000 --> 01:00:01.000\nHour one\n")
+        cues = cap.parse(text, 24)
+        self.assertEqual([(c["start_ms"], c["end_ms"], c["lines"]) for c in cues],
+                         [(1000, 2500, ["Hello there"]), (3000, 4500, ["No identifier"]), (3600000, 3601000, ["Hour one"])])
+        self.assertEqual([c["start"] for c in cues], [24, 72, 86400])
+        with self.assertRaises(cap.CaptionError):
+            cap.parse("1\n00:01.000 --> 00:02.000\nhi\n", 24)           # SRT keeps its stricter form: hours and a comma
+        with self.assertRaises(cap.CaptionError):
+            cap.parse("WEBVTT\n\nonly an identifier\nand text\n", 24)
+
+    def test_markup_like_words_are_escaped_in_webvtt_and_survive_the_round_trip(self):
+        words = [w("<inaudible>", 0.0, 0.5), w("Tom", 0.6, 0.9), w("&", 0.9, 1.0), w("<b>Jerry</b>", 1.0, 1.5)]
+        built = cap.build(words, 24, "broadcast")
+        self.assertIn("&lt;inaudible&gt; Tom &amp; &lt;b&gt;Jerry&lt;/b&gt;", built["vtt"])
+        self.assertNotIn("<", built["vtt"].split("\n\n", 1)[1].replace("-->", ""))
+        back = cap.parse(built["vtt"], 24)
+        self.assertEqual(back[0]["lines"], ["<inaudible> Tom & <b>Jerry</b>"])
+        self.assertTrue(cap.words_preserved(words, back))
+        self.assertEqual(len(built["warnings"]), 2)                       # SRT has no escape: said, not hidden
+        self.assertIn("SRT players may read as markup", built["warnings"][0])
+        self.assertEqual(cap.build([w("plain", 0, 1)], 24)["warnings"], [])
+        self.assertEqual(cap.vtt_unescape(cap.vtt_escape("a&amp;b <c> &lt;")), "a&amp;b <c> &lt;")
+
+
 class CliTests(unittest.TestCase):
     def test_demo_then_check_then_tamper(self):
         with tempfile.TemporaryDirectory() as d:
@@ -244,6 +291,16 @@ class CliTests(unittest.TestCase):
             self.assertEqual(ran.returncode, 0, ran.stdout)
             self.assertEqual((Path(d) / "o" / "captions.srt").read_text().splitlines()[2:4], ["Hello", "world."])
             self.assertEqual(json.loads((Path(d) / "o" / "captions-report.json").read_text())["spec"]["name"], "tight")
+
+    def test_markup_words_build_clean_with_a_warning_and_a_vtt_that_checks(self):
+        with tempfile.TemporaryDirectory() as d:
+            words = Path(d) / "w.json"
+            words.write_text(json.dumps([w("<laughs>", 0.0, 0.5), w("fine.", 0.6, 1.0)]))
+            ran = cli("build", "--words", str(words), "--output", str(Path(d) / "o"))
+            self.assertEqual(ran.returncode, 0, ran.stdout)
+            self.assertEqual(len(json.loads(ran.stdout)["warnings"]), 1)
+            ok = cli("check", "--input", str(Path(d) / "o" / "captions.vtt"), "--words", str(words))
+            self.assertEqual(ok.returncode, 0, ok.stdout)
 
     def test_bad_input_exits_2_with_json(self):
         with tempfile.TemporaryDirectory() as d:

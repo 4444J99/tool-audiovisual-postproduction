@@ -64,7 +64,7 @@ def build_files(words, fps, spec, out):
         if [{k: c[k] for k in keys} for c in back] != [{k: c[k] for k in keys} for c in result["cues"]]:
             raise cap.CaptionError(f"{name} does not read back as the cues that were written")
     preserved = cap.words_preserved(words, result["cues"])
-    report = {k: result[k] for k in ("schema", "spec", "fps", "cues", "problems", "words", "srt_sha256", "vtt_sha256")}
+    report = {k: result[k] for k in ("schema", "spec", "fps", "cues", "problems", "warnings", "words", "srt_sha256", "vtt_sha256")}
     report["words_preserved"] = preserved
     if not preserved:
         report["problems"] = report["problems"] + ["the cue text is not the input words in order"]
@@ -101,7 +101,7 @@ def main(argv=None):
         if args.command == "build":
             words, fps = load_words(args.words, fps)
             report = build_files(words, fps, load_spec(args.spec), Path(args.output))
-            emit({"cues": len(report["cues"]), "problems": report["problems"], "words_preserved": report["words_preserved"],
+            emit({"cues": len(report["cues"]), "problems": report["problems"], "warnings": report["warnings"], "words_preserved": report["words_preserved"],
                   "srt_sha256": report["srt_sha256"], "vtt_sha256": report["vtt_sha256"]})
             return 2 if report["problems"] else 0
         cues = cap.parse(Path(args.input).read_text(encoding="utf-8"), fps)

@@ -20,7 +20,11 @@ python tools/captions.py check --input captions.srt|captions.vtt --fps 24 [--spe
 
 What the spec cannot be made to hold for is **reported in `problems`, not hidden**: fast speech with no room to stretch reads over `max_cps`, and a cue trimmed to keep the gap can fall under the minimum duration. The build still returns the cues (so you can see them) and the CLI exits 2.
 
-Frame rates are exact: `24`, `25`, `30` or a ratio such as `24000/1001`. A rounded decimal (`23.976`) is refused. Times are integer frames internally and milliseconds are derived from them, so SRT and WebVTT carry the same instants and parse back to the same frames.
+Frame rates are exact: `24`, `25`, `30` or a ratio such as `24000/1001`. A rounded decimal (`23.976`) is refused. Durations and reading speed are judged on the frames the written milliseconds stand for (a cue of exactly 20 frames at 24 fps is 833 ms and still meets a 5/6 s minimum). Times are integer frames internally and milliseconds are derived from them, so SRT and WebVTT carry the same instants and parse back to the same frames.
+
+## Formats
+
+**SRT** needs `hh:mm:ss,mmm`. **WebVTT** parsing accepts what other tools write: hours optional (`00:01.000`), any cue identifier or none, cue settings after the times, and NOTE, STYLE and REGION blocks (skipped); cue tags are dropped and `&amp; &lt; &gt;` decoded so `check` judges what a viewer reads. WebVTT output **escapes** `&`, `<` and `>`, so a word such as `<inaudible>` is shown, not swallowed as a tag, and reads back unchanged. SRT has no escape and many players read `<...>` as styling: such words are listed in the report's `warnings` (the build is not failed for them).
 
 ## Presets
 
@@ -37,6 +41,6 @@ Commonly published defaults, not any broadcaster's or platform's requirement; a 
 
 ## What the tests assert
 
-`tests/test_captions.py`: the invented demo meets the spec, keeps every word and reads back identically from SRT and WebVTT; a short word is stretched to the minimum without crossing the next cue; sentence, silence, clause and duration splits; no line over the limit across 36 words; line balance, punctuation preference and orphan avoidance; single-line specs; overlapping word times; unfixable reading speed is reported; `24000/1001` derives 1001 ms from frame 24 and rounded decimals are refused; every invalid word and spec is named; `check` reports each rule (overlap, gap, minimum, maximum, line length, line count, reading speed, frame grid, empty span) and refuses malformed files; dropped or reordered words are detected; CLI exit statuses and a tampered file.
+`tests/test_captions.py`: the invented demo meets the spec, keeps every word and reads back identically from SRT and WebVTT; a short word is stretched to the minimum without crossing the next cue; sentence, silence, clause and duration splits; no line over the limit across 36 words; line balance, punctuation preference and orphan avoidance; single-line specs; overlapping word times; unfixable reading speed is reported; `24000/1001` derives 1001 ms from frame 24 and rounded decimals are refused; every invalid word and spec is named; `check` reports each rule (overlap, gap, minimum, maximum, line length, line count, reading speed, frame grid, empty span) and refuses malformed files; dropped or reordered words are detected; the review regressions (a 20-frame cue not reported short at 24 fps across seven rates, WebVTT from other tools, markup-like words escaped and round-tripped, SRT warnings); CLI exit statuses and a tampered file.
 
 These are timing and layout rules. They do not say the words are right, that a human would break the lines there, or that a distributor will accept the file.
