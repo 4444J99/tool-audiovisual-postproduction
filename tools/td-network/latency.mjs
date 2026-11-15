@@ -35,15 +35,17 @@ const range = (type, key) => CATALOG_BY_TYPE[type].params.find(item => item.key 
 export const LOOKAHEAD = Object.freeze({
   reverse: () => range('reverse', 'span').max,
   stutter: () => range('stutter', 'window').max * (1 - 1 / range('stutter', 'rate').max),
+  granular: () => range('granular', 'scatter').max,   // each grain bin reads source time `t + (noise - 0.5) x 2 x scatter`
 });
 
 /** The parameters whose range the declared latency has to bound, and what bounds them (the look-ahead itself). */
-export const LIMITED = Object.freeze({reverse: ['span']});
+export const LIMITED = Object.freeze({reverse: ['span'], granular: ['scatter']});
 
 /** Cache depth, in seconds, a processor needs behind its input's live edge. */
 export const HISTORY = Object.freeze({
   reverse: lookahead => lookahead + Math.min(range('reverse', 'span').max, lookahead),   // reads back to the start of its interval
   stutter: () => range('stutter', 'window').max,                                        // the captured window
+  granular: lookahead => lookahead + Math.min(range('granular', 'scatter').max, lookahead),   // a bin reads from `scatter` ahead of the output to `scatter` behind it
 });
 
 export const hasLookahead = type => type in LOOKAHEAD;

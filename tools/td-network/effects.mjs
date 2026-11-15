@@ -473,5 +473,109 @@ function typography(add, ctx = {}) {
 const MAX_WORDS = 32;
 const STRIPS = 12;
 
+/** The Python module Granular's expressions call (a Text DAT, read through `.module`): the workbench's noise hash and one tile's geometry. */
+export const GRANULAR_MODULE = `import math
+
+M = 0xFFFFFFFF
+
+
+def noise(seed, i, j=0):
+    """visual-engine.mjs noise(seed, i, j): a 32-bit integer hash scaled to [0, 1)."""
+    a = (int(seed) ^ (((i + 1) * 374761393) & M) ^ (((j + 1) * 668265263) & M)) & M
+    b = ((a ^ (a >> 13)) * 1274126177) & M
+    return ((b ^ (b >> 16)) & M) / 4294967296
+
+
+def value(table, key):
+    """A resolved parameter of the processor (its \`resolved\` Table DAT)."""
+    return float(table['param.' + key, 1].val)
+
+
+def grain(time, size):
+    return int(math.floor(time / max(0.015, size)))
+
+
+def grid(tiles, width, height):
+    cols = int(math.floor(tiles + 0.5))
+    return cols, max(2, int(math.floor(cols * height / width + 0.5)))
+
+
+def bin_depth(seed, time, table, k, latency):
+    """Seconds behind the input's live edge (which runs \`latency\` ahead of \`time\`) at which grain bin k reads: it shows source time
+    time + (noise - 0.5) x 2 x scatter."""
+    return max(0.0, latency - (noise(seed, grain(time, value(table, 'size')), k) - 0.5) * 2 * value(table, 'scatter'))
+
+
+def tile(seed, i, time, table, width, height):
+    """Tile i of the grid for the grain at \`time\`, as the workbench draws it: whether it exists (on), the source rectangle (left and top
+    as fractions of the frame from its top-left corner, w and h its size as fractions), where the 1.12 times enlarged copy's centre lands
+    (tx and ty, fractions of the frame from its centre, y up) and its turn in degrees as TouchDesigner's Rotate takes it (counter-clockwise)."""
+    spatial, shuffled = value(table, 'spatial'), int(math.floor(value(table, 'order') + 0.5)) != 0
+    cols, rows = grid(value(table, 'tiles'), width, height)
+    g = grain(time, value(table, 'size'))
+    x, y = i % cols, i // cols
+    cw, ch = width / cols, height / rows
+    turn = (noise(seed, i, g) - 0.5) * spatial * 1.2
+    ox = x * cw + cw / 2 + (noise(seed, i, g + 9) - 0.5) * width * spatial
+    oy = y * ch + ch / 2 + (noise(seed, i, g + 21) - 0.5) * height * spatial
+    sx = math.floor(noise(seed, i, 3) * cols) * cw if shuffled else x * cw
+    sy = math.floor(noise(seed, i, 5) * rows) * ch if shuffled else y * ch
+    cx = ox + math.cos(turn) * 0.06 * cw - math.sin(turn) * 0.06 * ch
+    cy = oy + math.sin(turn) * 0.06 * cw + math.cos(turn) * 0.06 * ch
+    return {'on': 1 if i < cols * rows else 0, 'left': sx / width, 'top': sy / height, 'w': 1 / cols, 'h': 1 / rows,
+            'tx': cx / width - 0.5, 'ty': -(cy / height - 0.5), 'rotate': -math.degrees(turn)}
+`;
+
+/** The most tiles Granular draws: the catalog's largest Visual divisions across (24) by the rows that gives at the workbench's aspect (14 at 16:9), and its five time bins. */
+const MAX_COLS = 24;
+const MAX_TILES = MAX_COLS * 14;
+/** The catalog's largest Source time scatter, the most a bin can read ahead. */
+const MAX_SCATTER_SECONDS = 2;
+const BINS = 5;
+
+/**
+ * Granular (picture): the frame fractures into `Visual divisions` columns of tiles, each redrawn every `Audio grain size` seconds
+ * from one of five time bins (tile i uses bin i mod 5) read `(noise - 0.5) x 2 x Source time scatter` seconds around the playhead, at its place
+ * plus a seeded scatter and turn (`Spatial scatter`) and enlarged 1.12 times; `Ordering` shuffles which tile of the frame each draws. The bins read ahead of
+ * the playhead, so Granular is a look-ahead processor (it declares the catalog's largest scatter as latency, as Reverse does) and each bin is a Cache
+ * Select read `latency - offset` seconds behind the input's live edge. Each tile is a Crop TOP of its bin, stretched across a full-size canvas
+ * by a Transform TOP (so its scale brings it back to `1.12 / columns` by `1.12 / rows`), placed and turned from the geometry in the
+ * `gr_math` module, and tiles beyond the grid are switched off; tile 0 is drawn first and the last on top. The voice (grains of audio) is not built.
+ */
+function granular(add, ctx = {}) {
+  const T = ctx.clock ?? '{rack.Time}';
+  const seed = ctx.seed ?? 1;
+  const L = ctx.lookahead ?? 0;
+  const history = L + Math.min(MAX_SCATTER_SECONDS, L);
+  const W = '{op:in_picture}.width', H = '{op:in_picture}.height';
+  const M = '{op:gr_math}.module';
+  const geometry = (i, key) => `${M}.tile(${seed}, ${i}, ${T}, {op:resolved}, ${W}, ${H})['${key}']`;
+  const picture = () => {
+    add('gr_math', 'textDAT', {text: GRANULAR_MODULE});
+    add('gr_cache', 'cacheTOP', {inputs: ['in_picture'], pars: {cachesize: expr(cacheSizeText(history)), active: 1}});
+    for (let k = 0; k < BINS; k++) {
+      // bin k shows source time `t + off`; the input's live edge is t + latency, so it is `latency - off` behind it
+      add(`gr_bin_${k}`, 'cacheselectTOP', {pars: {cachetop: {ref: 'gr_cache'}, index: expr(cacheIndexText(`${M}.bin_depth(${seed}, ${T}, {op:resolved}, ${k}, ${L})`, history))}});
+    }
+    add('gr_base', 'constantTOP', {pars: {colorr: 0, colorg: 0, colorb: 0, alpha: 0}});
+    let below = 'gr_base';
+    for (let i = 0; i < MAX_TILES; i++) {
+      add(`gr_crop_${i}`, 'cropTOP', {inputs: [`gr_bin_${i % BINS}`], pars: {
+        cropleft: expr(geometry(i, 'left')), cropright: expr(`${geometry(i, 'left')} + ${geometry(i, 'w')}`),
+        cropbottom: expr(`1 - ${geometry(i, 'top')} - ${geometry(i, 'h')}`), croptop: expr(`1 - ${geometry(i, 'top')}`),
+      }});
+      add(`gr_tile_${i}`, 'transformTOP', {inputs: [`gr_crop_${i}`], pars: {
+        outputresolution: 'custom', resolutionw: expr(W), resolutionh: expr(H),
+        sx: expr(`1.12 * ${geometry(i, 'w')}`), sy: expr(`1.12 * ${geometry(i, 'h')}`), tx: expr(geometry(i, 'tx')), ty: expr(geometry(i, 'ty')), rotate: expr(geometry(i, 'rotate')), extend: 'zero',
+      }});
+      add(`gr_gain_${i}`, 'levelTOP', {inputs: [`gr_tile_${i}`], pars: {opacity: expr(geometry(i, 'on'))}});
+      add(`gr_over_${i}`, 'overTOP', {inputs: [`gr_gain_${i}`, below]});
+      below = `gr_over_${i}`;
+    }
+    return below;
+  };
+  return {picture, audioAlignedOnly: true, notes: ['granular: the voice grains are not built, and at 24 divisions the picture is 336 tile stages; a bin read before the start or after the end of the media shows the cache\'s oldest or newest frame (the workbench clamps the time); the Crop and Transform behaviours are the assumptions stated for Exchange.']};
+}
+
 /** The processors implemented by this version. A builder returns `shared` (optional, called first), `picture` and `audio`. */
-export const EFFECTS = Object.freeze({damage, delay, feedback, freeze, gate, displacement, reverse, stutter, routing, exchange, queue, typography});
+export const EFFECTS = Object.freeze({damage, delay, feedback, freeze, gate, displacement, reverse, stutter, routing, exchange, queue, typography, granular});
