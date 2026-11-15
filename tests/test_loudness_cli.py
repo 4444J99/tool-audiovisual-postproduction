@@ -185,6 +185,20 @@ class LoudnessCliTests(unittest.TestCase):
             self.assertEqual(refused.returncode, 2)
             self.assertIn("unsupported", json.loads(refused.stdout)["error"])
 
+    def test_options_override_the_spec_for_planning_and_for_judging_the_result(self):
+        with tempfile.TemporaryDirectory() as d:
+            tone(f"{d}/t.wav", -30.0, 10)
+            result = run("normalize", "--input", f"{d}/t.wav", "--output", f"{d}/o.wav", "--spec", "ebu_r128",
+                         "--target-lufs", "-16", "--ceiling-dbtp", "-0.5", "--report", f"{d}/r.json")
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertAlmostEqual(json.loads(result.stdout)["after_lufs"], -16.0, delta=0.05)
+            report = json.loads(Path(f"{d}/r.json").read_text())
+            self.assertEqual((report["spec"]["integrated_lufs"]["target"], report["spec"]["true_peak_dbtp_max"]), (-16.0, -0.5))
+            self.assertEqual(report["problems"], [])
+            # without the override the same spec still judges against its own numbers
+            plain = run("normalize", "--input", f"{d}/t.wav", "--output", f"{d}/p.wav", "--spec", "ebu_r128")
+            self.assertAlmostEqual(json.loads(plain.stdout)["after_lufs"], -23.0, delta=0.05)
+
     def test_silent_measure_prints_strict_json(self):
         with tempfile.TemporaryDirectory() as d:
             wavfile.write(f"{d}/s.wav", SR, np.zeros((SR * 2, 2), dtype=np.int16))

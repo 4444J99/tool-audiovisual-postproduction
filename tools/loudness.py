@@ -172,6 +172,10 @@ def main(argv=None):
         ceiling = args.ceiling_dbtp if args.ceiling_dbtp is not None else (spec.get("true_peak_dbtp_max") if spec else None)
         if target is None:
             raise ld.LoudnessError("normalize needs --spec or --target-lufs")
+        if spec:        # explicit options override the spec, so the written file is judged against what was asked for
+            spec = dict(spec, integrated_lufs=dict(spec["integrated_lufs"], target=float(target)))
+            if ceiling is not None:
+                spec["true_peak_dbtp_max"] = float(ceiling)
         plan = ld.solve_gain(audio, sr, target, ceiling, args.on_ceiling, args.layout)
         report = {"input": args.input, "input_sha256": sha256_file(args.input), "before": measurement, "plan": plan, "spec": spec}
         if not plan["ok"]:
