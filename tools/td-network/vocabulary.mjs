@@ -22,6 +22,8 @@ export const VOCABULARY = Object.freeze({
   switchTOP: {family: 'TOP', pars: ['index']},
   fitTOP: {family: 'TOP', pars: ['outputresolution', 'resolutionw', 'resolutionh', 'inputfiltertype']},
   transformTOP: {family: 'TOP', pars: ['sx', 'sy', 'rotate', 'tx', 'ty', 'extend', 'outputresolution', 'resolutionw', 'resolutionh']},
+  multiplyTOP: {family: 'TOP', pars: []},
+  textTOP: {family: 'TOP', pars: ['text', 'fontsizex', 'fontsizexunit', 'fontcolorr', 'fontcolorg', 'fontcolorb', 'fontalpha', 'bgalpha', 'bold', 'alignx', 'outputresolution', 'resolutionw', 'resolutionh']},
   cropTOP: {family: 'TOP', pars: ['cropleft', 'cropright', 'cropbottom', 'croptop']},
   noiseTOP: {family: 'TOP', pars: ['period', 'tz', 'mono', 'seed', 'amp']},
   displaceTOP: {family: 'TOP', pars: ['displaceweightx', 'displaceweighty']},

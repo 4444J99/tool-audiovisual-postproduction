@@ -138,6 +138,11 @@ export function buildNetworkSpec(patch, options = {}) {
   const taken = new Set(['osc_in', 'osc_in_callbacks', 'osc_out', 'td_osc', 'td_contract', 'par_exec_nodes', 'par_exec_rack', 'td_resolve', 'frame_exec', 'video_out', 'audio_out']);
   const names = new Map(patch.nodes.map(node => [node.id, operatorName(node.id, taken)]));
   const warnings = [];
+  // Typography's words: the patch's authored words, or the checked word cues the caller supplies (`options.wordCues`); the cues of the
+  // media pack are private to it and are never read from the patch
+  const wordMaterial = patch.metadata?.wordMode === 'authored'
+    ? {mode: 'authored', words: String(patch.metadata.words || 'HOW WHY WHAT').split(/\s+/).filter(Boolean)}
+    : {mode: 'cues', cues: (options.wordCues ?? []).map(cue => ({in: Number(cue.in), out: cue.out == null ? 0 : Number(cue.out), text: String(cue.text), probability: cue.probability == null ? 1 : Number(cue.probability)}))};
   const implemented = [];
   const operators = [];
   const add = (parent, name, type, extra = {}) => {
@@ -238,7 +243,7 @@ export function buildNetworkSpec(patch, options = {}) {
       if (latency.lookahead > 0 && LOOKAHEAD[node.type]() > latency.lookahead + 1e-9) warnings.push(`${node.id}: ${node.type} can read ${LOOKAHEAD[node.type]()} s ahead but the latency is capped at ${maxLatency} s${LIMITED[node.type] ? `, so ${LIMITED[node.type].join(', ')} is limited to ${latency.lookahead} s` : '; a read beyond the cap shows the newest frame'}.`);
       // the workbench's per-processor noise seed (visual-engine.mjs `effect`): the patch seed (1 when it has none) plus the id's character codes
       const seed = (Number(patch.seed) || 1) + [...node.id].reduce((sum, char) => sum + char.charCodeAt(0), 0);
-      const effectContext = {lookahead: latency.lookahead, lag: latency.lag, seed, ...(latency.lag > 0 ? {clock: '{clock}'} : {})};
+      const effectContext = {lookahead: latency.lookahead, lag: latency.lag, seed, words: wordMaterial, ...(latency.lag > 0 ? {clock: '{clock}'} : {})};
       const effect = EFFECTS[node.type]?.((name, type, extra = {}) => add(comp, name, type, {...extra, pars: Object.fromEntries(Object.entries(extra.pars ?? {}).map(([key, value]) => [key, value && typeof value === 'object' && 'ref' in value ? {ref: `${comp}/${value.ref}`} : value]))}), effectContext);
       // Like the workbench, a processor only touches the shared voice when it targets `voice`, and the picture when it
       // targets any visual stream; otherwise that signal passes through untouched.

@@ -380,5 +380,98 @@ function queue(add, ctx = {}) {
   return {picture, notes: ['queue: the text port\'s smaller 0.65 copies (the written source) are not built, only the picture; the Transform TOP\'s Rotate is assumed counter-clockwise about the image centre (the parameter reference lists no menu tokens or pivot default), as Feedback already assumes the centre, and its translate unit is taken as the reference default.']};
 }
 
+/**
+ * Typography (picture): expressive words fill the canvas, multiply into a wall, or act as an image aperture. The word is the
+ * workbench's own: authored words step every 0.7 s (blank once the word is older than Word persistence), otherwise the latest
+ * checked cue that has started with probability above 0.5 (`OUT` before any), blank after Word persistence past its end. The cues
+ * are the caller's (`options.wordCues`, a Table DAT `ty_words`); the media pack's own cues stay in the pack.
+ *  - Solid obstruction (mode 0): one Text TOP, up to 32 copies (copy 0 opaque, the rest at 0.18, copy k shifted by
+ *    `(sin(time x Word drift + k) x 0.16, cos(...) x 0.18)` of the frame, copy 0 on top), then, for Letter fragmentation above 0.3,
+ *    twelve horizontal strips of the word shifted sideways by `sin(4k + floor(5 time)) x fragmentation x 0.045`, over the copies;
+ *  - Inbox wall (mode 2): up to 32 left-aligned words, three per row, each the word `0.32 i` s older, the row height giving the size;
+ *  - Image aperture (mode 1): the picture multiplied by white text, over a near-black frame.
+ * Modes 0 and 2 lay the words over the picture; mode 1 replaces it. The text stream (the same words for the captions' port) is not built.
+ */
+function typography(add, ctx = {}) {
+  const T = ctx.clock ?? '{rack.Time}';
+  const material = ctx.words ?? {mode: 'cues', cues: []};
+  const W = '{op:in_picture}.width', H = '{op:in_picture}.height';
+  const RGB = {fontcolorr: 219 / 255, fontcolorg: 251 / 255, fontcolorb: 101 / 255};
+  const word = at => {
+    const time = `max(0, ${at})`;
+    if (material.mode === 'authored') {
+      return `(lambda t, table: '' if (t % 0.7) > {persistence} else table[int(t / 0.7) % table.numRows, 0].val)(${time}, {op:ty_words})`;
+    }
+    // the last cue (in the table's order) that has started and is probable; `out` of 0 means none, as the workbench's `recent.out || recent.in`
+    return `(lambda t, rows: (lambda recent: 'OUT' if recent is None else ('' if t - (recent[1] or recent[0]) > {persistence} else recent[2]))(([row for row in rows if row[0] <= t and row[3] > 0.5] or [None])[-1]))(${time}, [[float(row[0].val), float(row[1].val), row[2].val, float(row[3].val)] for row in {op:ty_words}.rows()])`;
+  };
+  const wordTable = () => add('ty_words', 'tableDAT', {table: material.mode === 'authored' ? material.words.map(item => [item]) : material.cues.map(cue => [String(cue.in), String(cue.out), cue.text, String(cue.probability)])});
+  const text = (name, textExpr, size, extra = {}) => add(name, 'textTOP', {pars: {
+    text: expr(textExpr), fontsizex: expr(size), fontsizexunit: 'pixels', bold: 1, fontalpha: 1, bgalpha: 0,
+    outputresolution: 'custom', resolutionw: expr(W), resolutionh: expr(H), ...extra,
+  }});
+  const solid = () => {
+    text('ty_text', word(T), `${H} * {size}`, RGB);
+    add('ty_s_base', 'constantTOP', {pars: {colorr: 0, colorg: 0, colorb: 0, alpha: 0}});
+    let below = 'ty_s_base';
+    for (let k = MAX_WORDS - 1; k >= 0; k--) {
+      add(`ty_move_${k}`, 'transformTOP', {inputs: ['ty_text'], pars: {
+        tx: expr(k === 0 ? '0' : `math.sin(${T} * {drift} + ${k}) * 0.16`), ty: expr(`${k === 0 ? '-0.035' : `-0.035 - math.cos(${T} * {drift} + ${k}) * 0.18`}`), extend: 'zero',
+      }});
+      add(`ty_copy_${k}`, 'levelTOP', {inputs: [`ty_move_${k}`], pars: {opacity: expr(`${k === 0 ? '1' : '0.18'} if ${k} < min(${MAX_WORDS}, int(math.floor({copies} + 0.5))) else 0`)}});
+      add(`ty_over_${k}`, 'overTOP', {inputs: [`ty_copy_${k}`, below]});
+      below = `ty_over_${k}`;
+    }
+    for (let k = 0; k < STRIPS; k++) {
+      add(`ty_crop_${k}`, 'cropTOP', {inputs: ['ty_move_0'], pars: {cropleft: 0, cropright: 1, cropbottom: 1 - (k + 1) / STRIPS, croptop: 1 - k / STRIPS}});
+      add(`ty_strip_${k}`, 'transformTOP', {inputs: [`ty_crop_${k}`], pars: {
+        outputresolution: 'custom', resolutionw: expr(W), resolutionh: expr(H), sx: 1, sy: 1 / STRIPS,
+        tx: expr(`math.sin(${k} * 4 + math.floor(${T} * 5)) * {fragment} * 0.045`), ty: 0.5 - (k + 0.5) / STRIPS, extend: 'zero',
+      }});
+      add(`ty_frag_${k}`, 'levelTOP', {inputs: [`ty_strip_${k}`], pars: {opacity: expr('1 if {fragment} > 0.3 else 0')}});
+      add(`ty_fover_${k}`, 'overTOP', {inputs: [`ty_frag_${k}`, below]});
+      below = `ty_fover_${k}`;
+    }
+    return below;
+  };
+  const wall = () => {
+    const rows = 'max(2, int(math.ceil({copies} / 3)))';
+    add('ty_w_base', 'constantTOP', {pars: {colorr: 0, colorg: 0, colorb: 0, alpha: 0}});
+    let below = 'ty_w_base';
+    for (let i = MAX_WORDS - 1; i >= 0; i--) {
+      text(`ty_wall_${i}`, word(`${T} - ${i} * 0.32`), `${H} / (${rows}) * 0.9`, {...RGB, alignx: 'left'});
+      add(`ty_wmove_${i}`, 'transformTOP', {inputs: [`ty_wall_${i}`], pars: {
+        tx: expr(`${i % 3} / 3 - 10 / ${W}`), ty: expr(`-(${Math.floor(i / 3)} * ${H} / (${rows}) + ${H} / (${rows}) / 2) / ${H} + 0.5`), extend: 'zero',
+      }});
+      add(`ty_wgain_${i}`, 'levelTOP', {inputs: [`ty_wmove_${i}`], pars: {opacity: expr(`1 if ${i} < {copies} else 0`)}});
+      add(`ty_wover_${i}`, 'overTOP', {inputs: [`ty_wgain_${i}`, below]});
+      below = `ty_wover_${i}`;
+    }
+    return below;
+  };
+  const aperture = () => {
+    text('ty_ap_text', word(T), `${H} * {size}`, {fontcolorr: 1, fontcolorg: 1, fontcolorb: 1});
+    add('ty_ap_move', 'transformTOP', {inputs: ['ty_ap_text'], pars: {ty: -0.035, extend: 'zero'}});
+    add('ty_ap_cut', 'multiplyTOP', {inputs: ['in_picture', 'ty_ap_move']});
+    add('ty_ap_dark', 'constantTOP', {pars: {colorr: 6 / 255, colorg: 7 / 255, colorb: 8 / 255, alpha: 1}});
+    add('ty_ap_over', 'overTOP', {inputs: ['ty_ap_cut', 'ty_ap_dark']});
+    return 'ty_ap_over';
+  };
+  const picture = () => {
+    wordTable();
+    const layers = solid(), wallTop = wall();
+    add('ty_pick_words', 'switchTOP', {inputs: [layers, wallTop], pars: {index: expr('1 if int(round({mode})) == 2 else 0')}});
+    add('ty_on_picture', 'overTOP', {inputs: ['ty_pick_words', 'in_picture']});
+    const cut = aperture();
+    add('ty_pick', 'switchTOP', {inputs: ['ty_on_picture', cut], pars: {index: expr('1 if int(round({mode})) == 1 else 0')}});
+    return 'ty_pick';
+  };
+  return {picture, notes: [`typography: ${material.mode === 'authored' ? 'the authored words are' : (material.cues.length ? `${material.cues.length} supplied word cues are` : 'no word cues were supplied (generate with --word-cues; the media pack\'s own cues are private to it), so the word is OUT')} read from the Table DAT ty_words; the text stream (captions port) is not built; the Text TOP does not squeeze a word wider than the frame (the workbench scales it to 96 % of the width, the wall to a third) and its glyph shapes, bold weight and centring are the Text TOP's own (its alignment menu tokens are verified only for left, right, top and center); picture strips use the Crop and Transform assumptions stated for Exchange.`]};
+}
+
+/** The most word copies Typography draws and the strips of its fragmentation. */
+const MAX_WORDS = 32;
+const STRIPS = 12;
+
 /** The processors implemented by this version. A builder returns `shared` (optional, called first), `picture` and `audio`. */
-export const EFFECTS = Object.freeze({damage, delay, feedback, freeze, gate, displacement, reverse, stutter, routing, exchange, queue});
+export const EFFECTS = Object.freeze({damage, delay, feedback, freeze, gate, displacement, reverse, stutter, routing, exchange, queue, typography});
