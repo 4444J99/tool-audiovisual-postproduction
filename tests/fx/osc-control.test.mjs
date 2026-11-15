@@ -297,6 +297,16 @@ test('applyParameterEdit is exactly what the workbench setter does outside recor
   assert.ok(!node.macro.some(m => m.parameter === 'taps'));
 });
 
+test('a 50-keyframe lane passes the bridge\'s wire check (it was refused above 1,024 characters)', async () => {
+  const {parseWireMessage} = await import('../../tools/fx-bridge/bridge.mjs');
+  const {node, ruleMessages, feedback} = ruleRig();
+  ruleMessages(feedback);
+  node.automation = [{parameter: 'wet', interpolation: 'linear', keyframes: Array.from({length: 50}, (_, i) => ({time: i / 4, value: 0.123456789012}))}];
+  const lane = ruleMessages(feedback).find(m => m.address.endsWith('/lane/wet'));
+  assert.ok(lane.args[0].length > 1024);
+  assert.deepEqual(parseWireMessage(JSON.stringify(lane)), lane);
+});
+
 test('the largest lane the rack will send arrives through a real UDP socket, whole', async () => {
   const {encodeMessage, decodePacket} = await import('../../tools/fx-bridge/osc-codec.mjs');
   const dgram = await import('node:dgram');
@@ -308,6 +318,10 @@ test('the largest lane the rack will send arrives through a real UDP socket, who
   node.automation = make(count);
   const lane = ruleMessages(feedback).find(m => m.address.endsWith('/lane/wet'));
   assert.ok(lane, 'a lane at the limit is still sent');
+  // the page sends the message as JSON; the bridge must accept it, whatever its length up to the limit (a 50-keyframe lane is over 1,000 characters)
+  const wire = (await import('../../tools/fx-bridge/bridge.mjs')).parseWireMessage(JSON.stringify(lane));
+  assert.deepEqual(wire, lane);
+  assert.ok(lane.args[0].length <= oscControl.MAX_RULE_CHARS && (await import('../../tools/fx-bridge/bridge.mjs')).MAX_STRING >= oscControl.MAX_RULE_CHARS);
   const packet = encodeMessage(lane.address, lane.args);
   assert.ok(packet.length < 9216, `${packet.length} bytes`);
   const receiver = dgram.createSocket('udp4'), sender = dgram.createSocket('udp4');
