@@ -281,7 +281,7 @@ test('validator catches broken specs', () => {
   const effectCases = {
     'effect expression reading a sibling that is not in its processor': spec => { const o = spec.operators.find(op => op.name === 'gate_picture'); o.pars.opacity = {expr: "float(parent().op('nowhere')[0].eval())", resolved: [], rack: [], siblings: ['nowhere']}; },
     'effect expression reading a rack parameter the rack lacks': spec => { const o = spec.operators.find(op => op.name === 'gate_raw'); o.pars.const0value = {expr: 'parent().parent().par.Nope', resolved: [], rack: ['Nope'], siblings: []}; },
-    'reference to a missing operator inside a processor': spec => { const o = spec.operators.find(op => op.type === 'feedbackTOP'); o.pars.top = {ref: o.parent + '/ghost'}; },
+    'reference to a missing operator inside a processor': spec => { const o = spec.operators.find(op => op.name === 'fb_frame_1'); o.pars.cachetop = {ref: o.parent + '/ghost'}; },
   };
   for (const [label, mutate] of Object.entries(effectCases)) {
     const spec = structuredClone(buildNetworkSpec(createPatch('closed-inbox')));

@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "web" / "fx" / "fixtures"
-IMPLEMENTED = ["damage", "delay", "displacement", "feedback", "gate"]
+IMPLEMENTED = ["damage", "delay", "displacement", "feedback", "freeze", "gate"]
 
 
 def spec_for(patch_path):
@@ -77,9 +77,10 @@ class Channels(list):
 
 class Audio:
     """Two source channels; indexing a channel by sample gives that sample."""
-    def __init__(self, left, right):
+    def __init__(self, left, right, rate=48000.0):
         self.channels = [left, right]
         self.numChans = 2
+        self.rate = rate
 
     def __getitem__(self, index):
         return self.channels[index]
@@ -100,7 +101,7 @@ class Comp:
             return [Chan(self.gate)]
         if name == "in_picture":
             return Sized()
-        if name == "audio":
+        if name in ("audio", "dmg_drive"):   # a CHOP read sample by sample: the source, or the driven signal (same stand-in samples)
             return self.audio
         raise KeyError(name)
 
@@ -117,11 +118,11 @@ class Me:
         self.inputVal, self.inputIndex = value, index
 
 
-def evaluate(text, rows, time=0.0, control=0.0, gate=1.0, sample=0.0, audio=None, index=0):
+def evaluate(text, rows, time=0.0, control=0.0, gate=1.0, sample=0.0, audio=None, index=0, rate=48000.0):
     comp = Comp(rows, time, control, gate)
     if audio:
-        comp.audio = Audio(*audio)
-    return eval(text, {"parent": lambda: comp, "project": Project, "me": Me(sample, index), "float": float, "int": int, "max": max, "min": min, "round": round})
+        comp.audio = Audio(*audio, rate=rate)
+    return eval(text, {"parent": lambda: comp, "project": Project, "me": Me(sample, index), "math": math, "float": float, "int": int, "max": max, "min": min, "round": round})
 
 
 def rows_for(definition_params, picks):
@@ -144,7 +145,7 @@ class EffectTests(unittest.TestCase):
         cls.params = {t: catalog(t) for t in IMPLEMENTED}
 
     def chain(self, type_name):
-        return [o for o in self.specs[type_name]["operators"] if o["parent"].startswith("fx_") and o["parent"].count("/") == 0 and o["name"] not in ("resolved",) and o["path"].split("/")[1].startswith(("dmg_", "dly_", "gate_", "fb_", "dsp_"))]
+        return [o for o in self.specs[type_name]["operators"] if o["parent"].startswith("fx_") and o["parent"].count("/") == 0 and o["name"] not in ("resolved",) and o["path"].split("/")[1].startswith(("dmg_", "dly_", "gate_", "fb_", "dsp_", "fz_"))]
 
     def test_every_effect_expression_is_finite_at_the_catalog_minimum_default_and_maximum(self):
         evaluated = 0
@@ -230,13 +231,136 @@ class EffectTests(unittest.TestCase):
             rows = rows_for(None, {"amount": 0.5, "scale": 4, "frequency": 1, "speed": 1, "spill": 1, "direction": direction, "warp": 0, "ring": 0})
             self.assertEqual((evaluate(pull["displaceweightx"]["expr"], rows) > 0, evaluate(pull["displaceweighty"]["expr"], rows) > 0), (x, y), direction)
 
-    def test_feedback_returns_through_the_requested_scale_rotation_and_gain(self):
+    def test_feedback_returns_follow_the_workbenchs_pass_count_tail_and_reset_rule(self):
+        """visual-engine.mjs: passes = min(round(repeats), floor((t - epoch) / time)); a return k draws when gain ** k >= threshold;
+        epoch is the reset time once the playhead has reached it, else 0. Compared over a grid of every parameter's extremes."""
         by_name = {o["name"]: o for o in self.chain("feedback")}
-        rows = rows_for(None, {"time": 0.26, "gain": 0.8, "repeats": 10, "scale": 0.81, "rotation": 0.25, "reset": 11.5, "threshold": 0.005})
-        self.assertEqual(evaluate(by_name["fb_move"]["pars"]["sx"]["expr"], rows), 0.81)
-        self.assertEqual(evaluate(by_name["fb_move"]["pars"]["rotate"]["expr"], rows), 90.0)
-        self.assertEqual(evaluate(by_name["fb_gain"]["pars"]["opacity"]["expr"], rows), 0.8)
-        self.assertEqual(by_name["fb_state"]["pars"]["top"], {"ref": "fx_fx_1/fb_sum"})
+        grid = itertools.product((0.04, 0.26, 1.5), (0.0, 0.5, 0.9), (1, 4, 10, 16), (0.001, 0.005, 0.1), (0.0, 3.0, 11.5), (0.0, 0.7, 2.9, 3.0, 8.0, 12.0))
+        checked = 0
+        for delay, gain, repeats, threshold, reset, now in grid:
+            rows = rows_for(None, {"time": delay, "gain": gain, "repeats": repeats, "scale": 0.81, "rotation": 0.25, "reset": reset, "threshold": threshold})
+            epoch = reset if now >= reset else 0
+            passes = min(round(repeats), math.floor((now - epoch) / delay))
+            for k in range(1, 17):
+                wanted = gain ** k if (k <= passes and gain ** k >= threshold and round(delay * k * 60) < 240) else 0
+                got = evaluate(by_name["fb_mix_%d" % k]["pars"]["cross"]["expr"], rows, time=now)
+                self.assertAlmostEqual(got, wanted, places=12, msg="k=%d %r" % (k, (delay, gain, repeats, threshold, reset, now)))
+                checked += 1
+        self.assertGreater(checked, 5000)
+
+    def test_feedback_recurrences_scale_and_rotate_by_the_recurrence_number_and_read_k_delays_back(self):
+        by_name = {o["name"]: o for o in self.chain("feedback")}
+        rows = rows_for(None, {"time": 0.1, "gain": 0.8, "repeats": 10, "scale": 0.81, "rotation": 0.25, "reset": 11.5, "threshold": 0.005})
+        for k in (1, 2, 7, 16):
+            move = by_name["fb_move_%d" % k]["pars"]
+            self.assertAlmostEqual(evaluate(move["sx"]["expr"], rows), 0.81 ** k)
+            self.assertEqual(evaluate(move["sx"]["expr"], rows), evaluate(move["sy"]["expr"], rows))
+            self.assertAlmostEqual(evaluate(move["rotate"]["expr"], rows), 90.0 * k)
+            self.assertEqual(evaluate(by_name["fb_frame_%d" % k]["pars"]["index"]["expr"], rows), -min(239, round(0.1 * k * 60)))
+        self.assertEqual(by_name["fb_cache"]["pars"]["cachesize"], 240)
+        self.assertEqual([by_name["fb_mix_%d" % k]["inputs"][0] for k in (1, 2, 16)], ["in_picture", "fb_mix_1", "fb_mix_15"])   # the returns stack in order, k = 1 first
+        self.assertNotIn("feedbackTOP", {o["type"] for o in self.chain("feedback")}, "returns read the history; there is no loop to diverge")
+
+    def test_a_feedback_return_beyond_the_cache_is_switched_off(self):
+        by_name = {o["name"]: o for o in self.chain("feedback")}
+        rows = rows_for(None, {"time": 1.5, "gain": 0.9, "repeats": 16, "scale": 1, "rotation": 0, "reset": 0, "threshold": 0.001})   # 90 frames per return: only k = 1, 2 fit in 240
+        gains = [evaluate(by_name["fb_mix_%d" % k]["pars"]["cross"]["expr"], rows, time=100.0) for k in (1, 2, 3)]
+        self.assertEqual([g > 0 for g in gains], [True, True, False])
+
+    # -- Freeze / Hold -------------------------------------------------------------------------------------------------
+
+    def js_freeze(self, combos, rate=2000, seconds=12.0):
+        """The workbench's own freezeSourceTime, and its audio processor run over a ramp (sample i = i / rate), so that each output
+        sample says which source time it read: out = (src(capture + phase) * w1 + src(capture + phase2) * w2) * gain."""
+        script = """
+import {processAudioModule, freezeSourceTime} from './web/fx/audio-engine.mjs';
+const [combos, rate, seconds] = JSON.parse(process.argv[1]);
+const n = Math.round(rate * seconds), ramp = Float32Array.from({length: n}, (_, i) => i / rate);
+const out = combos.map(params => {
+  const node = {id: 'fz', params, wet: 1, intensity: 1, macro: [], automation: []};
+  const audio = processAudioModule('freeze', [ramp, ramp], rate, node).channels[0];
+  const samples = [];
+  for (let i = 0; i < n; i += 37) samples.push([i / rate, audio[i], freezeSourceTime(i / rate, params)]);
+  return samples;
+});
+process.stdout.write(JSON.stringify(out));
+"""
+        result = subprocess.run(["node", "--input-type=module", "-e", script, json.dumps([combos, rate, seconds])], capture_output=True, text=True, cwd=ROOT, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_freeze_holds_exactly_where_the_workbench_holds_and_reads_the_same_source_times(self):
+        combos = [{"capture": 2.92, "duration": 4.4, "grain": 0.08, "decay": 0.12, "release": 0.05, "motion": 0, "capture_": 0},
+                  {"capture": 1.0, "duration": 2.0, "grain": 0.3, "decay": 1.0, "release": 0.5},
+                  {"capture": 0.0, "duration": 8.0, "grain": 0.025, "decay": 0.0, "release": 0.005},
+                  {"capture": 10.0, "duration": 0.1, "grain": 0.1, "decay": 0.5, "release": 0.05}]
+        combos = [{k: v for k, v in c.items() if k in ("capture", "duration", "grain", "decay", "release")} for c in combos]
+        by_name = {o["name"]: o for o in self.chain("freeze")}
+        compared = held_samples = 0
+        for params, samples in zip(combos, self.js_freeze(combos)):
+            rows = rows_for(None, {**params, "motion": 0.0})
+            for t, out, source_time in samples:
+                held = evaluate(by_name["fz_pick"]["pars"]["index"]["expr"], rows, time=t)
+                self.assertEqual(held, 1 if source_time == params["capture"] else 0, (params, t))
+                self.assertEqual(evaluate(by_name["fz_cache"]["pars"]["active"]["expr"], rows, time=t), 1 - held)
+                tap1 = evaluate(by_name["fz_tap_1"]["pars"]["delay"]["expr"], rows, time=t)
+                tap2 = evaluate(by_name["fz_tap_2"]["pars"]["delay"]["expr"], rows, time=t)
+                g1 = evaluate(by_name["fz_grain_1"]["pars"]["gain"]["expr"], rows, time=t)
+                g2 = evaluate(by_name["fz_grain_2"]["pars"]["gain"]["expr"], rows, time=t)
+                through = evaluate(by_name["fz_through"]["pars"]["gain"]["expr"], rows, time=t)
+                modelled = t * through + (t - tap1) * g1 + (t - tap2) * g2   # the ramp read through the two delays
+                elapsed = t - params["capture"]
+                size = max(0.001, params["grain"])
+                late = held and (elapsed % size + size / 2) % size > elapsed   # the second grain would start after the live signal: clamped, see the docstring
+                if not late:
+                    self.assertAlmostEqual(modelled, out, delta=3e-4, msg=(params, t))
+                    compared += 1
+                held_samples += held
+        self.assertGreater(compared, 1000)
+        self.assertGreater(held_samples, 300)
+
+    def test_freeze_picture_fades_toward_a_fifth_and_shakes_only_while_held(self):
+        by_name = {o["name"]: o for o in self.chain("freeze")}
+        rows = rows_for(None, {"capture": 2.0, "duration": 4.0, "grain": 0.08, "decay": 1.0, "release": 0.05, "motion": 0.1})
+        fade = by_name["fz_fade"]["pars"]["opacity"]["expr"]
+        shake = by_name["fz_shake"]["pars"]["tx"]["expr"]
+        self.assertEqual([evaluate(fade, rows, time=t) for t in (1.9, 6.0)], [1, 1])
+        self.assertAlmostEqual(evaluate(fade, rows, time=2.0), 1.0)
+        self.assertAlmostEqual(evaluate(fade, rows, time=4.0), 0.5)
+        self.assertAlmostEqual(evaluate(fade, rows, time=5.99), 0.2)   # floor of the workbench's max(0.2, ...)
+        self.assertEqual([evaluate(shake, rows, time=t) for t in (1.9, 6.0)], [0, 0])
+        self.assertAlmostEqual(evaluate(shake, rows, time=3.0), math.sin(21.0) * 0.1)
+
+    def test_freeze_without_a_voice_or_picture_target_builds_only_the_other_chain(self):
+        spec = spec_for(single_patch("freeze", ["voice"]))
+        names = {o["name"] for o in spec["operators"] if o["parent"] == "fx_fx_1"}
+        self.assertTrue({"fz_tap_1", "fz_sum"} <= names)
+        self.assertFalse({"fz_cache", "fz_fade"} & names)
+
+    # -- Signal Damage: sample-rate reduction ---------------------------------------------------------------------------
+
+    def test_damage_holds_each_run_of_samples_like_the_workbenchs_sample_and_hold(self):
+        """audio-engine.mjs damage: holdPhase += clamp(rate, 100, sr) / sr per sample, a new sample is taken whenever it reaches 1."""
+        by_name = {o["name"]: o for o in self.chain("damage")}
+        expression = by_name["dmg_hold"]["pars"]["expr0expr"]["expr"]
+        self.assertEqual(by_name["dmg_bits"]["inputs"], ["dmg_hold"])
+        sr, n = 48000.0, 3000
+        ramp = [float(i) for i in range(n)]
+        for rate in (100, 600, 1800, 3200, 12000, 24000, 48000, 90000):
+            rows = rows_for(None, {"bits": 16, "rate": rate, "block": 0.1, "levels": 4, "drive": 1.0, "band": 900, "output": 1.0})
+            phase, taken_at, last = 1.0, [], 0
+            for i in range(n):
+                phase += min(sr, max(100, rate)) / sr
+                if phase >= 1:
+                    phase %= 1
+                    last = i
+                taken_at.append(last)
+            for i in range(0, n, 7):
+                got = int(evaluate(expression, rows, audio=(ramp, ramp), index=i, rate=sr))   # the ramp, so the value is the sample index read
+                # a hold boundary falls within one sample of where the workbench's accumulated phase puts it (the phase sums floats, so a
+                # boundary sample can land either side): the read must match the hold of this sample or of a neighbour
+                near = [taken_at[j] for j in (i - 1, i, i + 1) if 0 <= j < n]
+                self.assertTrue(any(abs(got - held) <= 1 for held in near), "rate %r sample %d: read %d, workbench holds %r" % (rate, i, got, near))
 
 
 class TargetTests(unittest.TestCase):

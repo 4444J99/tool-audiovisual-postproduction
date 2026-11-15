@@ -20,7 +20,7 @@ export const VOCABULARY = Object.freeze({
   crossTOP: {family: 'TOP', pars: ['cross']},
   switchTOP: {family: 'TOP', pars: ['index']},
   fitTOP: {family: 'TOP', pars: ['outputresolution', 'resolutionw', 'resolutionh', 'inputfiltertype']},
-  transformTOP: {family: 'TOP', pars: ['sx', 'sy', 'rotate']},
+  transformTOP: {family: 'TOP', pars: ['sx', 'sy', 'rotate', 'tx']},
   noiseTOP: {family: 'TOP', pars: ['period', 'tz', 'mono', 'seed', 'amp']},
   displaceTOP: {family: 'TOP', pars: ['displaceweightx', 'displaceweighty']},
   feedbackTOP: {family: 'TOP', pars: ['top']},

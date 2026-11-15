@@ -173,7 +173,7 @@ the network after changing a patch's rules (the rack reports evaluated values at
 from playing automation). Editing a base parameter in TouchDesigner never sends the resolved value back
 over OSC: only edits made to the custom parameters are exchanged.
 
-**Effects (five of thirteen).** Between `in_<port>` and `proc_<port>` a processor now holds the effect chain
+**Effects (six of thirteen).** Between `in_<port>` and `proc_<port>` a processor now holds the effect chain
 (`tools/td-network/effects.mjs`). Every effect parameter is an expression over the processor's resolved values, so
 macros, automation, events and sidechain drive it; the chain stays inside the processor, keeps the input's resolution,
 and the network stays static (a count parameter is a fixed maximum of stages switched by its resolved value).
@@ -181,9 +181,10 @@ and the network stays static (a count parameter is a fixed maximum of stages swi
 | Processor | Picture | Audio |
 |---|---|---|
 | Delay / Echo | Cache TOP with eight Cache Select TOPs at `n x Tap delay` frames back, Level TOP gain `Tap decay^n` while `n <= Echo taps`, summed with the input; the cache holds 240 frames (4 s at 60 fps) and a tap that would reach further back is switched off, not collapsed onto the oldest frame | eight Delay CHOPs at `n x Tap delay`, same gains, the delayed returns only (the processor's dry branch carries the direct signal, so a fully wet delay is silent before its first tap) |
+| Freeze / Hold | for `Hold duration` seconds from `Capture time`: a Cache TOP stops taking frames and its newest frame is shown through a Switch TOP, faded by a Level TOP toward 0.2 by `Hold decay`, shaken sideways by a Transform TOP (`Micro motion`) | two Delay CHOPs at the age of two grains of `Voice hold grain` seconds started a half grain apart, Hann-weighted (`0.5 - 0.5 cos`) and complementary, decaying by `exp(-Hold decay x elapsed)` with a 6 ms onset and a `Release edge` tail; outside the hold the input passes. The first half grain of a hold reads the live signal for the second grain, where the workbench reads ahead |
 | Gate / Erase | Level TOP opacity from the gate | Math CHOP gain from the gate: periodic (`Open fraction`, `Gate period`, `Gate phase` against the playhead) or sidechain threshold (with no control cable the gate reads zero and stays closed); `Edge time` smooths it with a Lag CHOP; `Closed-state residue` is its floor |
-| Signal Damage | Level TOP stepping (`1 / Picture tone levels`), then Fit TOP down to the requested mosaic cells and back up to the input size, both nearest | drive (Math CHOP), bit-depth quantise (Expression CHOP), bandwidth limit (Lag CHOP, `1 / (2 pi band)`), independent output level |
-| Feedback | Feedback TOP returned through a Transform TOP (`Scale per recurrence`, `Rotation per recurrence`) and a Level TOP (`Return gain`), added to the input | none |
+| Signal Damage | Level TOP stepping (`1 / Picture tone levels`), then Fit TOP down to the requested mosaic cells and back up to the input size, both nearest | drive (Math CHOP), sample-rate hold (Expression CHOP: a new sample every `sample rate / Audio sample-rate reduction` samples, taken where the workbench's hold phase reaches 1, within one sample), bit-depth quantise (Expression CHOP), bandwidth limit (Lag CHOP, `1 / (2 pi band)`), independent output level |
+| Feedback | up to 16 returns, each a Cache Select tap `k x Feedback delay` back, a Transform TOP (`Scale per recurrence^k`, `Rotation per recurrence x k`) and a Cross TOP stacking it on the previous return at `Return gain^k`; return k exists while `k <= min(Maximum recurrences, floor((time - epoch) / delay))`, `Return gain^k >= Tail threshold`, and the tap is inside the 240-frame cache; `epoch` is `Reset time` once the playhead has reached it, else 0 | none |
 | Displacement | moving Noise TOP (`Field scale`, `Field movement`) pulling the picture through a Displace TOP along `Direction` | none |
 
 Like the workbench, a processor builds its audio chain only when it targets `voice` and its picture chain only when it targets `picture`, `body`, `objects` or `room`; otherwise that signal passes through and the spec's `warnings` say so.
@@ -192,10 +193,15 @@ Like the workbench, a processor builds its audio chain only when it targets `voi
 at each parameter's minimum, default and maximum, and checks the arithmetic: tap gains and delays, the gate's duty
 cycle, the bit-depth step grid, the mosaic cell counts, the displaced axis and the feedback transform.
 
-**Not applied by this network:** the effects of the other eight processors (Routing, Stutter, Granular, Reverse,
-Freeze / Hold, Queue / Overflow, Exchange, Typography), which pass signal through unchanged and are named in the
-spec's `warnings`; the audio of Feedback and Displacement; Signal Damage's sample-rate reduction and picture `Signal drive`;
-Feedback's `Maximum recurrences`, `Tail threshold` and `Reset time`; Displacement's `Boundary spill`, audio warp and ring
+`tests/test_td_effects.py` also compares the network against the workbench's own engines: Freeze's hold window against
+`freezeSourceTime` and its voice against `processAudioModule('freeze')` run over a ramp (each output sample then names the
+source time it read, so the delays and grain weights are checked sample by sample), Feedback's return rule over a grid of
+every parameter's extremes, and Damage's hold positions against the engine's hold phase.
+
+**Not applied by this network:** the effects of the other seven processors (Routing, Stutter, Granular, Reverse,
+Queue / Overflow, Exchange, Typography), which pass signal through unchanged and are named in the
+spec's `warnings` (Reverse and part of Stutter read source time ahead of the playhead, which a live network cannot);
+the audio of Feedback and Displacement; Signal Damage's picture `Signal drive`; Displacement's `Boundary spill`, audio warp and ring
 blend; the source excerpt offset (`Offset`, read-only); and audio device output. Text wires carry no gain, and several
 text wires at one mix read only the first. The menu values these chains set (`custom` resolution, `nearest` filtering,
 `add` combining) are not in the application's parameter reference, which lists parameters but not menu tokens, so they stay
