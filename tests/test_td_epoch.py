@@ -86,6 +86,35 @@ class EpochTests(unittest.TestCase):
         latch = resolve.EpochLatch(ramp["resolve"], ramp["base"], fps=ramp["fps"])
         self.assertEqual([latch.at(t) for t in (0.0, 1.0, 2.0, 3.5)], [0.0, 0.0, 0.0, 0.0])
 
+    def test_a_sidechain_modulated_reset_is_judged_on_the_levels_it_had(self):
+        """CodeRabbit: Reset time 0 with additive modulation of 3 and a sidechain level of 1 on [1, 2) and 0 elsewhere. The workbench
+        evaluates its envelope at each historical frame, so Reset time is 3 on those frames only and is reached at every other frame:
+        the epoch latches at the last frame where it is reached again, 2. Applying the latest level to every walked frame latched 13/12."""
+        spec = {"order": ["reset"], "params": {"reset": {"min": 0, "max": 12, "step": 0.01}}, "macro": [], "automation": [], "events": [],
+                "modulation": {"parameter": "params.reset", "mode": "add", "amount": 3}}
+        base = {"intensity": 1.0, "wet": 1.0, "params": {"reset": 0.0}, "bypass": False, "solo": False}
+        level = lambda t: 1.0 if 1.0 <= t < 2.0 else 0.0
+        fps = 12.0
+
+        def workbench(time):   # every frame, with the level that frame had
+            active, epoch = False, 0.0
+            for frame in range(int(time * fps + 1e-6) + 1):
+                reached = frame / fps + 1e-9 >= resolve.resolve_node(spec, base, frame / fps, level(frame / fps))["params"]["reset"]
+                if reached and not active:
+                    epoch = frame / fps
+                active = reached
+            return epoch
+
+        latch = resolve.EpochLatch(spec, base, fps)
+        for time in (0.0, 1.0, 2.0):   # ticks at the moments the level changes
+            self.assertAlmostEqual(latch.at(time, level(time)), workbench(time), places=9, msg=time)
+        self.assertAlmostEqual(latch.at(2.0, level(2.0)), 2.0)
+        playing = resolve.EpochLatch(spec, base, fps)   # a tick at every frame, then a backward seek and forward again
+        for frame in range(0, 37):
+            playing.at(frame / fps, level(frame / fps))
+        for time in (0.5, 1.5, 3.0, 0.0, 2.0):
+            self.assertAlmostEqual(playing.at(time, level(time)), workbench(time), places=9, msg=time)
+
     def test_the_epoch_row_is_written_for_feedback_only(self):
         ramp = self.data["ramp"]
         node = {"order": ramp["resolve"]["order"]}
