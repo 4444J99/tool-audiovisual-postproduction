@@ -261,6 +261,13 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertEqual(cap.vtt_unescape(cap.vtt_escape("a&amp;b <c> &lt;")), "a&amp;b <c> &lt;")
 
 
+    def test_whitespace_at_the_ends_of_a_token_is_refused_not_rendered(self):
+        for bad in ("\nHello", "Hello\n", " Hello", "Hello ", "\u2028Hello", "Hel\tlo", "\u00a0", "-->", "a-->b"):
+            with self.assertRaises(cap.CaptionError, msg=repr(bad)):
+                cap.build([w(bad, 0, 1)], 24)
+        self.assertEqual(cap.build([w("Hello", 0, 1)], 24)["problems"], [])
+
+
 class CliTests(unittest.TestCase):
     def test_demo_then_check_then_tamper(self):
         with tempfile.TemporaryDirectory() as d:

@@ -110,8 +110,10 @@ def validate_words(words: Sequence[Mapping[str, Any]], spec: Mapping[str, Any]) 
             errors.append(f"word {i}: not an object")
             continue
         text, start, end = word.get("text"), word.get("start"), word.get("end")
-        if not isinstance(text, str) or not text.strip() or re.search(r"\s", text.strip()):
-            errors.append(f"word {i}: text must be one non-empty token without whitespace")
+        if not isinstance(text, str) or not text or re.search(r"\s", text):
+            errors.append(f"word {i}: text must be one non-empty token without whitespace, including at its ends")
+        elif "-->" in text:
+            errors.append(f"word {i}: {text!r} contains '-->', which a caption file cannot carry in cue text")
         elif len(text) > spec["max_chars_per_line"]:
             errors.append(f"word {i}: {text!r} is wider than a {spec['max_chars_per_line']}-character line")
         if not _finite(start) or not _finite(end) or start < 0 or end < start:
