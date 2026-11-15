@@ -134,6 +134,38 @@ class LoudnessCliTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2, args)
                 self.assertIn("error", json.loads(result.stdout), args)
 
+    def test_target_without_a_spec_is_still_checked_against_the_measured_result(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = np.arange(20 * SR) / SR
+            x = np.where(t < 10, 10 ** (-68 / 20), 10 ** (-72 / 20)) * np.sin(2 * np.pi * 1000 * t)
+            wavfile.write(f"{d}/g.wav", SR, np.round(np.stack([x, x], 1) * 2147483648.0).astype(np.int32))
+            result = run("normalize", "--input", f"{d}/g.wav", "--output", f"{d}/o.wav", "--target-lufs", "-23", "--ceiling-dbtp", "0")
+            self.assertEqual(result.returncode, 0, result.stdout)
+            summary = json.loads(result.stdout)
+            self.assertAlmostEqual(summary["after_lufs"], -23.0, delta=0.05)
+            self.assertAlmostEqual(json.loads(run("measure", "--input", f"{d}/o.wav").stdout)["integrated_lufs"], -23.0, delta=0.05)
+
+    def test_silent_measure_prints_strict_json(self):
+        with tempfile.TemporaryDirectory() as d:
+            wavfile.write(f"{d}/s.wav", SR, np.zeros((SR * 2, 2), dtype=np.int16))
+            result = run("measure", "--input", f"{d}/s.wav")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            parsed = json.loads(result.stdout, parse_constant=lambda name: self.fail(f"non-JSON constant {name}"))
+            self.assertIsNone(parsed["integrated_lufs"])
+            self.assertIsNone(parsed["momentary_max_lufs"])
+
+    def test_non_finite_numbers_are_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            tone(f"{d}/t.wav", -30.0, 5)
+            Path(f"{d}/nan.json").write_text('{"integrated_lufs": {"target": NaN, "tolerance": 1}, "true_peak_dbtp_max": NaN}')
+            for args in (("check", "--input", f"{d}/t.wav", "--spec", f"{d}/nan.json"),
+                         ("normalize", "--input", f"{d}/t.wav", "--output", f"{d}/o.wav", "--target-lufs", "nan"),
+                         ("normalize", "--input", f"{d}/t.wav", "--output", f"{d}/o.wav", "--target-lufs", "-23", "--ceiling-dbtp", "nan")):
+                result = run(*args)
+                self.assertEqual(result.returncode, 2, args)
+                self.assertIn("error", json.loads(result.stdout), args)
+            self.assertFalse(Path(f"{d}/o.wav").exists())
+
     def test_silent_file_is_refused_not_normalized(self):
         with tempfile.TemporaryDirectory() as d:
             wavfile.write(f"{d}/s.wav", SR, np.zeros((SR * 2, 2), dtype=np.int16))

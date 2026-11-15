@@ -1,3 +1,4 @@
+import json
 import math
 import shutil
 import subprocess
@@ -108,6 +109,12 @@ class IntegratedLoudnessTests(unittest.TestCase):
         self.assertIsNone(m["integrated_lufs"])
         self.assertIsNone(m["loudness_range_lu"])
         self.assertEqual(m["true_peak_dbtp"], -240.0)
+        self.assertIsNone(m["momentary_max_lufs"])                       # not -inf: strict JSON must hold it
+        self.assertIsNone(m["short_term_max_lufs"])
+        json.dumps(m, allow_nan=False)
+        lfe_only = np.zeros((SR * 2, 6))
+        lfe_only[:, 3] = sine(1000, -20, 2, channels=1)
+        json.dumps(ld.measure(lfe_only, SR), allow_nan=False)
 
     def test_audio_under_one_block_is_refused(self):
         with self.assertRaisesRegex(ld.LoudnessError, "shorter"):
@@ -209,6 +216,13 @@ class SpecTests(unittest.TestCase):
         self.assertEqual(len(ld.check(self.measurement(loudness_range_lu=None), spec)), 1)
 
     def test_malformed_specs_are_refused(self):
+        nan, inf = float("nan"), float("inf")
+        for spec in ({"integrated_lufs": {"target": nan}, "true_peak_dbtp_max": nan},
+                     {"integrated_lufs": {"target": -23, "tolerance": nan}},
+                     {"integrated_lufs": {"target": -23}, "loudness_range_max_lu": inf},
+                     {"integrated_lufs": {"target": inf}}):
+            with self.assertRaises(ld.LoudnessError, msg=spec):
+                ld.normalize_spec(spec)
         for spec in ("nope", {}, {"integrated_lufs": {"target": "x"}}, {"integrated_lufs": {"target": -23, "tolerance": -1}},
                      {"integrated_lufs": {"target": -23}, "true_peak_dbtp_max": "low"}, {"integrated_lufs": {"target": True}}):
             with self.assertRaises(ld.LoudnessError, msg=spec):
@@ -239,6 +253,52 @@ class PlanGainTests(unittest.TestCase):
         self.assertFalse(ld.plan_gain({"integrated_lufs": None, "true_peak_dbtp": -240.0}, -23.0, -1.0)["ok"])
         with self.assertRaises(ld.LoudnessError):
             ld.plan_gain({"integrated_lufs": -30.0, "true_peak_dbtp": -3.0}, -23.0, -1.0, "clip")
+
+    def test_non_finite_targets_and_ceilings_are_refused(self):
+        m = {"integrated_lufs": -30.0, "true_peak_dbtp": -12.0}
+        for target, ceiling in ((float("nan"), -1.0), (-23.0, float("nan")), (float("inf"), None)):
+            with self.assertRaises(ld.LoudnessError):
+                ld.plan_gain(m, target, ceiling)
+
+    def gate_straddling_programme(self):
+        # Half at about -68 LUFS, half at about -72: the quiet half is under the absolute gate until gain lifts it.
+        return np.vstack([sine(1000, -68, 10), sine(1000, -72, 10)])
+
+    def test_a_plain_gain_misses_when_gain_changes_gate_membership(self):
+        x = self.gate_straddling_programme()
+        before = ld.measure(x, SR)
+        plain = ld.plan_gain(before, -23.0, 0.0)
+        after = ld.measure(ld.apply_gain(x, plain["gain_db"]), SR)["integrated_lufs"]
+        self.assertLess(after, -23.5)                                     # the review's case: about 1.5 LU low
+
+    def test_solve_gain_corrects_for_the_gates_and_lands_on_target(self):
+        x = self.gate_straddling_programme()
+        plan = ld.solve_gain(x, SR, -23.0, 0.0)
+        self.assertTrue(plan["ok"], plan)
+        self.assertGreater(plan["iterations"], 1)
+        after = ld.measure(ld.apply_gain(x, plan["gain_db"]), SR)["integrated_lufs"]
+        self.assertAlmostEqual(after, -23.0, delta=0.012)
+        self.assertGreater(plan["gain_db"], plan["first_gain_db"])
+
+    def test_solve_gain_says_so_when_it_cannot_converge(self):
+        plan = ld.solve_gain(self.gate_straddling_programme(), SR, -23.0, 0.0, max_iterations=1)
+        self.assertFalse(plan["ok"])
+        self.assertIn("no single gain", plan["reason"])
+
+    def test_solve_gain_respects_the_ceiling_after_correction(self):
+        x = self.gate_straddling_programme()
+        x[SR, :] = 10 ** (-9 / 20)                                       # a lone peak the corrected gain cannot afford
+        self.assertFalse(ld.solve_gain(x, SR, -23.0, -1.0)["ok"])
+        capped = ld.solve_gain(x, SR, -23.0, -1.0, "cap")
+        self.assertTrue(capped["ok"] and capped["capped"])
+        peak = ld.measure(ld.apply_gain(x, capped["gain_db"]), SR)["true_peak_dbtp"]
+        self.assertAlmostEqual(peak, -1.0, delta=0.01)
+
+    def test_solve_gain_is_the_plain_plan_when_nothing_crosses_a_gate(self):
+        x = sine(1000, -34.0, 10)
+        plan = ld.solve_gain(x, SR, -23.0, -1.0)
+        self.assertEqual(plan["iterations"], 1)
+        self.assertAlmostEqual(plan["gain_db"], plan["first_gain_db"], delta=0.02)
 
     def test_planned_gain_lands_on_target_when_measured(self):
         x = ld.synthetic_programme(SR)

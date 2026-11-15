@@ -60,6 +60,10 @@ def sha256_file(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def _refuse_constant(name):
+    raise ld.LoudnessError(f"spec contains the non-JSON number {name}")
+
+
 def load_spec(value):
     if value in ld.PRESETS:
         return ld.normalize_spec(value)
@@ -67,13 +71,13 @@ def load_spec(value):
     if not path.is_file():
         raise ld.LoudnessError(f"{value!r} is neither a preset ({sorted(ld.PRESETS)}) nor a spec file")
     try:
-        return ld.normalize_spec(json.loads(path.read_text()))
+        return ld.normalize_spec(json.loads(path.read_text(), parse_constant=_refuse_constant))
     except json.JSONDecodeError as error:
         raise ld.LoudnessError(f"spec file {value} is not valid JSON: {error}") from error
 
 
 def emit(value):
-    print(json.dumps(value, sort_keys=True))
+    print(json.dumps(value, sort_keys=True, allow_nan=False))
 
 
 def main(argv=None):
@@ -127,7 +131,7 @@ def main(argv=None):
         ceiling = args.ceiling_dbtp if args.ceiling_dbtp is not None else (spec.get("true_peak_dbtp_max") if spec else None)
         if target is None:
             raise ld.LoudnessError("normalize needs --spec or --target-lufs")
-        plan = ld.plan_gain(measurement, target, ceiling, args.on_ceiling)
+        plan = ld.solve_gain(audio, sr, target, ceiling, args.on_ceiling, args.layout)
         report = {"input": args.input, "input_sha256": sha256_file(args.input), "before": measurement, "plan": plan, "spec": spec}
         if not plan["ok"]:
             report["problems"] = [plan["reason"]]
@@ -143,7 +147,7 @@ def main(argv=None):
         write_wav(args.output, sr, scaled, kind)
         after = ld.measure(read_wav(args.output)[1], sr, args.layout)
         report.update(output=args.output, output_sha256=sha256_file(args.output), after=after)
-        problems = ld.check(after, spec) if spec else []
+        problems = ld.check(after, spec) if spec else ([] if plan.get("capped") else ld.check(after, {"integrated_lufs": {"target": target, "tolerance": 0.1}}))
         report["problems"] = problems
         write_report(args.report, report)
         emit({"gain_db": plan["gain_db"], "capped": plan.get("capped", False), "shortfall_lu": plan.get("shortfall_lu", 0.0), "before_lufs": measurement["integrated_lufs"],
@@ -158,7 +162,7 @@ def main(argv=None):
 def write_report(path, report):
     if path:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        Path(path).write_text(json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n")
 
 
 if __name__ == "__main__":

@@ -184,7 +184,7 @@ def measure(audio: np.ndarray, sample_rate: float, layout: str | Sequence[float]
             lra_low, lra_high = (float(v) for v in np.percentile(_loudness(short)[keep_short], [10, 95]))
             lra = lra_high - lra_low
     sample_peak, tp = true_peak(audio, sample_rate)
-    r = lambda v, n=3: None if v is None else round(float(v), n)  # noqa: E731
+    r = lambda v, n=3: None if v is None or not math.isfinite(float(v)) else round(float(v), n)  # noqa: E731
     return {
         "schema": SCHEMA,
         "sample_rate": int(sample_rate),
@@ -209,6 +209,10 @@ def apply_gain(audio: np.ndarray, gain_db: float) -> np.ndarray:
     return np.asarray(audio, dtype=np.float64) * 10.0 ** (gain_db / 20.0)
 
 
+def _number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
 def normalize_spec(spec: str | Mapping[str, Any]) -> dict[str, Any]:
     """A preset name or a spec mapping, validated: ``integrated_lufs`` {target, tolerance},
     optional ``true_peak_dbtp_max`` and ``loudness_range_max_lu``."""
@@ -218,15 +222,15 @@ def normalize_spec(spec: str | Mapping[str, Any]) -> dict[str, Any]:
         return dict(PRESETS[spec])
     out = dict(spec)
     target = out.get("integrated_lufs")
-    if not isinstance(target, Mapping) or not isinstance(target.get("target"), (int, float)) or isinstance(target.get("target"), bool):
-        raise LoudnessError("spec needs integrated_lufs: {target: number, tolerance: number}")
+    if not isinstance(target, Mapping) or not _number(target.get("target")):
+        raise LoudnessError("spec needs integrated_lufs: {target: finite number, tolerance: finite number}")
     tolerance = target.get("tolerance", 0.5)
-    if not isinstance(tolerance, (int, float)) or tolerance < 0:
-        raise LoudnessError("integrated_lufs.tolerance must be a non-negative number")
+    if not _number(tolerance) or tolerance < 0:
+        raise LoudnessError("integrated_lufs.tolerance must be a finite, non-negative number")
     out["integrated_lufs"] = {"target": float(target["target"]), "tolerance": float(tolerance)}
     for key in ("true_peak_dbtp_max", "loudness_range_max_lu"):
-        if key in out and (not isinstance(out[key], (int, float)) or isinstance(out[key], bool)):
-            raise LoudnessError(f"{key} must be a number")
+        if key in out and not _number(out[key]):
+            raise LoudnessError(f"{key} must be a finite number")
     out.setdefault("name", "custom")
     return out
 
@@ -259,6 +263,8 @@ def plan_gain(measurement: Mapping[str, Any], target_lufs: float, ceiling_dbtp: 
     how far short of the target the result stays."""
     if on_ceiling not in ("refuse", "cap"):
         raise LoudnessError("on_ceiling must be 'refuse' or 'cap'")
+    if not _number(target_lufs) or (ceiling_dbtp is not None and not _number(ceiling_dbtp)):
+        raise LoudnessError("target loudness and ceiling must be finite numbers")
     integrated = measurement["integrated_lufs"]
     if integrated is None:
         return {"ok": False, "reason": "integrated loudness is undefined (silent or under the -70 LUFS gate)", "gain_db": 0.0}
@@ -273,6 +279,47 @@ def plan_gain(measurement: Mapping[str, Any], target_lufs: float, ceiling_dbtp: 
         plan.update(ok=True, gain_db=round(gain, 4), capped=True, shortfall_lu=round(target_lufs - (integrated + gain), 4))
         return plan
     plan.update(ok=True, gain_db=round(wanted, 4), capped=False, shortfall_lu=0.0)
+    return plan
+
+
+def solve_gain(audio: np.ndarray, sample_rate: float, target_lufs: float, ceiling_dbtp: float | None,
+               on_ceiling: str = "refuse", layout: str | Sequence[float] | None = None, tolerance: float = 0.01,
+               max_iterations: int = 16) -> dict[str, Any]:
+    """``plan_gain`` made exact for the audio itself.  A gain moves every block by the same amount, but it
+    can also move blocks across the -70 LUFS absolute gate or the 10 LU relative gate, so the integrated
+    loudness after the gain is not always the loudness before plus the gain.  This re-measures the scaled
+    audio and corrects the gain until the measured result is within ``tolerance`` LU of the target; if the
+    gates make the target unreachable with one gain it says so instead of reporting success."""
+    before = measure(audio, sample_rate, layout)
+    plan = plan_gain(before, target_lufs, ceiling_dbtp, on_ceiling)
+    if not plan["ok"]:
+        return plan
+    gain = plan["gain_db"]
+    plan["first_gain_db"] = gain
+    reached = None
+    for iteration in range(1, max_iterations + 1):
+        reached = measure(apply_gain(audio, gain), sample_rate, layout)["integrated_lufs"]
+        plan["iterations"] = iteration
+        plan["predicted_lufs"] = reached
+        if reached is None:
+            break
+        error = target_lufs - reached
+        if abs(error) <= tolerance or plan.get("capped"):
+            break
+        gain += error
+        if ceiling_dbtp is not None and before["true_peak_dbtp"] + gain > ceiling_dbtp + 1e-9:
+            if on_ceiling == "refuse":
+                plan.update(ok=False, gain_db=0.0, reason=f"reaching {target_lufs} LUFS needs {gain:+.2f} dB once the gates are accounted for, "
+                            f"which would put the true peak at {before['true_peak_dbtp'] + gain:.2f} dBTP, over the {ceiling_dbtp} dBTP ceiling")
+                return plan
+            gain = ceiling_dbtp - before["true_peak_dbtp"]
+            plan["capped"] = True
+    plan["gain_db"] = round(gain, 4)
+    if reached is None or (not plan.get("capped") and abs(target_lufs - reached) > tolerance):
+        plan.update(ok=False, reason=f"no single gain reaches {target_lufs} LUFS: the nearest measured result is {reached} LUFS "
+                    "(blocks cross the -70 LUFS or relative gate as the level changes)")
+    elif plan.get("capped"):
+        plan["shortfall_lu"] = round(target_lufs - reached, 4)
     return plan
 
 
