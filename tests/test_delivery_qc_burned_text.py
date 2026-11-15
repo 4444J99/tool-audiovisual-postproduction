@@ -46,6 +46,16 @@ class BurnedTextTests(Base):
         self.assertFalse(check["ok"])
         self.assertTrue(any("cannot be re-rendered" in p for p in check["problems"]), check["problems"])
 
+    def test_a_webvtt_with_other_text_than_the_srt_is_caught_by_the_standalone_qc(self):
+        target = self.copy()
+        vtt = (target / "captions" / "captions.vtt").read_text()
+        self.assertIn("Welcome back.", vtt)
+        (target / "captions" / "captions.vtt").write_text(vtt.replace("Welcome back.", "Wire the money."))
+        report = self.derive(target)
+        check = self.check(report, "timebase.timecode")
+        self.assertFalse(check["ok"])
+        self.assertTrue(any("WebVTT" in p and "text" in p for p in check["problems"]), check["problems"])
+
     def test_the_clean_chain_reports_no_text_mismatch(self):
         check = self.check(self.report, "captions.burned_frames")
         self.assertTrue(check["ok"])
