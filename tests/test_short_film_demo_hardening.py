@@ -1,5 +1,6 @@
-"""Failure modes of the demo's CLI (issue 192: exit 2 and JSON, never a traceback) and the fields of the sealed files
-that verify must compare (issue 193: demo-qc.json, schema, stages, encoder, deterministic)."""
+"""Failure modes of the demo's CLI (issue 192: exit 2 and JSON, never a traceback), the fields of the sealed files
+that verify must compare (issue 193: demo-qc.json, schema, stages, encoder, deterministic) and replacing a previous
+output directory without losing the marker or the directory when something fails (issue 191)."""
 import json
 import os
 import shutil
@@ -15,8 +16,8 @@ sys.path.insert(0, str(ROOT / "tools"))
 import short_film_demo as demo  # noqa: E402
 
 
-def cli(*args):
-    return subprocess.run([sys.executable, str(TOOL), *args], capture_output=True, text=True, cwd=ROOT)
+def cli(*args, cwd=ROOT):
+    return subprocess.run([sys.executable, str(TOOL), *args], capture_output=True, text=True, cwd=cwd)
 
 
 def encoders_available():
@@ -164,6 +165,72 @@ class DemoHardeningTests(unittest.TestCase):
 
     def test_an_untouched_copy_still_verifies(self):
         self.assertEqual(cli("verify", "--output", str(self.copy())).returncode, 0)
+
+    # issue 191
+    def siblings_left_behind(self, target):
+        return sorted(p.name for p in target.parent.iterdir() if p.name != target.name and p.name.startswith("." + target.name))
+
+    def test_replacing_a_directory_with_a_read_only_subdirectory_succeeds_and_keeps_the_marker(self):
+        target = self.copy()
+        (target / "audio").chmod(0o555)
+        try:
+            result = cli("run", "--output", str(target))
+        finally:
+            for path in (target / "audio", *self.base.glob(f".{target.name}*/audio")):
+                if path.exists():
+                    path.chmod(0o755)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((target / demo.MARKER).read_text(), demo.SCHEMA)
+        self.assertTrue((target / demo.MP4).is_file())
+        self.assertEqual(cli("verify", "--output", str(target)).returncode, 0)
+        self.assertEqual(self.siblings_left_behind(target), [])
+
+    def test_a_failed_replacement_leaves_the_previous_output_whole_and_rerunnable(self):
+        target = self.copy()
+        before = {str(p.relative_to(target)): p.read_bytes() for p in target.rglob("*") if p.is_file()}
+        self.assertCleanRefusal(cli("run", "--output", str(target), "--delivery", "streaming"))
+        self.assertEqual({str(p.relative_to(target)): p.read_bytes() for p in target.rglob("*") if p.is_file()}, before)
+        self.assertEqual(cli("verify", "--output", str(target)).returncode, 0)
+        self.assertEqual(self.siblings_left_behind(target), [])
+        self.assertEqual(cli("run", "--output", str(target)).returncode, 0)
+
+    def test_output_dot_inside_a_marked_directory_is_refused_before_anything_is_deleted(self):
+        target = self.copy()
+        before = sorted(str(p.relative_to(target)) for p in target.rglob("*"))
+        self.assertCleanRefusal(cli("run", "--output", ".", cwd=target), "working directory")
+        self.assertEqual(sorted(str(p.relative_to(target)) for p in target.rglob("*")), before)
+        self.assertEqual(cli("verify", "--output", str(target)).returncode, 0)
+
+    def test_an_output_that_contains_the_working_directory_is_refused_before_anything_is_deleted(self):
+        target = self.copy()
+        before = sorted(str(p.relative_to(target)) for p in target.rglob("*"))
+        self.assertCleanRefusal(cli("run", "--output", "..", cwd=target / "audio"), "working directory")
+        self.assertCleanRefusal(cli("run", "--output", str(target), cwd=target / "captions"), "working directory")
+        self.assertEqual(sorted(str(p.relative_to(target)) for p in target.rglob("*")), before)
+
+    def test_a_swap_that_cannot_finish_puts_the_previous_directory_back(self):
+        target = self.copy()
+        before = sorted(str(p.relative_to(target)) for p in target.rglob("*"))
+        with self.assertRaises(OSError):
+            demo.replace_directory(self.base / "no-such-staging-directory", target)
+        self.assertEqual(sorted(str(p.relative_to(target)) for p in target.rglob("*")), before)
+        self.assertEqual((target / demo.MARKER).read_text(), demo.SCHEMA)
+        self.assertEqual(self.siblings_left_behind(target), [])
+
+    def test_remove_tree_deletes_unreadable_and_read_only_subdirectories_and_never_follows_links(self):
+        outside = self.base / "outside-the-tree"
+        outside.mkdir()
+        (outside / "keep.txt").write_text("keep")
+        outside.chmod(0o755)
+        tree = self.base / "locked-tree"
+        (tree / "a" / "b").mkdir(parents=True)
+        (tree / "a" / "b" / "f.txt").write_text("x")
+        (tree / "link").symlink_to(outside, target_is_directory=True)
+        (tree / "a" / "b").chmod(0)
+        (tree / "a").chmod(0o555)
+        demo.remove_tree(tree)
+        self.assertFalse(tree.exists())
+        self.assertEqual((outside / "keep.txt").read_text(), "keep")
 
 
 if __name__ == "__main__":

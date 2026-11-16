@@ -8,12 +8,14 @@ captions, caption burn-in, delivery QC), verifies it, and muxes the burned-in fr
 ``short-film.mp4`` (H.264, lossless luma, AAC, 24 fps, 240x48).  It then writes ``demo-hashes.json`` (SHA-256 of every artefact
 and of the mp4) and ``demo-qc.json`` (the mp4 judged against the chain).  ``verify`` re-checks the chain, the hash file and the mp4.
 Every input is invented.  Nothing is played: ffmpeg only encodes and decodes to files, and no audio device or browser is opened.
-Exit status 2: any chain, ffmpeg, hash or mp4 problem; the problems print as JSON.
+Exit status 2: any chain, ffmpeg, hash, mp4 or output-directory problem; the problems print as JSON.  ``run`` refuses an unsuitable ``--output`` before deleting anything
+and replaces a previous output only by a complete new one (docs/DEMO.md).
 """
 import argparse
 import hashlib
 import json
 import math
+import os
 import shutil
 import subprocess
 import sys
@@ -315,22 +317,65 @@ def sealed_problems(recorded, manifest):
     return problems
 
 
-def run_demo(out, delivery=None, qc_spec=None):
-    out = Path(out)
-    tools = ffmpeg_tools()
+def inspect_output(out):
+    """Everything that can refuse an ``--output``, checked before anything is written or deleted.
+
+    Returns True when ``out`` holds a previous demo output that a run replaces, False when it is absent or empty."""
     if out.is_symlink():
         raise DemoError([f"{out} is a symbolic link; choose a real directory"])
     if out.exists() and not out.is_dir():
         raise DemoError([f"{out} exists and is not a directory; choose a new directory"])
-    if out.exists() and any(out.iterdir()):
-        marker = out / MARKER
-        try:
-            marked = marker.is_file() and not marker.is_symlink() and marker.read_text() == SCHEMA
-        except (OSError, UnicodeDecodeError):
-            marked = False
-        if not marked:
-            raise DemoError([f"{out} is not empty and is not a previous demo output; choose a new directory"])
-        shutil.rmtree(out)
+    here, target = Path.cwd().resolve(), out.resolve()
+    if target == here or target in here.parents:
+        raise DemoError([f"{out} is the working directory or contains it; choose another directory (a run replaces its output, which would remove the directory it runs in)"])
+    if not (out.exists() and any(out.iterdir())):
+        return False
+    marker = out / MARKER
+    try:
+        marked = marker.is_file() and not marker.is_symlink() and marker.read_text() == SCHEMA
+    except (OSError, UnicodeDecodeError):
+        marked = False
+    if not marked:
+        raise DemoError([f"{out} is not empty and is not a previous demo output; choose a new directory"])
+    return True
+
+
+def sibling(out, label):
+    """An unused hidden name next to ``out`` (same file system, so renames are atomic)."""
+    for number in range(1000):
+        candidate = out.parent / f".{out.name}.{label}-{os.getpid()}-{number}"
+        if not candidate.exists() and not candidate.is_symlink():
+            return candidate
+    raise DemoError([f"no unused name next to {out} for a temporary directory"])
+
+
+def remove_tree(path):
+    """Delete a directory tree, including one whose subdirectories are read-only or unreadable (symbolic links are never followed)."""
+    def open_up(directory):
+        os.chmod(directory, os.stat(directory).st_mode | 0o700)
+        for entry in os.scandir(directory):
+            if entry.is_dir(follow_symlinks=False):
+                open_up(entry.path)
+    open_up(path)
+    shutil.rmtree(path)
+
+
+def replace_directory(staged, out):
+    """Put ``staged`` where ``out`` is.  The previous ``out`` stays until the replacement is in place and is put back if the swap fails."""
+    backup = sibling(out, "previous")
+    out.rename(backup)
+    try:
+        staged.rename(out)
+    except BaseException:
+        backup.rename(out)
+        raise
+    try:
+        remove_tree(backup)
+    except OSError as error:  # the replacement is in place; a leftover hidden backup is only clutter
+        print(f"warning: could not remove the previous output, now {backup}: {error}", file=sys.stderr)
+
+
+def build_demo(out, tools, delivery, qc_spec):
     out.mkdir(parents=True, exist_ok=True)
     (out / MARKER).write_text(SCHEMA)
     try:
@@ -350,6 +395,31 @@ def run_demo(out, delivery=None, qc_spec=None):
         raise DemoError([f"{c['id']}: {c['detail']}" for c in checks if not c["ok"]])
     hashes = collect_hashes(out, manifest, ffmpeg_version(tools[0]))
     (out / HASHES).write_text(pc.dumps(hashes))
+    return hashes
+
+
+def run_demo(out, delivery=None, qc_spec=None):
+    """Write the demo into ``out``.  Every refusal happens before anything is deleted.
+
+    A new or empty ``out`` is written in place, so a failed run leaves its partial files (marker first) to look at and
+    can be rerun.  A previous demo output is replaced only by a complete new one: the run is built in a hidden
+    sibling directory and swapped in, so a failure at any point leaves the previous output, marker included, as it was."""
+    out = Path(out)
+    tools = ffmpeg_tools()
+    replacing = inspect_output(out)
+    if not replacing:
+        return build_demo(out, tools, delivery, qc_spec)
+    staged = sibling(out, "building")
+    try:
+        hashes = build_demo(staged, tools, delivery, qc_spec)
+        replace_directory(staged, out)
+    except BaseException:
+        try:
+            if staged.exists():
+                remove_tree(staged)
+        except OSError as error:  # the original failure is the one to report
+            print(f"warning: could not remove {staged}: {error}", file=sys.stderr)
+        raise
     return hashes
 
 
