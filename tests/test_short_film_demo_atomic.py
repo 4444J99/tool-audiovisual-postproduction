@@ -182,6 +182,21 @@ class AtomicReplacementTests(unittest.TestCase):
         worker.join()
         self.assertEqual(inside, [before])
 
+    def test_sigterm_is_left_ignored_when_the_parent_ignored_it_and_fires_only_once(self):
+        before = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            with demo.terminate_as_interruption():
+                self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
+            self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
+        finally:
+            signal.signal(signal.SIGTERM, before)
+        with demo.terminate_as_interruption():
+            with self.assertRaises(SystemExit):
+                os.kill(os.getpid(), signal.SIGTERM)
+                time.sleep(1)
+            os.kill(os.getpid(), signal.SIGTERM)  # a second one during rollback is absorbed
+            time.sleep(0.2)
+
     def test_stale_siblings_of_this_output_only_are_swept(self):
         target = self.marked()
         old = time.time() - 7200

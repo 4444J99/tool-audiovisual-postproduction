@@ -436,14 +436,23 @@ def terminate_as_interruption():
         yield
         return
 
+    previous = signal.getsignal(signal.SIGTERM)
+    if previous == signal.SIG_IGN:  # a parent that deliberately ignores SIGTERM keeps that choice
+        yield
+        return
+    fired = []
+
     def handler(signum, frame):
+        if fired:  # one-shot: a second SIGTERM during the rollback must not interrupt it
+            return
+        fired.append(signum)
         raise SystemExit(128 + signum)
 
-    previous = signal.signal(signal.SIGTERM, handler)
+    signal.signal(signal.SIGTERM, handler)
     try:
         yield
     finally:
-        signal.signal(signal.SIGTERM, previous)
+        signal.signal(signal.SIGTERM, signal.SIG_DFL if previous is None else previous)
 
 
 def run_demo(out, delivery=None, qc_spec=None, warnings=None):
