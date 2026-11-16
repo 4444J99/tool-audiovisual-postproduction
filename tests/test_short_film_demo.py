@@ -156,7 +156,7 @@ class ShortFilmDemoTests(unittest.TestCase):
     def test_a_failed_run_does_not_lock_its_directory(self):
         target = Path(self.tmp.name) / "retry"
         self.assertEqual(cli("run", "--output", str(target), "--delivery", "streaming").returncode, 2)
-        self.assertTrue(any(target.iterdir()), "the refused run should have left chain files behind")
+        self.assertEqual(sorted(p.name for p in target.parent.iterdir() if p.name.startswith(".retry") or p.name == "retry"), [], "a refused run builds beside the output and leaves nothing at it")
         result = cli("run", "--output", str(target))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue((target / demo.MP4).is_file())
