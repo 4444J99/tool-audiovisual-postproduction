@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -142,6 +143,59 @@ class AtomicReplacementTests(unittest.TestCase):
         self.assertEqual((target / "keep.txt").read_text(), "old output")
         self.assertEqual((target / demo.MARKER).read_text(), demo.SCHEMA)
         self.assertEqual(self.siblings(), ["marked"])
+
+    def test_sigterm_between_the_two_renames_restores_the_old_output(self):
+        target = self.marked()
+        real_rename = os.rename
+        seen = []
+        before = signal.getsignal(signal.SIGTERM)
+
+        def terminated(src, dst, *args, **kwargs):
+            if Path(src) == target or Path(dst) == target:
+                seen.append((str(src), str(dst)))
+                if len(seen) == 2:
+                    os.kill(os.getpid(), signal.SIGTERM)  # real signal, delivered to the installed handler
+                    time.sleep(1)  # the handler raises before this returns
+            return real_rename(src, dst, *args, **kwargs)
+
+        with mock.patch.object(os, "rename", terminated):
+            with self.assertRaises(SystemExit) as caught:
+                demo.run_demo(target)
+        self.assertEqual(caught.exception.code, 128 + signal.SIGTERM)
+        self.assertEqual(len(seen), 3, seen)
+        self.assertEqual((target / "keep.txt").read_text(), "old output")
+        self.assertEqual((target / demo.MARKER).read_text(), demo.SCHEMA)
+        self.assertEqual(self.siblings(), ["marked"])
+        self.assertIs(signal.getsignal(signal.SIGTERM), before)  # handler is removed afterwards
+
+    def test_sigterm_handler_is_only_installed_on_the_main_thread(self):
+        import threading
+        before = signal.getsignal(signal.SIGTERM)
+        inside = []
+
+        def probe():
+            with demo.terminate_as_interruption():
+                inside.append(signal.getsignal(signal.SIGTERM))
+
+        worker = threading.Thread(target=probe)
+        worker.start()
+        worker.join()
+        self.assertEqual(inside, [before])
+
+    def test_sigterm_is_left_ignored_when_the_parent_ignored_it_and_fires_only_once(self):
+        before = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            with demo.terminate_as_interruption():
+                self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
+            self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
+        finally:
+            signal.signal(signal.SIGTERM, before)
+        with demo.terminate_as_interruption():
+            with self.assertRaises(SystemExit):
+                os.kill(os.getpid(), signal.SIGTERM)
+                time.sleep(1)
+            os.kill(os.getpid(), signal.SIGTERM)  # a second one during rollback is absorbed
+            time.sleep(0.2)
 
     def test_stale_siblings_of_this_output_only_are_swept(self):
         target = self.marked()
