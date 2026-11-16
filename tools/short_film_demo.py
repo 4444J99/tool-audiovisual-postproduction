@@ -358,13 +358,18 @@ def remove_tree(path, warnings):
 STALE_AFTER_SECONDS = 3600
 
 
-def owned_sibling(out, entry):
-    """True for a real directory next to out that holds the demo marker."""
+def has_marker(entry):
+    """True when entry holds the demo marker file (a regular file, not a link) with the current schema text."""
     try:
         marker = entry / MARKER
-        return entry.is_dir() and not entry.is_symlink() and marker.is_file() and not marker.is_symlink() and marker.read_text() == SCHEMA
+        return marker.is_file() and not marker.is_symlink() and marker.read_text() == SCHEMA
     except (OSError, UnicodeDecodeError):
         return False
+
+
+def owned_sibling(out, entry):
+    """True for a real directory next to out that holds the demo marker."""
+    return entry.is_dir() and not entry.is_symlink() and has_marker(entry)
 
 
 def restore_orphan(out, warnings):
@@ -383,7 +388,8 @@ def restore_orphan(out, warnings):
 
 def sweep_stale(out, warnings):
     """Remove hidden build or retired siblings of out left by an earlier killed run: exactly this output's naming
-    pattern, a real directory, older than an hour, and empty or holding the demo marker that proves the demo wrote it."""
+    pattern (random 8-character suffix), a real directory, and older than an hour. The marker is not required, since
+    a partly failed removal can have deleted it."""
     pattern = re.compile(rf"^\.{re.escape(out.name)}\.(build|old)-[A-Za-z0-9_]{{8}}$")
     if not out.parent.is_dir():
         return
@@ -395,13 +401,12 @@ def sweep_stale(out, warnings):
         try:
             if time.time() - entry.stat().st_mtime < STALE_AFTER_SECONDS:
                 continue
-            marker = entry / MARKER
-            owned = not any(entry.iterdir()) or (marker.is_file() and not marker.is_symlink() and marker.read_text() == SCHEMA)
-        except (OSError, UnicodeDecodeError) as error:
+        except OSError as error:
             warnings.append(f"could not inspect {entry}: {error}")
             continue
-        if owned:
-            remove_tree(entry, warnings)
+        # The name pattern plus age is the ownership proof: a partial remove_tree can delete the marker first and would
+        # otherwise strand the directory forever.
+        remove_tree(entry, warnings)
 
 
 def build_demo(build, tools, delivery, qc_spec):
@@ -471,14 +476,8 @@ def _run_demo(out, delivery=None, qc_spec=None, warnings=None):
     if out.exists() and not out.is_dir():
         raise DemoError([f"{out} exists and is not a directory; choose a new directory"])
     replacing = out.exists() and any(out.iterdir())
-    if replacing:
-        marker = out / MARKER
-        try:
-            marked = marker.is_file() and not marker.is_symlink() and marker.read_text() == SCHEMA
-        except (OSError, UnicodeDecodeError):
-            marked = False
-        if not marked:
-            raise DemoError([f"{out} is not empty and is not a previous demo output; choose a new directory"])
+    if replacing and not has_marker(out):
+        raise DemoError([f"{out} is not empty and is not a previous demo output; choose a new directory"])
     # Build beside the output, swap in only once everything has passed, so a failure leaves the old output as it was.
     out.parent.mkdir(parents=True, exist_ok=True)
     sweep_stale(out, warnings)
@@ -489,12 +488,23 @@ def _run_demo(out, delivery=None, qc_spec=None, warnings=None):
     try:
         hashes = build_demo(build, tools, delivery, qc_spec)
         if replacing:
+            # The marker was checked before the build, which can take minutes: check again at the moment of the swap.
+            if not has_marker(out):
+                raise DemoError([f"{out} no longer holds the demo marker (it changed during the run); left untouched"])
             retired = Path(tempfile.mkdtemp(prefix=f".{out.name}.old-", dir=out.parent))
             retired.rmdir()
             os.rename(out, retired)
         os.rename(build, out)
         swapped = True
     except BaseException:
+        # An interruption after the second rename but before swapped is set: the new output is already at out, so keep it
+        # and drop the retired old one now instead of stranding it as an orphan for an hour.
+        if retired is not None and not swapped and not build.exists() and os.path.lexists(out):
+            swapped = True
+            try:
+                remove_tree(retired, warnings)
+            except BaseException as cleanup_error:  # never mask the original; the sweep reclaims it later
+                warnings.append(f"could not remove the previous output {retired}: {cleanup_error!r}")
         # An interruption (KeyboardInterrupt, SIGTERM) between the two renames must leave the old output at out, never neither.
         if retired is not None and retired.exists() and not os.path.lexists(out):
             try:
@@ -514,6 +524,8 @@ def _run_demo(out, delivery=None, qc_spec=None, warnings=None):
 
 def verify_demo(out, delivery=None, qc_spec=None):
     out = Path(out)
+    if out.is_symlink():
+        return [f"{out} is a symbolic link; choose a real directory"]
     problems = []
     try:
         recorded = json.loads((out / HASHES).read_text())
