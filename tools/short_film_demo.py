@@ -11,16 +11,19 @@ Every input is invented.  Nothing is played: ffmpeg only encodes and decodes to 
 Exit status 2: any chain, ffmpeg, hash or mp4 problem; the problems print as JSON.
 """
 import argparse
+import contextlib
 import hashlib
 import json
 import math
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -423,7 +426,32 @@ def build_demo(build, tools, delivery, qc_spec):
     return hashes
 
 
+@contextlib.contextmanager
+def terminate_as_interruption():
+    """Turn SIGTERM into SystemExit(143) for the duration, so the swap's rollback runs exactly as for Ctrl-C.
+
+    Without a handler SIGTERM kills the process at once, between the two renames, with no old output at --output.
+    Only the main thread can install one; elsewhere the default disposition is left alone."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def handler(signum, frame):
+        raise SystemExit(128 + signum)
+
+    previous = signal.signal(signal.SIGTERM, handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
 def run_demo(out, delivery=None, qc_spec=None, warnings=None):
+    with terminate_as_interruption():
+        return _run_demo(out, delivery, qc_spec, warnings)
+
+
+def _run_demo(out, delivery=None, qc_spec=None, warnings=None):
     out = Path(out)
     warnings = [] if warnings is None else warnings
     if out.is_symlink():
