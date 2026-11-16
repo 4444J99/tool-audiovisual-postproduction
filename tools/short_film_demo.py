@@ -8,17 +8,20 @@ captions, caption burn-in, delivery QC), verifies it, and muxes the burned-in fr
 ``short-film.mp4`` (H.264, lossless luma, AAC, 24 fps, 240x48).  It then writes ``demo-hashes.json`` (SHA-256 of every artefact
 and of the mp4) and ``demo-qc.json`` (the mp4 judged against the chain).  ``verify`` re-checks the chain, the hash file and the mp4.
 Every input is invented.  Nothing is played: ffmpeg only encodes and decodes to files, and no audio device or browser is opened.
-Exit status 2: any chain, ffmpeg, hash, mp4 or output-directory problem; the problems print as JSON.  ``run`` refuses an unsuitable ``--output`` before deleting anything
-and replaces a previous output only by a complete new one (docs/DEMO.md).
+Exit status 2: any chain, ffmpeg, hash or mp4 problem; the problems print as JSON.
 """
 import argparse
 import hashlib
 import json
 import math
 import os
+import re
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
@@ -317,109 +320,158 @@ def sealed_problems(recorded, manifest):
     return problems
 
 
-def inspect_output(out):
-    """Everything that can refuse an ``--output``, checked before anything is written or deleted.
+def refuse_unsafe_output(out):
+    """Refuse an output that is, or contains, the working directory, the repository, the home directory or the filesystem root.
 
-    Returns True when ``out`` holds a previous demo output that a run replaces, False when it is absent or empty."""
-    if out.is_symlink():
-        raise DemoError([f"{out} is a symbolic link; choose a real directory"])
-    if out.exists() and not out.is_dir():
-        raise DemoError([f"{out} exists and is not a directory; choose a new directory"])
-    here, target = Path.cwd().resolve(), out.resolve()
-    if target == here or target in here.parents:
-        raise DemoError([f"{out} is the working directory or contains it; choose another directory (a run replaces its output, which would remove the directory it runs in)"])
-    if not (out.exists() and any(out.iterdir())):
-        return False
-    marker = out / MARKER
+    Compared with os.path.samefile (device and inode), not by path text: macOS volumes are usually case-insensitive,
+    so /USERS/me and /Users/me are the same directory."""
+    if not out.exists():
+        return  # a path that does not exist yet cannot contain anything
+    guarded = {"the filesystem root": Path(out.anchor or "/"), "the current directory": Path.cwd(), "the repository": ROOT, "the home directory": Path.home()}
+    for name, path in guarded.items():
+        for candidate in (path, *path.resolve().parents) if name != "the filesystem root" else (path,):
+            try:
+                same = os.path.samefile(out, candidate)
+            except OSError:
+                continue
+            if same:
+                raise DemoError([f"{out} is or contains {name}; choose a new directory"])
+
+
+def remove_tree(path, warnings):
+    """Remove a tree, clearing read-only directories on the way; whatever still cannot be removed is added to warnings."""
+    def unlock(function, target, _):
+        try:
+            os.chmod(os.path.dirname(target), stat.S_IRWXU)
+            os.chmod(target, stat.S_IRWXU)
+            function(target)
+        except OSError as error:
+            warnings.append(f"could not remove {target}: {error}")
+    shutil.rmtree(path, **({"onexc": unlock} if sys.version_info >= (3, 12) else {"onerror": unlock}))
+    if os.path.lexists(path) and not any(str(path) in w for w in warnings):
+        warnings.append(f"could not remove {path}")
+
+
+STALE_AFTER_SECONDS = 3600
+
+
+def owned_sibling(out, entry):
+    """True for a real directory next to out that holds the demo marker."""
     try:
-        marked = marker.is_file() and not marker.is_symlink() and marker.read_text() == SCHEMA
+        marker = entry / MARKER
+        return entry.is_dir() and not entry.is_symlink() and marker.is_file() and not marker.is_symlink() and marker.read_text() == SCHEMA
     except (OSError, UnicodeDecodeError):
-        marked = False
-    if not marked:
-        raise DemoError([f"{out} is not empty and is not a previous demo output; choose a new directory"])
-    return True
+        return False
 
 
-def sibling(out, label):
-    """An unused hidden name next to ``out`` (same file system, so renames are atomic)."""
-    for number in range(1000):
-        candidate = out.parent / f".{out.name}.{label}-{os.getpid()}-{number}"
-        if not candidate.exists() and not candidate.is_symlink():
-            return candidate
-    raise DemoError([f"no unused name next to {out} for a temporary directory"])
+def restore_orphan(out, warnings):
+    """If a run was killed between its two renames, out is missing and the old output survives only as .NAME.old-*:
+    put the newest marked one back at out before anything else touches it."""
+    if os.path.lexists(out) or not out.parent.is_dir():
+        return
+    pattern = re.compile(rf"^\.{re.escape(out.name)}\.old-[A-Za-z0-9_]{{8}}$")
+    candidates = [e for e in out.parent.iterdir() if pattern.match(e.name) and owned_sibling(out, e)]
+    if not candidates:
+        return
+    newest = max(candidates, key=lambda e: (e.stat().st_mtime, e.name))
+    os.rename(newest, out)
+    warnings.append(f"restored the previous output from {newest} to {out}; an earlier run was interrupted between its two renames")
 
 
-def remove_tree(path):
-    """Delete a directory tree, including one whose subdirectories are read-only or unreadable (symbolic links are never followed)."""
-    def open_up(directory):
-        os.chmod(directory, os.stat(directory).st_mode | 0o700)
-        for entry in os.scandir(directory):
-            if entry.is_dir(follow_symlinks=False):
-                open_up(entry.path)
-    open_up(path)
-    shutil.rmtree(path)
+def sweep_stale(out, warnings):
+    """Remove hidden build or retired siblings of out left by an earlier killed run: exactly this output's naming
+    pattern, a real directory, older than an hour, and empty or holding the demo marker that proves the demo wrote it."""
+    pattern = re.compile(rf"^\.{re.escape(out.name)}\.(build|old)-[A-Za-z0-9_]{{8}}$")
+    if not out.parent.is_dir():
+        return
+    for entry in out.parent.iterdir():
+        if not pattern.match(entry.name) or entry.is_symlink() or not entry.is_dir():
+            continue
+        if ".old-" in entry.name and not os.path.lexists(out):
+            continue  # with out missing, a retired directory may be the only copy of the old output
+        try:
+            if time.time() - entry.stat().st_mtime < STALE_AFTER_SECONDS:
+                continue
+            marker = entry / MARKER
+            owned = not any(entry.iterdir()) or (marker.is_file() and not marker.is_symlink() and marker.read_text() == SCHEMA)
+        except (OSError, UnicodeDecodeError) as error:
+            warnings.append(f"could not inspect {entry}: {error}")
+            continue
+        if owned:
+            remove_tree(entry, warnings)
 
 
-def replace_directory(staged, out):
-    """Put ``staged`` where ``out`` is.  The previous ``out`` stays until the replacement is in place and is put back if the swap fails."""
-    backup = sibling(out, "previous")
-    out.rename(backup)
+def build_demo(build, tools, delivery, qc_spec):
+    (build / MARKER).write_text(SCHEMA)
     try:
-        staged.rename(out)
-    except BaseException:
-        backup.rename(out)
-        raise
-    try:
-        remove_tree(backup)
-    except OSError as error:  # the replacement is in place; a leftover hidden backup is only clutter
-        print(f"warning: could not remove the previous output, now {backup}: {error}", file=sys.stderr)
-
-
-def build_demo(out, tools, delivery, qc_spec):
-    out.mkdir(parents=True, exist_ok=True)
-    (out / MARKER).write_text(SCHEMA)
-    try:
-        manifest = pc.run_chain(out, delivery=delivery or pc.DEFAULT_DELIVERY, qc_spec=qc_spec)
+        manifest = pc.run_chain(build, delivery=delivery or pc.DEFAULT_DELIVERY, qc_spec=qc_spec)
     except pc.ChainError as error:
         raise DemoError(error.errors) from error
-    problems = pc.verify_chain(out) + pc.cross_checks(out, delivery, qc_spec)
+    problems = pc.verify_chain(build) + pc.cross_checks(build, delivery, qc_spec)
     if problems:
         raise DemoError(problems)
-    ledger = json.loads((out / "plan" / "final-ledger.json").read_text())
-    burnin = json.loads((out / "captions" / "burnin-report.json").read_text())
-    mux(out, ledger, burnin, tools[0])
-    checks = judge_mp4(out, ledger, burnin, tools)
+    ledger = json.loads((build / "plan" / "final-ledger.json").read_text())
+    burnin = json.loads((build / "captions" / "burnin-report.json").read_text())
+    mux(build, ledger, burnin, tools[0])
+    checks = judge_mp4(build, ledger, burnin, tools)
     report = {"schema": SCHEMA, "ok": all(c["ok"] for c in checks), "checks": checks}
-    (out / DEMO_QC).write_text(pc.dumps(report))
+    (build / DEMO_QC).write_text(pc.dumps(report))
     if not report["ok"]:
         raise DemoError([f"{c['id']}: {c['detail']}" for c in checks if not c["ok"]])
-    hashes = collect_hashes(out, manifest, ffmpeg_version(tools[0]))
-    (out / HASHES).write_text(pc.dumps(hashes))
+    hashes = collect_hashes(build, manifest, ffmpeg_version(tools[0]))
+    (build / HASHES).write_text(pc.dumps(hashes))
     return hashes
 
 
-def run_demo(out, delivery=None, qc_spec=None):
-    """Write the demo into ``out``.  Every refusal happens before anything is deleted.
-
-    A new or empty ``out`` is written in place, so a failed run leaves its partial files (marker first) to look at and
-    can be rerun.  A previous demo output is replaced only by a complete new one: the run is built in a hidden
-    sibling directory and swapped in, so a failure at any point leaves the previous output, marker included, as it was."""
+def run_demo(out, delivery=None, qc_spec=None, warnings=None):
     out = Path(out)
+    warnings = [] if warnings is None else warnings
+    if out.is_symlink():
+        raise DemoError([f"{out} is a symbolic link; choose a real directory"])
+    refuse_unsafe_output(out)
     tools = ffmpeg_tools()
-    replacing = inspect_output(out)
-    if not replacing:
-        return build_demo(out, tools, delivery, qc_spec)
-    staged = sibling(out, "building")
-    try:
-        hashes = build_demo(staged, tools, delivery, qc_spec)
-        replace_directory(staged, out)
-    except BaseException:
+    restore_orphan(out, warnings)
+    if out.exists() and not out.is_dir():
+        raise DemoError([f"{out} exists and is not a directory; choose a new directory"])
+    replacing = out.exists() and any(out.iterdir())
+    if replacing:
+        marker = out / MARKER
         try:
-            if staged.exists():
-                remove_tree(staged)
-        except OSError as error:  # the original failure is the one to report
-            print(f"warning: could not remove {staged}: {error}", file=sys.stderr)
+            marked = marker.is_file() and not marker.is_symlink() and marker.read_text() == SCHEMA
+        except (OSError, UnicodeDecodeError):
+            marked = False
+        if not marked:
+            raise DemoError([f"{out} is not empty and is not a previous demo output; choose a new directory"])
+    # Build beside the output, swap in only once everything has passed, so a failure leaves the old output as it was.
+    out.parent.mkdir(parents=True, exist_ok=True)
+    sweep_stale(out, warnings)
+    build = Path(tempfile.mkdtemp(prefix=f".{out.name}.build-", dir=out.parent))
+    build.chmod(0o755)
+    retired = None
+    swapped = False
+    try:
+        hashes = build_demo(build, tools, delivery, qc_spec)
+        if replacing:
+            retired = Path(tempfile.mkdtemp(prefix=f".{out.name}.old-", dir=out.parent))
+            retired.rmdir()
+            os.rename(out, retired)
+        os.rename(build, out)
+        swapped = True
+    except BaseException:
+        # An interruption (KeyboardInterrupt, SIGTERM) between the two renames must leave the old output at out, never neither.
+        if retired is not None and retired.exists() and not os.path.lexists(out):
+            try:
+                os.rename(retired, out)
+                retired = None
+            except BaseException as rollback_error:  # never mask the original; retired stays set so nothing is deleted
+                warnings.append(f"could not put the previous output back from {retired}: {rollback_error!r}")
         raise
+    finally:
+        # Keep the build directory whenever the old output could not be put back, so no copy is lost.
+        if not swapped and build.exists() and (retired is None or not retired.exists()):
+            remove_tree(build, warnings)
+    if retired is not None:
+        remove_tree(retired, warnings)
     return hashes
 
 
@@ -483,18 +535,20 @@ def main(argv=None):
     except (ValueError, OSError, pc.qc.QcError) as error:
         print(json.dumps({"errors": [f"spec: {error}"]}, indent=2))
         return 2
+    warnings = []
+    extra = lambda: {"warnings": warnings} if warnings else {}  # noqa: E731
     try:
         if args.command == "run":
-            hashes = run_demo(args.output, delivery, qc_spec)
-            print(json.dumps({"chain_sha256": hashes["chain_sha256"], "mp4_sha256": hashes["mp4_sha256"], **hashes["deterministic"],
+            hashes = run_demo(args.output, delivery, qc_spec, warnings)
+            print(json.dumps({**extra(), "chain_sha256": hashes["chain_sha256"], "mp4_sha256": hashes["mp4_sha256"], **hashes["deterministic"],
                               "mp4": str(Path(args.output) / MP4), "hashes": str(Path(args.output) / HASHES), "qc_report": str(Path(args.output) / "qc" / "qc-report.json")}, indent=2, sort_keys=True))
             return 0
         problems = verify_demo(args.output, delivery, qc_spec)
     except DemoError as error:
-        print(json.dumps({"errors": error.errors}, indent=2))
+        print(json.dumps({"errors": error.errors, **extra()}, indent=2))
         return 2
     except (OSError, ValueError, KeyError, TypeError) as error:
-        print(json.dumps({"errors": [f"{args.command}: {type(error).__name__}: {error}"]}, indent=2))
+        print(json.dumps({"errors": [f"{args.command}: {type(error).__name__}: {error}"], **extra()}, indent=2))
         return 2
     if problems:
         print(json.dumps({"errors": problems}, indent=2))
