@@ -212,15 +212,83 @@ class AtomicReplacementTests(unittest.TestCase):
         swept_build = stale(".marked.build-abcd1234")
         swept_old = stale(".marked.old-abcd1234")
         young = stale(".marked.build-young123", age=time.time())
-        unmarked = stale(".marked.build-nomarker", marked=False)
+        unmarked_old = stale(".marked.build-nomarker", marked=False)  # a partial removal can lose the marker
+        unmarked_old_retired = stale(".marked.old-nomarker", marked=False)
+        unmarked_young = stale(".marked.build-younglos", marked=False, age=time.time())
         other = stale(".other.build-abcd1234")
         odd = stale(".marked.build-x")
         result = cli("run", "--output", str(target), "--delivery", "streaming")
         self.assertCleanRefusal(result)
         self.assertFalse(swept_build.exists())
         self.assertFalse(swept_old.exists())
-        for survivor in (young, unmarked, other, odd):
+        self.assertFalse(unmarked_old.exists())
+        self.assertFalse(unmarked_old_retired.exists())
+        for survivor in (young, unmarked_young, other, odd):
             self.assertTrue(survivor.exists(), survivor)
+
+    def fake_build(self, build, tools, delivery, qc_spec):
+        (build / demo.MARKER).write_text(demo.SCHEMA)
+        (build / "new.txt").write_text("new output")
+        return {"chain_sha256": "c", "mp4_sha256": "m", "deterministic": {}}
+
+    def test_marker_lost_during_the_build_refuses_the_swap_and_restores_state(self):
+        target = self.marked()
+
+        def build_that_unmarks(build, tools, delivery, qc_spec):
+            result = self.fake_build(build, tools, delivery, qc_spec)
+            (target / demo.MARKER).unlink()  # something else replaced the directory's content mid-run
+            (target / "keep.txt").write_text("someone else's data")
+            return result
+
+        with mock.patch.object(demo, "build_demo", build_that_unmarks):
+            with self.assertRaises(demo.DemoError) as caught:
+                demo.run_demo(target)
+        self.assertIn("marker", " ".join(caught.exception.errors))
+        self.assertEqual((target / "keep.txt").read_text(), "someone else's data")
+        self.assertEqual(self.siblings(), ["marked"])
+
+    def test_marker_lost_during_the_build_exits_2_with_json(self):
+        target = self.marked()
+
+        def build_that_unmarks(build, tools, delivery, qc_spec):
+            self.fake_build(build, tools, delivery, qc_spec)
+            (target / demo.MARKER).unlink()
+            return {"chain_sha256": "c", "mp4_sha256": "m", "deterministic": {}}
+
+        captured = io.StringIO()
+        with mock.patch.object(demo, "build_demo", build_that_unmarks), contextlib.redirect_stdout(captured):
+            self.assertEqual(demo.main(["run", "--output", str(target)]), 2)
+        self.assertIn("marker", " ".join(json.loads(captured.getvalue())["errors"]))
+        self.assertEqual(self.siblings(), ["marked"])
+
+    def test_interruption_after_the_second_rename_keeps_the_new_output_and_drops_the_old(self):
+        target = self.marked()
+        real_rename = os.rename
+        seen = []
+
+        def interrupt_after(src, dst, *args, **kwargs):
+            real_rename(src, dst, *args, **kwargs)
+            if Path(src) == target or Path(dst) == target:
+                seen.append((str(src), str(dst)))
+                if len(seen) == 2:  # the build is at out; swapped is not set yet
+                    raise KeyboardInterrupt
+
+        with mock.patch.object(demo, "build_demo", self.fake_build), mock.patch.object(os, "rename", interrupt_after):
+            with self.assertRaises(KeyboardInterrupt):
+                demo.run_demo(target)
+        self.assertEqual(len(seen), 2, seen)
+        self.assertEqual((target / "new.txt").read_text(), "new output")
+        self.assertFalse((target / "keep.txt").exists())
+        self.assertEqual(self.siblings(), ["marked"])  # no .old-* orphan, no .build-*
+
+    def test_verify_rejects_a_symlinked_output(self):
+        real = self.marked("real")
+        link = self.base / "link"
+        link.symlink_to(real, target_is_directory=True)
+        problems = demo.verify_demo(link)
+        self.assertTrue(any("symbolic link" in p for p in problems), problems)
+        result = cli("verify", "--output", str(link))
+        self.assertCleanRefusal(result)
 
     def orphan(self):
         """What a SIGKILL between the two renames leaves: no output, the old one only as a stale-looking .old- sibling."""
