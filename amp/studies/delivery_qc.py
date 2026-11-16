@@ -53,10 +53,19 @@ DEFAULT_SPEC: dict[str, Any] = {
 
 # The second detector's constants are not part of the QC spec and not shared with the captions stage's detector: a spec
 # (or a caller) that loosens ``vad`` cannot move what this one hears.  It uses a different method (a 30 ms window on a
-# 10 ms hop and a two-class Otsu split of the frame levels, with no percentile and no margin), so a placement error that
-# the percentile-and-margin detector tolerates is not tolerated by construction.
+# 10 ms hop and a two-class Otsu split of the frame levels, with no margin above a noise floor; it gates only on a 5th-to-95th
+# percentile spread of at least ``min_separation_db``, and below that spread it yields no span, so the checks that use it fail
+# closed), so a placement error that the percentile-and-margin detector tolerates is not tolerated by construction.
 INDEPENDENT_DETECTOR = {"window_s": 0.03, "hop_s": 0.01, "bins": 64, "merge_gap_s": 0.1, "min_span_s": 0.2,
                         "min_separation_db": 6.0, "tolerance_frames": 2}
+
+# The longest stretch of a dialogue-active span that no cue may cover, whatever share of the span the cues cover.  Both
+# detectors join speech runs less than 0.1 s apart, so one span can hold several cues; a share floor alone lets a cue
+# shorter than (1 - floor) of a long span be deleted unnoticed.  Fixed here, not in the QC spec, so a spec cannot widen it.
+# Honest cues start and end within about 0.05 s of their span (captions.words_in_spans keeps 0.04 s) and sit two frames
+# apart; 0.3 s is under the chain's 0.4 s minimum cue duration, so a deleted cue of the chain's own captions always leaves
+# more than this.  Bound: a deleted cue shorter than this passes.
+MAX_UNCOVERED_S = Fraction(3, 10)
 
 INDEPENDENCE_CLASSES = ("independent", "shared-detector", "shared-limit", "shared-renderer", "shared-measurer",
                         "self-declared", "partly-structural", "weak")
@@ -188,8 +197,9 @@ def independent_spans(audio: np.ndarray, rate: int) -> list[tuple[int, int]]:
 
     Frame RMS over a 30 ms window every 10 ms; digital-silence frames are ignored; the live frame levels (dB) are
     split into two classes at the Otsu threshold of a 64-bin histogram and the upper class is active.  Runs under
-    0.1 s apart join and runs under 0.2 s drop.  No percentile, no margin, no value from the QC spec.  A recording with
-    a 5th-to-95th percentile spread under ``min_separation_db`` (flat noise, a pure tone) has no two classes and yields nothing."""
+    0.1 s apart join and runs under 0.2 s drop.  No margin above a floor and no value from the QC spec; the only percentile use is the gate:
+    a recording with a 5th-to-95th percentile spread under ``min_separation_db`` (flat noise, a pure tone) has no two classes and
+    yields nothing, which fails closed (the checks that use the detector require at least one span)."""
     cfg = INDEPENDENT_DETECTOR
     window, hop = max(1, int(round(cfg["window_s"] * rate))), max(1, int(round(cfg["hop_s"] * rate)))
     if len(audio) < window:
@@ -223,6 +233,21 @@ def independent_spans(audio: np.ndarray, rate: int) -> list[tuple[int, int]]:
             merged.append(run)
     clipped = [(max(0, a), min(len(audio), b)) for a, b in merged]
     return [(a, b) for a, b in clipped if b - a >= cfg["min_span_s"] * rate]
+
+
+def _uncovered_runs(lo: Fraction, hi: Fraction, intervals: list[tuple[Fraction, Fraction]]) -> list[tuple[Fraction, Fraction]]:
+    """The maximal stretches of ``[lo, hi)`` that lie outside the union of ``intervals``."""
+    runs = []
+    reach = lo
+    for a, b in sorted(intervals):
+        if b <= reach or a >= hi:
+            continue
+        if a > reach:
+            runs.append((reach, a))
+        reach = max(reach, b)
+    if reach < hi:
+        runs.append((reach, hi))
+    return runs
 
 
 def _covered(lo: Fraction, hi: Fraction, intervals: list[tuple[Fraction, Fraction]]) -> Fraction:
@@ -427,6 +452,10 @@ def _derive(root: Path, locations: Mapping[str, str], spec: Mapping[str, Any] | 
             share = _covered(lo, hi, cue_ranges) / (hi - lo)
             if share < floor:
                 uncovered.append(f"dialogue span {float(lo):.3f}-{float(hi):.3f} s ({label} detector) is {float(share):.1%} covered by cues, under {float(floor):.1%}")
+            for gap_lo, gap_hi in _uncovered_runs(lo, hi, cue_ranges):
+                if gap_hi - gap_lo > MAX_UNCOVERED_S:
+                    uncovered.append(f"dialogue span {float(lo):.3f}-{float(hi):.3f} s ({label} detector) has {float(gap_hi - gap_lo):.3f} s with no cue "
+                                     f"({float(gap_lo):.3f}-{float(gap_hi):.3f} s), over {float(MAX_UNCOVERED_S):.2f} s")
     checks.append(_check("captions.covers_dialogue", bool(spans) and bool(other) and not uncovered,
                          "every dialogue-active span, under the placement detector and under the independent one, is covered by cues to at least independent_overlap_min",
                          independent_overlap_min=spec["independent_overlap_min"],
