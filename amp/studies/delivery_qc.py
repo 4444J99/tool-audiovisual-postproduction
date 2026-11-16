@@ -262,6 +262,22 @@ def _covered(lo: Fraction, hi: Fraction, intervals: list[tuple[Fraction, Fractio
     return total
 
 
+def _coverage_problems(found: list[tuple[int, int]], label: str, cue_ranges: list[tuple[Fraction, Fraction]], rate: int, floor: Fraction) -> list[str]:
+    """What is wrong with the cues' coverage of the dialogue-active sample ranges ``found`` by one detector: a span covered under ``floor``,
+    or a stretch of a span longer than ``MAX_UNCOVERED_S`` with no cue (a deleted short cue inside a long span keeps the share above the floor)."""
+    problems = []
+    for a, b in found:
+        lo, hi = Fraction(a, rate), Fraction(b, rate)
+        share = _covered(lo, hi, cue_ranges) / (hi - lo)
+        if share < floor:
+            problems.append(f"dialogue span {float(lo):.3f}-{float(hi):.3f} s ({label} detector) is {float(share):.1%} covered by cues, under {float(floor):.1%}")
+        for gap_lo, gap_hi in _uncovered_runs(lo, hi, cue_ranges):
+            if gap_hi - gap_lo > MAX_UNCOVERED_S:
+                problems.append(f"dialogue span {float(lo):.3f}-{float(hi):.3f} s ({label} detector) has {float(gap_hi - gap_lo):.3f} s with no cue "
+                                f"({float(gap_lo):.3f}-{float(gap_hi):.3f} s), over {float(MAX_UNCOVERED_S):.2f} s")
+    return problems
+
+
 # ------------------------------------------------------------------------------------------ timecode
 
 def timecode(frame: int, rate: Fraction) -> str:
@@ -445,17 +461,7 @@ def _derive(root: Path, locations: Mapping[str, str], spec: Mapping[str, Any] | 
     cue_ranges = [(Fraction(c["start"]) / fps, Fraction(c["end"]) / fps) for c in cues]
     other = independent_spans(audio, rate_wav)
     floor = Fraction(spec["independent_overlap_min"]).limit_denominator(10 ** 6)
-    uncovered = []
-    for label, found in (("placement", spans), ("independent", other)):
-        for a, b in found:
-            lo, hi = Fraction(a, rate_wav), Fraction(b, rate_wav)
-            share = _covered(lo, hi, cue_ranges) / (hi - lo)
-            if share < floor:
-                uncovered.append(f"dialogue span {float(lo):.3f}-{float(hi):.3f} s ({label} detector) is {float(share):.1%} covered by cues, under {float(floor):.1%}")
-            for gap_lo, gap_hi in _uncovered_runs(lo, hi, cue_ranges):
-                if gap_hi - gap_lo > MAX_UNCOVERED_S:
-                    uncovered.append(f"dialogue span {float(lo):.3f}-{float(hi):.3f} s ({label} detector) has {float(gap_hi - gap_lo):.3f} s with no cue "
-                                     f"({float(gap_lo):.3f}-{float(gap_hi):.3f} s), over {float(MAX_UNCOVERED_S):.2f} s")
+    uncovered = _coverage_problems(spans, "placement", cue_ranges, rate_wav, floor) + _coverage_problems(other, "independent", cue_ranges, rate_wav, floor)
     checks.append(_check("captions.covers_dialogue", bool(spans) and bool(other) and not uncovered,
                          "every dialogue-active span, under the placement detector and under the independent one, is covered by cues to at least independent_overlap_min",
                          independent_overlap_min=spec["independent_overlap_min"],

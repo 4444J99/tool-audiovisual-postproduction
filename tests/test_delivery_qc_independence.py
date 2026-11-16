@@ -89,6 +89,24 @@ class CoverageAndIndependenceTests(Base):
         self.assertTrue(any("5.0" in p or "5.1" in p for p in covers["problems"]), covers["problems"])
         self.assertTrue(self.check(self.derive(self.out, loose), "captions.covers_dialogue")["ok"])
 
+    def test_at_the_default_floor_a_short_cue_deleted_inside_a_long_merged_span_keeps_the_share_but_not_the_pass(self):
+        F, rate = Fraction, 16000
+        span = [(10 * rate, 14 * rate)]                      # one 4 s merged span, the sort a long sentence with short pauses gives
+        cue = lambda a, b: (F(a).limit_denominator(1000), F(b).limit_denominator(1000))
+        every = [cue(10.04, 10.99), cue(11.04, 11.99), cue(12.04, 12.49), cue(12.54, 13.96)]
+        floor = F(qc.DEFAULT_SPEC["independent_overlap_min"]).limit_denominator(10 ** 6)
+        self.assertEqual(qc._coverage_problems(span, "independent", every, rate, floor), [])
+        deleted = [c for i, c in enumerate(every) if i != 2]                  # the 0.45 s cue is gone
+        problems = qc._coverage_problems(span, "independent", deleted, rate, floor)
+        share = qc._covered(F(10), F(14), deleted) / 4
+        self.assertGreaterEqual(share, floor, "the old per-span share rule still passes this span")
+        self.assertFalse(any("covered by cues, under" in p for p in problems), problems)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("(11.990-12.540 s), over", problems[0])
+        # a stretch no longer than the bound is not named, whatever is around it
+        short = [cue(10.04, 10.99), cue(11.04, 11.99), cue(12.2, 13.96)]
+        self.assertEqual(qc._coverage_problems(span, "placement", short, rate, floor), [])
+
     def test_the_uncovered_stretches_of_a_span_are_found_inside_and_at_its_edges(self):
         F = Fraction
         runs = qc._uncovered_runs(F(0), F(4), [(F(1, 2), F(3, 2)), (F(2), F(7, 2))])
