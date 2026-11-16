@@ -168,6 +168,65 @@ class AtomicReplacementTests(unittest.TestCase):
         for survivor in (young, unmarked, other, odd):
             self.assertTrue(survivor.exists(), survivor)
 
+    def orphan(self):
+        """What a SIGKILL between the two renames leaves: no output, the old one only as a stale-looking .old- sibling."""
+        old = self.base / ".out.old-abcd1234"
+        old.mkdir()
+        (old / demo.MARKER).write_text(demo.SCHEMA)
+        (old / "precious.mp4").write_text("the only copy")
+        aged = time.time() - 7200
+        os.utime(old, (aged, aged))
+        return old
+
+    def test_lone_retired_directory_survives_a_failed_build_and_is_restored(self):
+        old = self.orphan()
+        result = cli("run", "--output", str(self.base / "out"), "--delivery", "streaming")
+        self.assertCleanRefusal(result)
+        self.assertEqual((self.base / "out" / "precious.mp4").read_text(), "the only copy")
+        self.assertFalse(old.exists())
+        self.assertIn("restored", " ".join(json.loads(result.stdout)["warnings"]))
+        self.assertEqual(self.siblings(), ["out"])
+
+    def test_lone_retired_directory_is_restored_then_replaced_by_a_successful_run(self):
+        self.orphan()
+        result = cli("run", "--output", str(self.base / "out"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("restored", " ".join(json.loads(result.stdout)["warnings"]))
+        self.assertTrue((self.base / "out" / demo.MP4).is_file())
+        self.assertFalse((self.base / "out" / "precious.mp4").exists())
+        self.assertEqual(self.siblings(), ["out"])
+
+    def test_a_retired_directory_is_never_swept_while_the_output_is_missing(self):
+        warnings = []
+        old = self.orphan()
+        demo.sweep_stale(self.base / "out", warnings)
+        self.assertTrue(old.exists())
+
+    def test_a_failing_rollback_does_not_mask_the_interruption_or_lose_the_old_output(self):
+        target = self.marked()
+        real_rename = os.rename
+        seen = []
+
+        def failing(src, dst, *args, **kwargs):
+            if Path(src) == target or Path(dst) == target:
+                seen.append((str(src), str(dst)))
+                if len(seen) == 2:
+                    raise KeyboardInterrupt
+                if len(seen) == 3:
+                    raise OSError("rollback failed")
+            return real_rename(src, dst, *args, **kwargs)
+
+        warnings = []
+        with mock.patch.object(os, "rename", failing):
+            with self.assertRaises(KeyboardInterrupt):
+                demo.run_demo(target, warnings=warnings)
+        self.assertTrue(any("could not put the previous output back" in w for w in warnings), warnings)
+        names = self.siblings()
+        self.assertEqual(sum(".old-" in n for n in names), 1, names)
+        self.assertEqual(sum(".build-" in n for n in names), 1, names)
+        retired = next(self.base / n for n in names if ".old-" in n)
+        self.assertEqual((retired / "keep.txt").read_text(), "old output")
+
     @unittest.skipIf(os.geteuid() == 0, "root removes anything")
     def test_a_tree_that_cannot_be_removed_is_reported_as_a_warning(self):
         tree = self.base / "stuck"

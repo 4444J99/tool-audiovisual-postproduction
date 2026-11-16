@@ -353,6 +353,29 @@ def remove_tree(path, warnings):
 STALE_AFTER_SECONDS = 3600
 
 
+def owned_sibling(out, entry):
+    """True for a real directory next to out that holds the demo marker."""
+    try:
+        marker = entry / MARKER
+        return entry.is_dir() and not entry.is_symlink() and marker.is_file() and not marker.is_symlink() and marker.read_text() == SCHEMA
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def restore_orphan(out, warnings):
+    """If a run was killed between its two renames, out is missing and the old output survives only as .NAME.old-*:
+    put the newest marked one back at out before anything else touches it."""
+    if os.path.lexists(out) or not out.parent.is_dir():
+        return
+    pattern = re.compile(rf"^\.{re.escape(out.name)}\.old-[A-Za-z0-9_]{{8}}$")
+    candidates = [e for e in out.parent.iterdir() if pattern.match(e.name) and owned_sibling(out, e)]
+    if not candidates:
+        return
+    newest = max(candidates, key=lambda e: (e.stat().st_mtime, e.name))
+    os.rename(newest, out)
+    warnings.append(f"restored the previous output from {newest} to {out}; an earlier run was interrupted between its two renames")
+
+
 def sweep_stale(out, warnings):
     """Remove hidden build or retired siblings of out left by an earlier killed run: exactly this output's naming
     pattern, a real directory, older than an hour, and empty or holding the demo marker that proves the demo wrote it."""
@@ -362,6 +385,8 @@ def sweep_stale(out, warnings):
     for entry in out.parent.iterdir():
         if not pattern.match(entry.name) or entry.is_symlink() or not entry.is_dir():
             continue
+        if ".old-" in entry.name and not os.path.lexists(out):
+            continue  # with out missing, a retired directory may be the only copy of the old output
         try:
             if time.time() - entry.stat().st_mtime < STALE_AFTER_SECONDS:
                 continue
@@ -403,6 +428,7 @@ def run_demo(out, delivery=None, qc_spec=None, warnings=None):
         raise DemoError([f"{out} is a symbolic link; choose a real directory"])
     refuse_unsafe_output(out)
     tools = ffmpeg_tools()
+    restore_orphan(out, warnings)
     if out.exists() and not out.is_dir():
         raise DemoError([f"{out} exists and is not a directory; choose a new directory"])
     replacing = out.exists() and any(out.iterdir())
@@ -432,8 +458,11 @@ def run_demo(out, delivery=None, qc_spec=None, warnings=None):
     except BaseException:
         # An interruption (KeyboardInterrupt, SIGTERM) between the two renames must leave the old output at out, never neither.
         if retired is not None and retired.exists() and not os.path.lexists(out):
-            os.rename(retired, out)
-            retired = None
+            try:
+                os.rename(retired, out)
+                retired = None
+            except BaseException as rollback_error:  # never mask the original; retired stays set so nothing is deleted
+                warnings.append(f"could not put the previous output back from {retired}: {rollback_error!r}")
         raise
     finally:
         # Keep the build directory whenever the old output could not be put back, so no copy is lost.
@@ -504,19 +533,20 @@ def main(argv=None):
     except (ValueError, OSError, pc.qc.QcError) as error:
         print(json.dumps({"errors": [f"spec: {error}"]}, indent=2))
         return 2
+    warnings = []
+    extra = lambda: {"warnings": warnings} if warnings else {}  # noqa: E731
     try:
         if args.command == "run":
-            warnings = []
             hashes = run_demo(args.output, delivery, qc_spec, warnings)
-            print(json.dumps({**({"warnings": warnings} if warnings else {}), "chain_sha256": hashes["chain_sha256"], "mp4_sha256": hashes["mp4_sha256"], **hashes["deterministic"],
+            print(json.dumps({**extra(), "chain_sha256": hashes["chain_sha256"], "mp4_sha256": hashes["mp4_sha256"], **hashes["deterministic"],
                               "mp4": str(Path(args.output) / MP4), "hashes": str(Path(args.output) / HASHES), "qc_report": str(Path(args.output) / "qc" / "qc-report.json")}, indent=2, sort_keys=True))
             return 0
         problems = verify_demo(args.output, delivery, qc_spec)
     except DemoError as error:
-        print(json.dumps({"errors": error.errors}, indent=2))
+        print(json.dumps({"errors": error.errors, **extra()}, indent=2))
         return 2
     except (OSError, ValueError, KeyError, TypeError) as error:
-        print(json.dumps({"errors": [f"{args.command}: {type(error).__name__}: {error}"]}, indent=2))
+        print(json.dumps({"errors": [f"{args.command}: {type(error).__name__}: {error}"], **extra()}, indent=2))
         return 2
     if problems:
         print(json.dumps({"errors": problems}, indent=2))
