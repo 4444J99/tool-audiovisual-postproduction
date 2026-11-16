@@ -15,11 +15,13 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
@@ -317,27 +319,59 @@ def sealed_problems(recorded, manifest):
 
 
 def refuse_unsafe_output(out):
-    """Refuse an output that is, or contains, the working directory, the repository, the home directory or the filesystem root."""
-    resolved = Path(os.path.realpath(out))
-    guarded = {"the current directory": Path.cwd(), "the repository": ROOT, "the home directory": Path.home()}
-    if resolved == Path(resolved.anchor):
-        raise DemoError([f"{out} is the filesystem root; choose a new directory"])
+    """Refuse an output that is, or contains, the working directory, the repository, the home directory or the filesystem root.
+
+    Compared with os.path.samefile (device and inode), not by path text: macOS volumes are usually case-insensitive,
+    so /USERS/me and /Users/me are the same directory."""
+    if not out.exists():
+        return  # a path that does not exist yet cannot contain anything
+    guarded = {"the filesystem root": Path(out.anchor or "/"), "the current directory": Path.cwd(), "the repository": ROOT, "the home directory": Path.home()}
     for name, path in guarded.items():
-        path = Path(os.path.realpath(path))
-        if resolved == path or resolved in path.parents:
-            raise DemoError([f"{out} is or contains {name}; choose a new directory"])
+        for candidate in (path, *path.resolve().parents) if name != "the filesystem root" else (path,):
+            try:
+                same = os.path.samefile(out, candidate)
+            except OSError:
+                continue
+            if same:
+                raise DemoError([f"{out} is or contains {name}; choose a new directory"])
 
 
-def remove_tree(path):
-    """Best-effort removal that also clears read-only directories; never raises."""
+def remove_tree(path, warnings):
+    """Remove a tree, clearing read-only directories on the way; whatever still cannot be removed is added to warnings."""
     def unlock(function, target, _):
         try:
             os.chmod(os.path.dirname(target), stat.S_IRWXU)
             os.chmod(target, stat.S_IRWXU)
             function(target)
-        except OSError:
-            pass
-    shutil.rmtree(path, onerror=unlock)
+        except OSError as error:
+            warnings.append(f"could not remove {target}: {error}")
+    shutil.rmtree(path, **({"onexc": unlock} if sys.version_info >= (3, 12) else {"onerror": unlock}))
+    if os.path.lexists(path) and not any(str(path) in w for w in warnings):
+        warnings.append(f"could not remove {path}")
+
+
+STALE_AFTER_SECONDS = 3600
+
+
+def sweep_stale(out, warnings):
+    """Remove hidden build or retired siblings of out left by an earlier killed run: exactly this output's naming
+    pattern, a real directory, older than an hour, and empty or holding the demo marker that proves the demo wrote it."""
+    pattern = re.compile(rf"^\.{re.escape(out.name)}\.(build|old)-[A-Za-z0-9_]{{8}}$")
+    if not out.parent.is_dir():
+        return
+    for entry in out.parent.iterdir():
+        if not pattern.match(entry.name) or entry.is_symlink() or not entry.is_dir():
+            continue
+        try:
+            if time.time() - entry.stat().st_mtime < STALE_AFTER_SECONDS:
+                continue
+            marker = entry / MARKER
+            owned = not any(entry.iterdir()) or (marker.is_file() and not marker.is_symlink() and marker.read_text() == SCHEMA)
+        except (OSError, UnicodeDecodeError) as error:
+            warnings.append(f"could not inspect {entry}: {error}")
+            continue
+        if owned:
+            remove_tree(entry, warnings)
 
 
 def build_demo(build, tools, delivery, qc_spec):
@@ -362,8 +396,9 @@ def build_demo(build, tools, delivery, qc_spec):
     return hashes
 
 
-def run_demo(out, delivery=None, qc_spec=None):
+def run_demo(out, delivery=None, qc_spec=None, warnings=None):
     out = Path(out)
+    warnings = [] if warnings is None else warnings
     if out.is_symlink():
         raise DemoError([f"{out} is a symbolic link; choose a real directory"])
     refuse_unsafe_output(out)
@@ -381,28 +416,31 @@ def run_demo(out, delivery=None, qc_spec=None):
             raise DemoError([f"{out} is not empty and is not a previous demo output; choose a new directory"])
     # Build beside the output, swap in only once everything has passed, so a failure leaves the old output as it was.
     out.parent.mkdir(parents=True, exist_ok=True)
+    sweep_stale(out, warnings)
     build = Path(tempfile.mkdtemp(prefix=f".{out.name}.build-", dir=out.parent))
     build.chmod(0o755)
     retired = None
+    swapped = False
     try:
         hashes = build_demo(build, tools, delivery, qc_spec)
         if replacing:
             retired = Path(tempfile.mkdtemp(prefix=f".{out.name}.old-", dir=out.parent))
             retired.rmdir()
             os.rename(out, retired)
-            try:
-                os.rename(build, out)
-            except OSError:
-                os.rename(retired, out)
-                retired = None
-                raise
-        else:
-            os.rename(build, out)
+        os.rename(build, out)
+        swapped = True
+    except BaseException:
+        # An interruption (KeyboardInterrupt, SIGTERM) between the two renames must leave the old output at out, never neither.
+        if retired is not None and retired.exists() and not os.path.lexists(out):
+            os.rename(retired, out)
+            retired = None
+        raise
     finally:
-        if build.exists():
-            remove_tree(build)
+        # Keep the build directory whenever the old output could not be put back, so no copy is lost.
+        if not swapped and build.exists() and (retired is None or not retired.exists()):
+            remove_tree(build, warnings)
     if retired is not None:
-        remove_tree(retired)
+        remove_tree(retired, warnings)
     return hashes
 
 
@@ -468,8 +506,9 @@ def main(argv=None):
         return 2
     try:
         if args.command == "run":
-            hashes = run_demo(args.output, delivery, qc_spec)
-            print(json.dumps({"chain_sha256": hashes["chain_sha256"], "mp4_sha256": hashes["mp4_sha256"], **hashes["deterministic"],
+            warnings = []
+            hashes = run_demo(args.output, delivery, qc_spec, warnings)
+            print(json.dumps({**({"warnings": warnings} if warnings else {}), "chain_sha256": hashes["chain_sha256"], "mp4_sha256": hashes["mp4_sha256"], **hashes["deterministic"],
                               "mp4": str(Path(args.output) / MP4), "hashes": str(Path(args.output) / HASHES), "qc_report": str(Path(args.output) / "qc" / "qc-report.json")}, indent=2, sort_keys=True))
             return 0
         problems = verify_demo(args.output, delivery, qc_spec)
