@@ -2,6 +2,7 @@
 captions stage does not share, and a report that says which checks cannot fail independently."""
 import json
 import unittest
+from fractions import Fraction
 
 import numpy as np
 
@@ -48,6 +49,71 @@ class CoverageAndIndependenceTests(Base):
         self.assertIn("captions.covers_dialogue", report["failed"])
         self.assertTrue(any("2.3" in p or "2.9" in p for p in self.check(report, "captions.covers_dialogue")["problems"]))
         self.assertTrue(pc.verify_chain(target) == [] and any(p.startswith("qc ") for p in pc.cross_checks(target)))
+
+    def replace_cue(self, target, index, replacements):
+        """Replace one cue by ``replacements`` ((start_frame, end_frame, text) rows) in every caption file, re-render, re-derive and re-seal."""
+        ledger = self.jload(target, "plan/final-ledger.json")
+        graph = self.jload(target, "set/scene-graph-summary.json")["graph_sha256"]
+        rate = cap.parse_fps(ledger["fps"])
+        cues = []
+        for c in cap.parse((target / "captions" / "captions.srt").read_text(), ledger["fps"]):
+            if c["index"] != index:
+                cues.append(c)
+                continue
+            for start, end, text in replacements:
+                cues.append({"index": 0, "start": start, "end": end, "start_ms": cap.ms_of(start, rate), "end_ms": cap.ms_of(end, rate), "lines": [text]})
+        for number, cue in enumerate(cues, 1):
+            cue["index"] = number
+        srt, vtt = cap.render_srt(cues), cap.render_vtt(cues)
+        (target / "captions" / "captions.srt").write_bytes(srt.encode())
+        (target / "captions" / "captions.vtt").write_bytes(vtt.encode())
+        report = self.jload(target, "captions/captions-report.json")
+        report["cues"] = [{"index": c["index"], "start": c["start"], "end": c["end"], "start_ms": c["start_ms"], "end_ms": c["end_ms"], "lines": c["lines"], "words": [0, 0]} for c in cues]
+        report["srt_sha256"], report["vtt_sha256"] = cap.sha256_text(srt), cap.sha256_text(vtt)
+        self.jsave(target, "captions/captions-report.json", report)
+        payload, burn = cb.burn(srt, ledger["fps"], ledger["total_frames"], pc.BURNIN_GEOMETRY, pc.burnin_segments(ledger, graph))
+        (target / "captions" / "frames.y8").write_bytes(payload)
+        self.jsave(target, "captions/burnin-report.json", burn)
+        self.reseal_everything(target, "honest")
+
+    def test_a_short_cue_deleted_inside_a_longer_dialogue_span_is_named_although_the_rest_covers_enough_of_it(self):
+        target = self.copy()
+        # Cue 3 (frames 118-138) is the only cue in its 0.9 s span.  Two short cues with a 0.33 s hole between them cover 54 % of it:
+        # over the floor of 0.5 that this spec sets, so only the uncovered stretch can name the deleted words.
+        self.replace_cue(target, 3, [(118, 124, "Welcome"), (132, 138, "back.")])
+        loose = {"independent_overlap_min": 0.5}
+        report = self.derive(target, loose)
+        covers = self.check(report, "captions.covers_dialogue")
+        self.assertFalse(covers["ok"])
+        self.assertTrue(all("with no cue" in p for p in covers["problems"]), covers["problems"])
+        self.assertTrue(any("5.0" in p or "5.1" in p for p in covers["problems"]), covers["problems"])
+        self.assertTrue(self.check(self.derive(self.out, loose), "captions.covers_dialogue")["ok"])
+
+    def test_at_the_default_floor_a_short_cue_deleted_inside_a_long_merged_span_keeps_the_share_but_not_the_pass(self):
+        F, rate = Fraction, 16000
+        span = [(10 * rate, 14 * rate)]                      # one 4 s merged span, the sort a long sentence with short pauses gives
+        cue = lambda a, b: (F(a).limit_denominator(1000), F(b).limit_denominator(1000))
+        every = [cue(10.04, 10.99), cue(11.04, 11.99), cue(12.04, 12.49), cue(12.54, 13.96)]
+        floor = F(qc.DEFAULT_SPEC["independent_overlap_min"]).limit_denominator(10 ** 6)
+        self.assertEqual(qc._coverage_problems(span, "independent", every, rate, floor), [])
+        deleted = [c for i, c in enumerate(every) if i != 2]                  # the 0.45 s cue is gone
+        problems = qc._coverage_problems(span, "independent", deleted, rate, floor)
+        share = qc._covered(F(10), F(14), deleted) / 4
+        self.assertGreaterEqual(share, floor, "the old per-span share rule still passes this span")
+        self.assertFalse(any("covered by cues, under" in p for p in problems), problems)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("(11.990-12.540 s), over", problems[0])
+        # a stretch no longer than the bound is not named, whatever is around it
+        short = [cue(10.04, 10.99), cue(11.04, 11.99), cue(12.2, 13.96)]
+        self.assertEqual(qc._coverage_problems(span, "placement", short, rate, floor), [])
+
+    def test_the_uncovered_stretches_of_a_span_are_found_inside_and_at_its_edges(self):
+        F = Fraction
+        runs = qc._uncovered_runs(F(0), F(4), [(F(1, 2), F(3, 2)), (F(2), F(7, 2))])
+        self.assertEqual(runs, [(F(0), F(1, 2)), (F(3, 2), F(2)), (F(7, 2), F(4))])
+        self.assertEqual(qc._uncovered_runs(F(0), F(4), [(F(-1), F(5))]), [])
+        self.assertEqual(qc._uncovered_runs(F(1), F(2), []), [(F(1), F(2))])
+        self.assertEqual(qc._uncovered_runs(F(0), F(4), [(F(1), F(3)), (F(2), F(5, 2))]), [(F(0), F(1)), (F(3), F(4))])
 
     def test_the_clean_chain_covers_every_span_and_places_every_cue_under_both_detectors(self):
         covers = self.check(self.report, "captions.covers_dialogue")

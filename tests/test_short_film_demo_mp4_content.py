@@ -322,5 +322,34 @@ class AlignedSnrTests(unittest.TestCase):
         self.assertGreater(demo.aligned_snr_db(reference + noise * 10 ** (-18 / 20), reference), demo.AUDIO_MIN_SNR_DB)
 
 
+class WorstBlockTests(unittest.TestCase):
+    """Review of the demo PR: worst_block_snr_db used to stop at the last whole 100 ms block, so a muted trailing partial block was never judged."""
+
+    def reference(self, samples):
+        return np.random.default_rng(21).standard_normal(samples) * 0.1  # rms 0.1, far above BLOCK_FLOOR_RMS
+
+    def test_an_exact_copy_is_infinite_with_or_without_a_partial_block(self):
+        for samples in (demo.BLOCK_SAMPLES * 4, demo.BLOCK_SAMPLES * 4 + 700):
+            reference = self.reference(samples)
+            worst, _ = demo.worst_block_snr_db(np.concatenate([reference, np.zeros(10)]), reference)
+            self.assertEqual(worst, float("inf"), samples)
+
+    def test_a_muted_trailing_partial_block_is_judged_and_named(self):
+        reference = self.reference(demo.BLOCK_SAMPLES * 4 + 700)
+        heard = reference.copy()
+        heard[demo.BLOCK_SAMPLES * 4:] = 0.0
+        worst, at = demo.worst_block_snr_db(np.concatenate([heard, np.zeros(10)]), reference)
+        self.assertLess(worst, demo.AUDIO_MIN_BLOCK_SNR_DB)
+        self.assertEqual(at, demo.BLOCK_SAMPLES * 4)
+
+    def test_a_quiet_trailing_partial_block_is_not_judged(self):
+        reference = self.reference(demo.BLOCK_SAMPLES * 4 + 700)
+        reference[demo.BLOCK_SAMPLES * 4:] *= 0.01  # rms 0.001, under the floor, like a quiet whole block
+        heard = reference.copy()
+        heard[demo.BLOCK_SAMPLES * 4:] = 0.0
+        worst, _ = demo.worst_block_snr_db(np.concatenate([heard, np.zeros(10)]), reference)
+        self.assertEqual(worst, float("inf"))
+
+
 if __name__ == "__main__":
     unittest.main()

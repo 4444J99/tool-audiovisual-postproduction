@@ -152,12 +152,14 @@ def aligned_snr_db(heard, reference):
 
 
 def worst_block_snr_db(heard, reference):
-    """The lowest SNR over the 100 ms blocks of ``reference`` that are louder than BLOCK_FLOOR_RMS, and the start (s) of that block."""
+    """The lowest SNR over the 100 ms blocks of ``reference`` that are louder than BLOCK_FLOOR_RMS, and the start (sample) of that block.
+
+    A trailing block shorter than 100 ms is judged like the others, so a muted or replaced end of the dialogue cannot hide in it."""
     shifted = align(heard, reference)
     if shifted is None:
         return float("-inf"), 0
     worst, at = float("inf"), 0
-    for start in range(0, len(reference) - BLOCK_SAMPLES + 1, BLOCK_SAMPLES):
+    for start in range(0, len(reference), BLOCK_SAMPLES):
         block = reference[start:start + BLOCK_SAMPLES]
         if np.sqrt(np.mean(block ** 2)) < BLOCK_FLOOR_RMS:
             continue
