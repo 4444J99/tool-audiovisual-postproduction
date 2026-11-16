@@ -14,9 +14,12 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -313,14 +316,62 @@ def sealed_problems(recorded, manifest):
     return problems
 
 
+def refuse_unsafe_output(out):
+    """Refuse an output that is, or contains, the working directory, the repository, the home directory or the filesystem root."""
+    resolved = Path(os.path.realpath(out))
+    guarded = {"the current directory": Path.cwd(), "the repository": ROOT, "the home directory": Path.home()}
+    if resolved == Path(resolved.anchor):
+        raise DemoError([f"{out} is the filesystem root; choose a new directory"])
+    for name, path in guarded.items():
+        path = Path(os.path.realpath(path))
+        if resolved == path or resolved in path.parents:
+            raise DemoError([f"{out} is or contains {name}; choose a new directory"])
+
+
+def remove_tree(path):
+    """Best-effort removal that also clears read-only directories; never raises."""
+    def unlock(function, target, _):
+        try:
+            os.chmod(os.path.dirname(target), stat.S_IRWXU)
+            os.chmod(target, stat.S_IRWXU)
+            function(target)
+        except OSError:
+            pass
+    shutil.rmtree(path, onerror=unlock)
+
+
+def build_demo(build, tools, delivery, qc_spec):
+    (build / MARKER).write_text(SCHEMA)
+    try:
+        manifest = pc.run_chain(build, delivery=delivery or pc.DEFAULT_DELIVERY, qc_spec=qc_spec)
+    except pc.ChainError as error:
+        raise DemoError(error.errors) from error
+    problems = pc.verify_chain(build) + pc.cross_checks(build, delivery, qc_spec)
+    if problems:
+        raise DemoError(problems)
+    ledger = json.loads((build / "plan" / "final-ledger.json").read_text())
+    burnin = json.loads((build / "captions" / "burnin-report.json").read_text())
+    mux(build, ledger, burnin, tools[0])
+    checks = judge_mp4(build, ledger, burnin, tools)
+    report = {"schema": SCHEMA, "ok": all(c["ok"] for c in checks), "checks": checks}
+    (build / DEMO_QC).write_text(pc.dumps(report))
+    if not report["ok"]:
+        raise DemoError([f"{c['id']}: {c['detail']}" for c in checks if not c["ok"]])
+    hashes = collect_hashes(build, manifest, ffmpeg_version(tools[0]))
+    (build / HASHES).write_text(pc.dumps(hashes))
+    return hashes
+
+
 def run_demo(out, delivery=None, qc_spec=None):
     out = Path(out)
-    tools = ffmpeg_tools()
     if out.is_symlink():
         raise DemoError([f"{out} is a symbolic link; choose a real directory"])
+    refuse_unsafe_output(out)
+    tools = ffmpeg_tools()
     if out.exists() and not out.is_dir():
         raise DemoError([f"{out} exists and is not a directory; choose a new directory"])
-    if out.exists() and any(out.iterdir()):
+    replacing = out.exists() and any(out.iterdir())
+    if replacing:
         marker = out / MARKER
         try:
             marked = marker.is_file() and not marker.is_symlink() and marker.read_text() == SCHEMA
@@ -328,26 +379,30 @@ def run_demo(out, delivery=None, qc_spec=None):
             marked = False
         if not marked:
             raise DemoError([f"{out} is not empty and is not a previous demo output; choose a new directory"])
-        shutil.rmtree(out)
-    out.mkdir(parents=True, exist_ok=True)
-    (out / MARKER).write_text(SCHEMA)
+    # Build beside the output, swap in only once everything has passed, so a failure leaves the old output as it was.
+    out.parent.mkdir(parents=True, exist_ok=True)
+    build = Path(tempfile.mkdtemp(prefix=f".{out.name}.build-", dir=out.parent))
+    build.chmod(0o755)
+    retired = None
     try:
-        manifest = pc.run_chain(out, delivery=delivery or pc.DEFAULT_DELIVERY, qc_spec=qc_spec)
-    except pc.ChainError as error:
-        raise DemoError(error.errors) from error
-    problems = pc.verify_chain(out) + pc.cross_checks(out, delivery, qc_spec)
-    if problems:
-        raise DemoError(problems)
-    ledger = json.loads((out / "plan" / "final-ledger.json").read_text())
-    burnin = json.loads((out / "captions" / "burnin-report.json").read_text())
-    mux(out, ledger, burnin, tools[0])
-    checks = judge_mp4(out, ledger, burnin, tools)
-    report = {"schema": SCHEMA, "ok": all(c["ok"] for c in checks), "checks": checks}
-    (out / DEMO_QC).write_text(pc.dumps(report))
-    if not report["ok"]:
-        raise DemoError([f"{c['id']}: {c['detail']}" for c in checks if not c["ok"]])
-    hashes = collect_hashes(out, manifest, ffmpeg_version(tools[0]))
-    (out / HASHES).write_text(pc.dumps(hashes))
+        hashes = build_demo(build, tools, delivery, qc_spec)
+        if replacing:
+            retired = Path(tempfile.mkdtemp(prefix=f".{out.name}.old-", dir=out.parent))
+            retired.rmdir()
+            os.rename(out, retired)
+            try:
+                os.rename(build, out)
+            except OSError:
+                os.rename(retired, out)
+                retired = None
+                raise
+        else:
+            os.rename(build, out)
+    finally:
+        if build.exists():
+            remove_tree(build)
+    if retired is not None:
+        remove_tree(retired)
     return hashes
 
 

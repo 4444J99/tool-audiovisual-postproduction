@@ -9,7 +9,7 @@ python tools/short_film_demo.py run --output outputs/short-film-demo
 python tools/short_film_demo.py verify --output outputs/short-film-demo
 ```
 
-Needs NumPy and SciPy (the chain's loudness stage) and an ffmpeg with `libx264` and `aac`. `outputs/` is git-ignored, so the output is scratch. `--delivery` (a preset or spec JSON) and `--qc-spec` pass through to the chain. A non-empty `--output` is refused and left alone unless it holds the `.short-film-demo` marker the demo writes first (so even a run that failed part-way can be rerun into the same directory); a marked directory is replaced.
+Needs NumPy and SciPy (the chain's loudness stage) and an ffmpeg with `libx264` and `aac`. `outputs/` is git-ignored, so the output is scratch. `--delivery` (a preset or spec JSON) and `--qc-spec` pass through to the chain. A non-empty `--output` is refused and left alone unless it holds the `.short-film-demo` marker. The demo builds in a hidden sibling directory and swaps it in with a rename only once the chain, the mp4 and every check have passed, so a failed run leaves an earlier output exactly as it was (and a first run leaves nothing at the path); a marked directory is replaced by that swap, never deleted first. An `--output` that is or contains the working directory, the repository, the home directory or the filesystem root is refused up front (exit 2, JSON) with nothing deleted.
 
 ## What it writes (`outputs/short-film-demo/`)
 
