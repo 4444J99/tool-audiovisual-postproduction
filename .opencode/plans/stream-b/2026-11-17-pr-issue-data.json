@@ -1,0 +1,22 @@
+{
+ "repo": "tool-audiovisual-postproduction",
+ "slug": "4444J99/tool-audiovisual-postproduction",
+ "archived_upstream": false,
+ "prs": {
+  "prs_total": 80,
+  "prs_merged": 76,
+  "prs_open": 0,
+  "prs_closed_unmerged": 4
+ },
+ "closed_classes": {
+  "abandoned": 4
+ },
+ "supersession_links": [],
+ "open_pr_actions": [],
+ "issues": {
+  "total": 121,
+  "open": 10,
+  "stale": 0
+ },
+ "generated": "2026-11-17"
+}
