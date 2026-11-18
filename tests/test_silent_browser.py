@@ -16,7 +16,8 @@ import unittest
 import wave
 from pathlib import Path
 
-from tools.silent_browser import (INIT_SCRIPT_PATH, MUTE_ARGS, init_script, silence_browser, silence_context, silent_args, silent_launch,
+from tools.silent_browser import (INIT_SCRIPT_PATH, MUTE_ARGS, assert_no_closed_shadow_roots, init_script,
+                                  silence_browser, silence_context, silent_args, silent_launch,
                                   silent_launch_persistent_context)
 
 REPO = Path(__file__).resolve().parents[1]
@@ -41,6 +42,9 @@ def silent_wav_uri() -> str:
 
 def page_uri(body: str) -> str:
     html = f'<!doctype html><meta charset="utf-8"><body>{body}</body>'
+    # Pre-flight (AV #186): a closed declarative shadow root would hide media no page script can reach, so the
+    # page is refused here, before any browser launches, instead of going audible.
+    assert_no_closed_shadow_roots(html, 'page_uri fixture')
     return 'data:text/html;base64,' + base64.b64encode(html.encode('utf-8')).decode('ascii')
 
 
@@ -114,6 +118,22 @@ class SilentLaunchContractTests(unittest.TestCase):
         self.assertEqual(silent_args('webkit', ['--x']), ['--x'])
         self.assertEqual(silent_args('firefox'), [])
 
+    def test_firefox_launch_forwards_caller_prefs_and_injects_no_engine_pref(self):
+        # AV #186: Playwright cannot set the float pref media.volume_scale through firefox_user_prefs — a number
+        # breaks every Firefox launch (NS_ERROR_UNEXPECTED from setIntPref; verified live at Playwright 1.57.0 /
+        # Firefox 144.0.2) and a string is ignored by the float getter — so no pref is injected, ever.
+        engine = FakeEngine('firefox')
+        silent_launch(engine, headless=True, firefox_user_prefs={'layout.css.devPixelsPerPx': '2.0'})
+        self.assertEqual(engine.launched['firefox_user_prefs'], {'layout.css.devPixelsPerPx': '2.0'})
+        self.assertNotIn('media.volume_scale', engine.launched.get('firefox_user_prefs', {}))
+        engine = FakeEngine('firefox')
+        silent_launch(engine, headless=True)
+        self.assertNotIn('firefox_user_prefs', engine.launched)
+        engine = FakeEngine('firefox')
+        silent_launch_persistent_context(engine, '/profile', firefox_user_prefs={'foo': 1})
+        self.assertEqual(engine.launched['firefox_user_prefs'], {'foo': 1})
+        self.assertNotIn('media.volume_scale', engine.launched['firefox_user_prefs'])
+
     def test_every_context_and_page_gets_the_init_script(self):
         browser = silent_launch(FakeEngine('webkit'))
         context = browser.new_context()
@@ -155,6 +175,41 @@ class NodeHelperTests(unittest.TestCase):
         completed = subprocess.run([node, '--test', str(REPO / 'tests/silent-browser.test.mjs')], check=False,
                                    capture_output=True, text=True, cwd=REPO)
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+
+class ClosedShadowRootPreflightTests(unittest.TestCase):
+    """AV #186: a closed declarative shadow root hides media no page script can reach, so the page is refused
+    before any browser launches, naming the page. Open roots keep passing — the init script pins them."""
+
+    def test_closed_roots_are_refused_naming_the_page(self):
+        for html in ('<template shadowrootmode="closed"><audio src="x"></audio></template>',
+                     "<template shadowrootmode='closed'><audio src='x'></audio></template>",
+                     '<template shadowrootmode=closed><audio src="x"></audio></template>',
+                     '<template  shadowrootmode  =  "closed"  ><audio src="x"></audio></template>',
+                     '<TEMPLATE SHADOWROOTMODE="CLOSED"><audio src="x"></audio></TEMPLATE>'):
+            with self.assertRaisesRegex(ValueError, 'closed declarative shadow root'):
+                assert_no_closed_shadow_roots(html, 'web/fx/index.html')
+            with self.assertRaisesRegex(ValueError, 'web/fx/index.html'):
+                assert_no_closed_shadow_roots(html, 'web/fx/index.html')
+
+    def test_open_roots_and_plain_pages_pass(self):
+        for html in ('<template shadowrootmode="open"><audio src="x"></audio></template>',
+                     "<template shadowrootmode='open'><audio src='x'></audio></template>",
+                     '<audio src="x"></audio>', '', '<template><audio src="x"></audio></template>'):
+            assert_no_closed_shadow_roots(html, 'web/fx/index.html')
+
+    def test_every_page_the_suite_loads_is_preflighted(self):
+        with self.assertRaisesRegex(ValueError, 'page_uri fixture'):
+            page_uri('<template shadowrootmode="closed"><audio src="x"></audio></template>')
+
+    def test_no_html_page_in_the_repo_uses_a_closed_declarative_shadow_root(self):
+        skipped = {'.git', 'node_modules', '.venv', 'venv', '__pycache__'}
+        pages = [p for p in sorted(REPO.rglob('*.html'))
+                 if not (set(p.relative_to(REPO).parts) & skipped)]
+        self.assertGreater(len(pages), 0, 'the scan must actually walk the tree')
+        for page in pages:
+            assert_no_closed_shadow_roots(page.read_text(encoding='utf-8'),
+                                           str(page.relative_to(REPO)))
 
 
 PAGE = page_uri(f'''

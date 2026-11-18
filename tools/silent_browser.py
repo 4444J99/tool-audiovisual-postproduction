@@ -7,17 +7,46 @@ every launch passes through, and ``tests/test_silent_browser_lint.py`` fails whe
 * Every engine gets ``silent-init.js`` in every context (``new_context`` and ``new_page``, which makes its own
   context), so media elements are pinned muted with volume 0 and every realtime AudioContext destination connection
   goes through a gain-0 sink. The script is engine-agnostic: WebKit has no mute flag, so the script is its mute.
+* Firefox has no engine mute either, and none can be injected: Playwright cannot set the float pref
+  ``media.volume_scale`` through ``firefox_user_prefs`` — a number breaks every Firefox launch (juggler calls
+  ``setIntPref`` for any number, the pref is a float, ``NS_ERROR_UNEXPECTED``; verified live at Playwright
+  1.57.0 / Firefox 144.0.2, and the same signature at 1.62.1 / Firefox 153 in timed-text #89) and a string
+  is stored as a string and ignored by the float getter. Caller prefs are forwarded unchanged and no engine
+  pref is injected; Firefox relies on the init script alone.
+* WebKit cannot be muted at the engine either, and the init script cannot reach media parsed inside a closed
+  declarative shadow root, so such a page is refused before any browser launches: call
+  ``assert_no_closed_shadow_roots`` on a check page's HTML (the test harness does this for every page it
+  loads, and a repo-wide test scans every ``*.html`` file) and the run fails loudly, naming the page.
 
 Nothing here touches the system volume or the output device.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
 HERE = Path(__file__).resolve().parent
 INIT_SCRIPT_PATH = HERE / 'silent-init.js'
 MUTE_ARGS = ('--mute-audio',)
+
+# A closed declarative shadow root (<template shadowrootmode="closed">, quoting and
+# whitespace variants, any case) hides media no page script can reach. The init script
+# cannot pin it, so the page is refused at pre-flight instead of going audible.
+CLOSED_SHADOW_ROOT_RE = re.compile(
+    r"""shadowrootmode\s*=\s*(?:"closed"|'closed'|closed(?=[\s/>]))""", re.IGNORECASE)
+
+
+def assert_no_closed_shadow_roots(html: str, source: str = 'page') -> None:
+    """Refuse a check page whose HTML parses media into a closed declarative shadow root.
+
+    The init script cannot reach inside such a root, so letting the page load would silently
+    violate the silence rule. Raises ``ValueError`` naming the page; open roots pass.
+    """
+    if CLOSED_SHADOW_ROOT_RE.search(html or ''):
+        raise ValueError(
+            f'{source}: closed declarative shadow root (shadowrootmode="closed") — '
+            'media inside it cannot be pinned, refusing the page')
 
 
 def init_script() -> str:
