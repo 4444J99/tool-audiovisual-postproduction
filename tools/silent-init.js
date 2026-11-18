@@ -11,7 +11,11 @@
  *  - speechSynthesis utterances are spoken at volume 0, and an utterance whose text carries markup (SSML) is spoken as empty.
  *
  * Limit: media parsed inside a closed declarative shadow root (<template shadowrootmode="closed">) has no handle a page
- * script can reach, so it cannot be pinned here. Chromium covers it with --mute-audio; WebKit and Firefox do not.
+ * script can reach, so it cannot be pinned here. Chromium covers it with --mute-audio. WebKit refuses such a page
+ * at pre-flight (assert_no_closed_shadow_roots / assertNoClosedShadowRoots), so a closed root never reaches a
+ * browser unnoticed. Firefox has no engine mute: Playwright cannot set the float pref media.volume_scale via
+ * firefoxUserPrefs (a number breaks every launch with NS_ERROR_UNEXPECTED from setIntPref; a string is ignored
+ * by the float getter), so Firefox relies on this script alone and no pref is injected.
  */
 (() => {
   'use strict';

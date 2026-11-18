@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
-import {silentLaunch} from './silent-browser.mjs';
+import {silentLaunch, assertNoClosedShadowRoots} from './silent-browser.mjs';
 
 const require=createRequire(import.meta.url);
 const {webkit}=require(process.env.CODEX_PRIMARY_RUNTIME_NODE_MODULES?process.env.CODEX_PRIMARY_RUNTIME_NODE_MODULES+'/playwright':'playwright');
@@ -94,6 +94,10 @@ async function check(name,fn){
 }
 
 try{
+  // AV #186 pre-flight: a closed declarative shadow root would hide media no page script can reach, so the
+  // served FX page is refused here, before any browser launches, instead of going audible.
+  const fxPage=path.join(root,'fx/index.html');
+  if(fs.existsSync(fxPage))assertNoClosedShadowRoots(fs.readFileSync(fxPage,'utf8'),fxPage);
   browser=await silentLaunch(webkit,{headless:true,...(process.env.PLAYWRIGHT_WEBKIT_EXECUTABLE?{executablePath:process.env.PLAYWRIGHT_WEBKIT_EXECUTABLE}:{})});
   await check('Cancel a pending Play; later worker completion never starts audio',async result=>{
     const {page,context,pageErrors}=await fresh();

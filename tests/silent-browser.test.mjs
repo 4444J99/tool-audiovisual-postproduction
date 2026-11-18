@@ -3,7 +3,7 @@
 // tests/test_silent_browser.py against a real browser.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {silentLaunch, silentLaunchPersistentContext, silentArgs, INIT_SCRIPT_PATH, initScript} from '../tools/silent-browser.mjs';
+import {silentLaunch, silentLaunchPersistentContext, silentArgs, assertNoClosedShadowRoots, INIT_SCRIPT_PATH, initScript} from '../tools/silent-browser.mjs';
 
 function fakeEngine(name) {
   const scripts = [];
@@ -26,6 +26,41 @@ test('chromium gets --mute-audio merged with the caller arguments, once', async 
 test('webkit and firefox have no flag and rely on the init script', async () => {
   assert.deepEqual(silentArgs('webkit', ['--x']), ['--x']);
   assert.deepEqual(silentArgs('firefox'), []);
+});
+
+test('firefox launch forwards caller prefs and injects no engine pref', async () => {
+  // AV #186: Playwright cannot set the float pref media.volume_scale through firefoxUserPrefs — a number breaks
+  // every Firefox launch (NS_ERROR_UNEXPECTED from setIntPref; verified live at Playwright 1.57.0 / Firefox
+  // 144.0.2) and a string is ignored by the float getter — so no pref is injected, ever.
+  const engine = fakeEngine('firefox');
+  await silentLaunch(engine, {headless: true, firefoxUserPrefs: {'layout.css.devPixelsPerPx': '2.0'}});
+  assert.deepEqual(engine.launched.firefoxUserPrefs, {'layout.css.devPixelsPerPx': '2.0'});
+  assert.ok(!('media.volume_scale' in engine.launched.firefoxUserPrefs));
+  const bare = fakeEngine('firefox');
+  await silentLaunch(bare, {headless: true});
+  assert.ok(!('firefoxUserPrefs' in bare.launched));
+  const persistent = fakeEngine('firefox');
+  await silentLaunchPersistentContext(persistent, '/profile', {firefoxUserPrefs: {foo: 1}});
+  assert.deepEqual(persistent.launched.firefoxUserPrefs, {foo: 1});
+  assert.ok(!('media.volume_scale' in persistent.launched.firefoxUserPrefs));
+});
+
+test('a closed declarative shadow root is refused, naming the page; open roots pass', () => {
+  for (const html of [
+    '<template shadowrootmode="closed"><audio src="x"></audio></template>',
+    "<template shadowrootmode='closed'><audio src='x'></audio></template>",
+    '<template shadowrootmode=closed><audio src="x"></audio></template>',
+    '<template  shadowrootmode  =  "closed"  ><audio src="x"></audio></template>',
+    '<TEMPLATE SHADOWROOTMODE="CLOSED"><audio src="x"></audio></TEMPLATE>',
+  ]) {
+    assert.throws(() => assertNoClosedShadowRoots(html, 'web/fx/index.html'), /closed declarative shadow root/);
+    assert.throws(() => assertNoClosedShadowRoots(html, 'web/fx/index.html'), /web\/fx\/index\.html/);
+  }
+  for (const html of [
+    '<template shadowrootmode="open"><audio src="x"></audio></template>',
+    "<template shadowrootmode='open'><audio src='x'></audio></template>",
+    '<audio src="x"></audio>', '', '<template><audio src="x"></audio></template>',
+  ]) assertNoClosedShadowRoots(html, 'web/fx/index.html');
 });
 
 test('every context, page and persistent context gets the init script', async () => {
